@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit tests (widget logic + make-switcher parity)
+        run: npm test
+
+      - name: Install MyST
+        run: npm install -g mystmd@1.10.1
+
+      - name: Build docs (loads the plugin, exercises the self-esm)
+        run: |
+          cd docs
+          myst build --html

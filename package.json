@@ -1,0 +1,19 @@
+{
+  "name": "myst-version-switcher-plugin",
+  "version": "0.1.0",
+  "description": "A pydata-style version switcher for MyST, as a single anywidget plugin, plus a CI action to generate switcher.json.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DiamondLightSource/myst-version-switcher-plugin.git"
+  },
+  "scripts": {
+    "test": "node test/test-url-logic.mjs && node test/test-make-switcher.mjs"
+  },
+  "files": [
+    "plugins/version-switcher/version-switcher.mjs",
+    "switcher/make-switcher.mjs",
+    "switcher/action.yml"
+  ]
+}

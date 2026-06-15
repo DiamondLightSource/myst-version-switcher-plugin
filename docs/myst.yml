@@ -1,0 +1,15 @@
+version: 1
+project:
+  title: myst-version-switcher-plugin
+  github: https://github.com/DiamondLightSource/myst-version-switcher-plugin
+  # Develop against the local plugin file. The directive's esm self-reference
+  # makes MyST localize this same file as the anywidget runtime.
+  plugins:
+    - ../plugins/version-switcher/version-switcher.mjs
+  toc:
+    - file: index.md
+    - file: ../plugins/version-switcher/example.md
+site:
+  template: book-theme
+  parts:
+    navbar_end: navbar_end.md

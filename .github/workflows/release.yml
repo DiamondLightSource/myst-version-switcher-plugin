@@ -1,0 +1,35 @@
+name: Release
+
+# On a version tag, run the tests then publish a GitHub Release whose asset is the
+# single plugin module. Consumers reference it as:
+#   https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases/download/<tag>/version-switcher.mjs
+# The `switcher` composite action is consumed via `uses: …/switcher@<tag>` (the
+# repo tree at the tag), so it needs no release asset.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Publish release with the plugin module
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            plugins/version-switcher/version-switcher.mjs
