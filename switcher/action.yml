@@ -1,46 +1,30 @@
-name: Stage versioned docs + switcher.json
+name: Write switcher.json
 description: >-
-  Move a built MyST HTML site into a versioned directory under the GitHub Pages
-  root and (re)generate the pydata switcher.json from the deployed versions.
-  Use after `myst build --html`, before the gh-pages publish step.
+  Generate the pydata switcher.json from the versions deployed on gh-pages plus
+  the repo's tags. Run it after staging the versioned build and before the
+  gh-pages publish step (it only writes the file — it does not move or fetch
+  anything). Requires the repository checked out with tags and the
+  origin/gh-pages tree available (e.g. actions/checkout with fetch-depth: 0) and
+  Node on PATH.
 
 inputs:
   version:
-    description: Sanitised ref/version name — the directory created under the Pages root.
+    description: Sanitised ref/version name — the build being added to the list.
     required: true
   repo:
     description: "org/repo, e.g. ${{ github.repository }} (used to build version URLs)."
     required: true
-  pages_dir:
-    description: Directory that gets published to gh-pages (the Pages root).
+  output:
+    description: Path to write switcher.json to.
     required: false
-    default: .github/pages
-  html_dir:
-    description: Built HTML directory to stage (the `myst build --html` output).
-    required: false
-    default: docs/_build/html
+    default: .github/pages/switcher.json
 
 runs:
   using: composite
   steps:
-    # Supply our own tag + gh-pages tree, so consumers need not set fetch-depth: 0.
-    - name: Fetch tags and gh-pages for the version list
-      shell: bash
-      run: |
-        git fetch --tags --depth=1 origin \
-          '+refs/heads/gh-pages:refs/remotes/origin/gh-pages' \
-          || echo "no gh-pages branch yet (first deploy)"
-
-    - name: Stage the versioned build
-      shell: bash
-      run: |
-        mkdir -p "${{ inputs.pages_dir }}"
-        mv "${{ inputs.html_dir }}" "${{ inputs.pages_dir }}/${{ inputs.version }}"
-
-    - name: Write switcher.json
-      shell: bash
+    - shell: bash
       run: |
         node "$GITHUB_ACTION_PATH/make-switcher.mjs" \
           --add "${{ inputs.version }}" \
           "${{ inputs.repo }}" \
-          "${{ inputs.pages_dir }}/switcher.json"
+          "${{ inputs.output }}"

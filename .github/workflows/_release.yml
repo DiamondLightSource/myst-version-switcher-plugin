@@ -1,0 +1,23 @@
+on:
+  workflow_call:
+
+# Publish the single plugin module as a release asset. Consumers reference it as
+#   …/releases/download/<tag>/version-switcher.mjs
+# The `switcher` composite action is consumed via `uses: …/switcher@<tag>` (the
+# repo tree at the tag), so it needs no asset.
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create GitHub Release
+        # We pin to the SHA, not the tag, for security reasons.
+        # https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#using-third-party-actions
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
+        with:
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
+          files: plugins/version-switcher/version-switcher.mjs
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

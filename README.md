@@ -23,7 +23,8 @@ switcher/                    # DLS producer (NOT a MyST plugin)
   make-switcher.mjs          #   dependency-free Node switcher generator (git-derived)
 test/                        # node unit tests (widget logic + make-switcher parity)
 docs/                        # this repo's own MyST docs, dogfooding the plugin
-.github/workflows/           # ci.yml (tests + docs build), release.yml (tag → asset)
+.github/workflows/           # ci.yml orchestrator -> reusable _test/_docs/_release.yml
+                             #   (docs part mirrors python-copier-template-example)
 ```
 
 ## Using it in another repo
@@ -50,17 +51,25 @@ site:
 ```
 
 ```yaml
-# .github/workflows/docs.yml — after `myst build --html`, before the gh-pages publish
+# .github/workflows/docs.yml (mirrors python-copier-template-example _docs.yml)
+- uses: actions/checkout@v5
+  with:
+    fetch-depth: 0            # tags + origin/gh-pages, for the version list
+# … build: `cd docs && myst build --html` (BASE_URL=/REPO/$DOCS_VERSION) …
+- run: mv docs/_build/html .github/pages/$DOCS_VERSION
 - uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>
   with:
     version: ${{ env.DOCS_VERSION }}
     repo: ${{ github.repository }}
-# then publish `pages_dir` (default .github/pages) with peaceiris keep_files: true
+    # output defaults to .github/pages/switcher.json
+- uses: peaceiris/actions-gh-pages@v4        # publish_dir: .github/pages, keep_files: true
 ```
 
-The action fetches its own tags + `gh-pages` tree, so the consumer's `checkout`
-needs **no** `fetch-depth: 0`. No `esm` to configure: the directive points the
-widget back at its own module file, which MyST localizes into your site.
+The `switcher` action **only writes `switcher.json`** — staging the versioned dir
+(`mv`) and publishing stay in the workflow, matching the template's step layout. It
+reads tags + `origin/gh-pages`, so the consumer's `checkout` uses `fetch-depth: 0`.
+No `esm` to configure: the directive points the widget back at its own module file,
+which MyST localizes into your site.
 
 ## Developing
 
@@ -76,10 +85,11 @@ forwarded port in a real browser and hard-reload.
 
 ## Releasing
 
-Push a `vX.Y.Z` tag. `release.yml` runs the tests and publishes a GitHub Release
-whose asset is `version-switcher.mjs` (the plugin URL consumers pin). The
-`switcher` action is consumed from the repo tree at the same tag, so the tag is the
-single version for both halves.
+Push a `vX.Y.Z` tag. `ci.yml` runs the tests and the docs build/deploy, then (on a
+tag) `_release.yml` publishes a GitHub Release whose asset is `version-switcher.mjs`
+(the plugin URL consumers pin). The `switcher` action is consumed from the repo tree
+at the same tag, so the tag is the single version for both halves. This repo's own
+docs deploy to gh-pages on `main` and on tags, dogfooding the action.
 
 ## Upstreaming
 

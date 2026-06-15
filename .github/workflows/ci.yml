@@ -2,25 +2,24 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+    tags:
+      - '*'
   pull_request:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+    uses: ./.github/workflows/_test.yml
 
-      - name: Unit tests (widget logic + make-switcher parity)
-        run: npm test
+  docs:
+    uses: ./.github/workflows/_docs.yml
+    permissions:
+      contents: write
 
-      - name: Install MyST
-        run: npm install -g mystmd@1.10.1
-
-      - name: Build docs (loads the plugin, exercises the self-esm)
-        run: |
-          cd docs
-          myst build --html
+  release:
+    needs: [test, docs]
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/_release.yml
+    permissions:
+      contents: write
