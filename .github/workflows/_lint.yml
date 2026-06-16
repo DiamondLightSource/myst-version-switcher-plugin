@@ -1,0 +1,15 @@
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run hooks on all files
+        run: npx prek run --all-files --show-diff-on-failure
+

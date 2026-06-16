@@ -20,11 +20,6 @@ jobs:
           # Need tags (for the switcher version list) and origin/gh-pages.
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Install dependencies
         run: npm ci
 
@@ -38,19 +33,19 @@ jobs:
           BASE_URL: /${{ github.event.repository.name }}/${{ env.DOCS_VERSION }}
         run: npm run docs
 
-      - name: Stage built docs
-        run: |
-          mkdir -p $RUNNER_TEMP/_staging/${{ env.DOCS_VERSION }}
-          cp -r docs/_build/html/. $RUNNER_TEMP/_staging/${{ env.DOCS_VERSION }}
+      - name: Prepare html pages for artifact upload
+        run: cp -r docs/_build/html $RUNNER_TEMP/artifact/html
 
       - name: Upload built docs artifact
         uses: actions/upload-artifact@v4
         with:
           name: docs
-          path: ${{ runner.temp }}/_staging/${{ env.DOCS_VERSION }}
+          path: ${{ runner.temp }}/artifact
 
       - name: Copy committed pages into staging
-        run: cp -r .github/pages/. $RUNNER_TEMP/_staging/
+        run: |
+          cp -r .github/pages/. $RUNNER_TEMP/_staging/
+          cp -r docs/_build/html $RUNNER_TEMP/_staging/${{ env.DOCS_VERSION }}
 
       - name: Write switcher.json
         uses: ./switcher
