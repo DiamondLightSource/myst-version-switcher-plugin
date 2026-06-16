@@ -91,7 +91,7 @@ Wire it into your docs workflow after staging the built HTML and before publishi
   with:
     version: ${{ env.DOCS_VERSION }}
     repo: ${{ github.repository }}
-    # output defaults to .github/pages/switcher.json
+    output: .github/pages/switcher.json   # where to write it (required)
 - uses: peaceiris/actions-gh-pages@v4
   with:
     publish_dir: .github/pages

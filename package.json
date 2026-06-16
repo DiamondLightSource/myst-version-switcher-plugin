@@ -1,26 +1,26 @@
 {
-  "name": "myst-version-switcher-plugin",
-  "private": true,
-  "description": "A pydata-style version switcher for MyST, as a single anywidget plugin, plus a CI action to generate switcher.json.",
-  "type": "module",
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/DiamondLightSource/myst-version-switcher-plugin.git"
-  },
-  "scripts": {
-    "test": "node test/test-url-logic.mjs && node test/test-make-switcher.mjs",
-    "docs": "cd docs && myst build --html",
-    "docs-dev": "cd docs && myst start"
-  },
-  "files": [
-    "plugins/version-switcher/version-switcher.mjs",
-    "switcher/make-switcher.mjs",
-    "switcher/action.yml"
-  ],
-  "devDependencies": {
-    "@biomejs/biome": "^1.9.0",
-    "@j178/prek": "^0.3.0",
-    "mystmd": "1.10.1"
-  }
+	"name": "myst-version-switcher-plugin",
+	"private": true,
+	"description": "A pydata-style version switcher for MyST, as a single anywidget plugin, plus a CI action to generate switcher.json.",
+	"type": "module",
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/DiamondLightSource/myst-version-switcher-plugin.git"
+	},
+	"scripts": {
+		"test": "node test/test-url-logic.mjs && node test/test-make-switcher.mjs",
+		"docs": "cd docs && myst build --html",
+		"docs-dev": "cd docs && myst start"
+	},
+	"files": [
+		"plugins/version-switcher/version-switcher.mjs",
+		"switcher/make-switcher.mjs",
+		"switcher/action.yml"
+	],
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.0",
+		"@j178/prek": "^0.3.0",
+		"mystmd": "1.10.1"
+	}
 }

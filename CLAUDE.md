@@ -30,7 +30,9 @@ the action is consumed from the repo tree at the same tag.
 ## Key design decisions
 
 ### `switcher` action is write-only
-The action writes `.github/pages/switcher.json` and nothing else. It does NOT `mv`
+The action writes `switcher.json` to the caller-supplied `output` path and nothing
+else (the consuming docs use `.github/pages/switcher.json`; this repo's own CI
+writes to `_staging/switcher.json`). It does NOT `mv`
 the built docs, does NOT `git fetch`. Staging the versioned dir (`mv`) and
 `fetch-depth: 0` (for tags + `origin/gh-pages`) are the caller's responsibility
 (pattern lifted from `python-copier-template-example`).
@@ -128,6 +130,7 @@ site:
   with:
     version: ${{ env.DOCS_VERSION }}
     repo: ${{ github.repository }}
+    output: .github/pages/switcher.json   # required: where to write it
 - uses: peaceiris/actions-gh-pages@v4
   with:
     publish_dir: .github/pages
