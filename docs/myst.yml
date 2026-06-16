@@ -10,5 +10,7 @@ project:
     - file: index.md
 site:
   template: book-theme
+  options:
+    logo: images/dls-logo.svg
   parts:
     navbar_end: navbar_end.md
