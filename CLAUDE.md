@@ -73,7 +73,7 @@ Mirrors `python-copier-template-example` as closely as possible:
 ```bash
 npm test                    # run the test suite
 npm run docs                # build docs (same command CI uses)
-cd docs && myst start       # live-preview docs with the plugin loaded from local plugins/
+npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
 ```
 
 `docs/myst.yml` loads the plugin from `../plugins/version-switcher/version-switcher.mjs`

@@ -38,9 +38,8 @@ site:
 :::
 ```
 
-The single `.mjs` is both the build-time MyST plugin and the browser runtime.
-The directive points the widget's `esm` back at this file via `import.meta.url`,
-so MyST localises it into your site — there is no second asset to host.
+The single `.mjs` is both the build-time MyST plugin and the browser runtime —
+MyST localises it into your site and there is no second asset to host.
 
 ## Directive options
 
@@ -50,7 +49,6 @@ so MyST localises it into your site — there is no second asset to host.
 | `version-match` | no | auto-detect from URL | force the "current" version |
 | `preserve-path` | no | `true` | carry the page path across versions vs go to the version root |
 | `probe-target` | no | `true` | HEAD the target page and fall back to the version root if it 404s; set `false` for cross-origin switchers where the probe is CORS-blocked |
-| `esm` | no | self-reference | dev override pointing at a locally served copy of this module |
 | `class` | no | — | extra container classes |
 
 ## Behaviour

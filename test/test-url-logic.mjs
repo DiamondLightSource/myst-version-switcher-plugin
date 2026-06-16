@@ -209,20 +209,18 @@ assert.ok(node.esm && typeof node.esm === 'string'); // self-referential path
 assert.ok(node.id && typeof node.id === 'string');
 ok('plugin directive emits a valid anywidget node with a self-referential esm');
 
-// esm override (dev) + boolean options flow through
+// boolean options flow through
 const nodes2 = dir.run({
   options: {
     'json-url': '/widget/switcher.json',
-    esm: 'http://localhost:3200/version-switcher.mjs',
     'preserve-path': false,
     'probe-target': false,
     'version-match': 'dev',
   },
 });
-assert.equal(nodes2[0].esm, 'http://localhost:3200/version-switcher.mjs');
 assert.equal(nodes2[0].model.preserve_path, false);
 assert.equal(nodes2[0].model.probe_target, false);
 assert.equal(nodes2[0].model.version_match, 'dev');
-ok('plugin directive honours esm / preserve-path / probe-target / version-match options');
+ok('plugin directive honours preserve-path / probe-target / version-match options');
 
 console.log(`\nAll ${passed} checks passed.`);

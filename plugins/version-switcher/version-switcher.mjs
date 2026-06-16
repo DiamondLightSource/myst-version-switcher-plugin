@@ -360,12 +360,6 @@ const versionSwitcherDirective = {
         + '(default: true). Set false for cross-origin switchers where the probe '
         + 'is CORS-blocked.',
     },
-    esm: {
-      type: String,
-      required: false,
-      doc: 'Dev override for the anywidget module URL/path (e.g. a locally '
-        + 'served copy). Defaults to a self-reference to this plugin file.',
-    },
     class: {
       type: String,
       required: false,
@@ -377,7 +371,7 @@ const versionSwitcherDirective = {
     // Point the anywidget at this very file, relative to the document being built,
     // unless a dev override is supplied.
     const fromDir = String((vfile && vfile.path) || '').replace(/\/[^/]*$/, '');
-    const esm = opts.esm ?? relativePath(fromDir, PLUGIN_PATH);
+    const esm = relativePath(fromDir, PLUGIN_PATH);
     const model = {
       json_url: opts['json-url'],
       version_match: opts['version-match'],

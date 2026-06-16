@@ -18,7 +18,8 @@ differently:
 
 ```bash
 npm test                    # run the test suite
-cd docs && myst start       # live-preview docs with the plugin loaded from local plugins/
+npm run docs                # build docs (same command CI uses)
+npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
 ```
 
 `docs/myst.yml` loads the plugin from the local `plugins/` path (not a release
