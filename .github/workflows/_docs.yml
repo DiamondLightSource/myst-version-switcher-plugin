@@ -33,8 +33,15 @@ jobs:
           BASE_URL: /${{ github.event.repository.name }}/${{ env.DOCS_VERSION }}
         run: npm run docs
 
-      - name: Prepare html pages for artifact upload
-        run: cp -r docs/_build/html $RUNNER_TEMP/artifact/html
+      # Two layouts from the one build: `artifact/html` for the uploaded artifact
+      # (downstream relies on the `html` dir name), and `pages/<version>` for
+      # the gh-pages publish tree, into which the action also writes switcher.json
+      # and the root redirect.
+      - name: Stage built docs
+        run: |
+          mkdir -p $RUNNER_TEMP/artifact $RUNNER_TEMP/pages
+          cp -r docs/_build/html $RUNNER_TEMP/artifact/html
+          cp -r docs/_build/html $RUNNER_TEMP/pages/${{ env.DOCS_VERSION }}
 
       - name: Upload built docs artifact
         uses: actions/upload-artifact@v4
@@ -42,17 +49,12 @@ jobs:
           name: docs
           path: ${{ runner.temp }}/artifact
 
-      - name: Copy committed pages into staging
-        run: |
-          cp -r .github/pages/. $RUNNER_TEMP/_staging/
-          cp -r docs/_build/html $RUNNER_TEMP/_staging/${{ env.DOCS_VERSION }}
-
-      - name: Write switcher.json
+      - name: Write switcher.json + redirect
         uses: ./switcher
         with:
           version: ${{ env.DOCS_VERSION }}
           repo: ${{ github.repository }}
-          output: ${{ runner.temp }}/_staging/switcher.json
+          output-dir: ${{ runner.temp }}/pages
 
       - name: Publish Docs to gh-pages
         if: github.ref_type == 'tag' || github.ref_name == 'main'
@@ -61,5 +63,5 @@ jobs:
         uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e # v4.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ${{ runner.temp }}/_staging
+          publish_dir: ${{ runner.temp }}/pages
           keep_files: true

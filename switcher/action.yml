@@ -1,11 +1,11 @@
-name: Write switcher.json
+name: Write switcher.json + redirect
 description: >-
-  Generate the pydata switcher.json from the versions deployed on gh-pages plus
-  the repo's tags. Run it after staging the versioned build and before the
-  gh-pages publish step (it only writes the file — it does not move or fetch
-  anything). Requires the repository checked out with tags and the
-  origin/gh-pages tree available (e.g. actions/checkout with fetch-depth: 0) and
-  Node on PATH.
+  Generate the pydata switcher.json and a root index.html that redirects to the
+  newest stable release, from the versions deployed on gh-pages plus the repo's
+  tags. Run it after staging the versioned build and before the gh-pages publish
+  step (it only writes those two files — it does not move or fetch anything).
+  Requires the repository checked out with tags and the origin/gh-pages tree
+  available (e.g. actions/checkout with fetch-depth: 0) and Node on PATH.
 
 inputs:
   version:
@@ -14,8 +14,8 @@ inputs:
   repo:
     description: "org/repo slug (e.g. DiamondLightSource/myst-version-switcher-plugin) — used to build version URLs. Pass github.repository from your workflow."
     required: true
-  output:
-    description: Path to write switcher.json to.
+  output-dir:
+    description: Directory (the gh-pages publish root) to write switcher.json and index.html into.
     required: true
 
 runs:
@@ -26,4 +26,4 @@ runs:
         node "$GITHUB_ACTION_PATH/make-switcher.mjs" \
           --add "${{ inputs.version }}" \
           "${{ inputs.repo }}" \
-          "${{ inputs.output }}"
+          "${{ inputs.output-dir }}"
