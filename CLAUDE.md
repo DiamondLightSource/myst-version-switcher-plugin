@@ -7,7 +7,7 @@ a single `anywidget` plugin **plus** a CI composite action that generates the
 ## Repo layout
 
 ```
-plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file)
+plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
 switcher/action.yml                            # composite action: writes switcher.json ONLY
 switcher/make-switcher.mjs                     # dependency-free Node switcher generator
 test/                                          # npm test suite (node, no framework)

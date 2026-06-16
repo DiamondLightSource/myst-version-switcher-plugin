@@ -8,7 +8,6 @@ project:
     - ../plugins/version-switcher/version-switcher.mjs
   toc:
     - file: index.md
-    - file: ../plugins/version-switcher/example.md
 site:
   template: book-theme
   parts:
