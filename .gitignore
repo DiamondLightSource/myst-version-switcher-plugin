@@ -1,3 +1,7 @@
 node_modules/
 docs/_build/
 *.log
+
+# gh-pages staging: keep the root redirect, ignore locally-built versioned dirs
+.github/pages/*
+!.github/pages/index.html

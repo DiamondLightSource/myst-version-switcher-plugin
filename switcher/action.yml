@@ -12,7 +12,7 @@ inputs:
     description: Sanitised ref/version name — the build being added to the list.
     required: true
   repo:
-    description: "org/repo, e.g. ${{ github.repository }} (used to build version URLs)."
+    description: "org/repo slug (e.g. DiamondLightSource/myst-version-switcher-plugin) — used to build version URLs. Pass github.repository from your workflow."
     required: true
   output:
     description: Path to write switcher.json to.
