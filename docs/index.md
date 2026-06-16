@@ -63,15 +63,18 @@ stranding users at the root.
 path, the widget synthesises a `local (dev)` entry rooted at `/` so the switcher
 is usable during `myst start`.
 
-## Generating switcher.json
+## Generating switcher.json + the root redirect
 
 The `switcher` composite action reads your repo's tags and `origin/gh-pages` to
-produce a `switcher.json` in the standard pydata format:
+produce two files in your publish root: a `switcher.json` in the standard pydata
+format, and an `index.html` that redirects the site root to your newest stable
+release. The newest non-prerelease tag is flagged `preferred` (rendered with a ★)
+and is the redirect target; before any release exists it falls back to `main`.
 
 ```json
 [
-  { "version": "main", "name": "main (dev)", "url": "https://ORG.github.io/REPO/main/" },
-  { "version": "2.1", "name": "2.1 (stable)", "url": "https://ORG.github.io/REPO/2.1/", "preferred": true },
+  { "version": "main", "url": "https://ORG.github.io/REPO/main/" },
+  { "version": "2.1", "url": "https://ORG.github.io/REPO/2.1/", "preferred": true },
   { "version": "2.0", "url": "https://ORG.github.io/REPO/2.0/" }
 ]
 ```
@@ -86,19 +89,22 @@ Wire it into your docs workflow after staging the built HTML and before publishi
 - run: cd docs && myst build --html
   env:
     BASE_URL: /<repo>/${{ env.DOCS_VERSION }}  # required for versioned sub-path
-- run: mv docs/_build/html .github/pages/$DOCS_VERSION
+- run: |
+    mkdir -p _site
+    mv docs/_build/html _site/$DOCS_VERSION
 - uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>
   with:
     version: ${{ env.DOCS_VERSION }}
     repo: ${{ github.repository }}
-    # output defaults to .github/pages/switcher.json
+    output-dir: _site   # writes switcher.json + index.html into the publish root
 - uses: peaceiris/actions-gh-pages@v4
   with:
-    publish_dir: .github/pages
+    publish_dir: _site
     keep_files: true
 ```
 
-The action **only writes `switcher.json`** — staging (`mv`) and publishing stay in
-the workflow. `fetch-depth: 0` is the consumer's responsibility. On the first
-deploy, when `origin/gh-pages` does not yet exist, the action produces a
-single-entry `switcher.json` for the current version rather than failing.
+The action **only writes `switcher.json` and `index.html`** — staging (`mv`) and
+publishing stay in the workflow. `fetch-depth: 0` is the consumer's
+responsibility. On the first deploy, when `origin/gh-pages` does not yet exist,
+the action produces a single-entry `switcher.json` for the current version and an
+`index.html` redirecting to it, rather than failing.

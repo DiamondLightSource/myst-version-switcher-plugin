@@ -2,19 +2,18 @@
 
 A pydata-style version-switcher for [MyST](https://mystmd.org) docs, delivered as
 a single `anywidget` plugin **plus** a CI composite action that generates the
-`switcher.json` the widget reads.
+`switcher.json` the widget reads and a root `index.html` redirect to the newest
+stable release.
 
 ## Repo layout
 
 ```
 plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
-switcher/action.yml                            # composite action: writes switcher.json ONLY
-switcher/make-switcher.mjs                     # dependency-free Node switcher generator
+switcher/action.yml                            # composite action: writes switcher.json + index.html
+switcher/make-switcher.mjs                     # dependency-free Node switcher + redirect generator
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/ci.yml                       # orchestrator → _test / _docs / _release
-.github/pages/index.html                       # MUST stay committed — bootstraps .github/pages/
-                                               # dir (so mv step works) + redirects root to main/
 ```
 
 ## Two halves, different lifecycles
@@ -29,11 +28,15 @@ the action is consumed from the repo tree at the same tag.
 
 ## Key design decisions
 
-### `switcher` action is write-only
-The action writes `.github/pages/switcher.json` and nothing else. It does NOT `mv`
-the built docs, does NOT `git fetch`. Staging the versioned dir (`mv`) and
-`fetch-depth: 0` (for tags + `origin/gh-pages`) are the caller's responsibility
-(pattern lifted from `python-copier-template-example`).
+### `switcher` action only writes the two derived files
+The action writes `switcher.json` and a root `index.html` (a redirect to the
+newest stable release) into the caller-supplied `output-dir` — the gh-pages
+publish root — and nothing else. It does NOT `mv` the built docs, does NOT
+`git fetch`. Staging the versioned dir (`mv`) and `fetch-depth: 0` (for tags +
+`origin/gh-pages`) are the caller's responsibility (pattern lifted from
+`python-copier-template-example`). Both files are derived purely from the git
+version ordering, so regenerating them every deploy is intentional — with
+`keep_files: true` each deploy refreshes the root redirect to the latest release.
 
 ### BASE_URL must be set before `myst build`
 ```yaml
@@ -43,14 +46,13 @@ run: cd docs && myst build --html
 ```
 Without this, assets and links break under the versioned GitHub Pages sub-path.
 
-### `.github/pages/index.html` must stay committed
-- Redirects the Pages root to `./main/index.html`.
-- CI copies it into `_staging/` before publishing, so it always lands on gh-pages.
-- `.github/pages/` is source-only; CI writes nothing there — versioned builds stage in `_staging/`.
-
 ### `make-switcher.mjs` degrades gracefully on first deploy
-When `origin/gh-pages` does not yet exist, it produces a single-entry `switcher.json`
-for just the current version rather than failing.
+When `origin/gh-pages` does not yet exist (no deployed builds, no tags), it
+produces a single-entry `switcher.json` for just the current version and an
+`index.html` redirecting to it, rather than failing. The "preferred" version (the
+`index.html` target, flagged `preferred: true` in switcher.json) is the newest
+non-prerelease tag with a deployed build, falling back to `main`/`master`.
+Prerelease detection mirrors `_release.yml` (an `a`/`b`/`rc` marker).
 
 ## CI structure
 
@@ -64,7 +66,7 @@ Mirrors `python-copier-template-example` as closely as possible:
 ### `_docs.yml` deviations from template
 1. `npm install -g mystmd@1.10.1` instead of `uv run tox -e docs` (no Python here)
 2. `BASE_URL` env var set before `myst build`
-3. `uses: ./switcher` writes `switcher.json` (instead of `make_switcher.py`)
+3. `uses: ./switcher` writes `switcher.json` + `index.html` (instead of `make_switcher.py`)
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 
@@ -123,14 +125,17 @@ site:
 - run: cd docs && myst build --html
   env:
     BASE_URL: /<repo>/${{ env.DOCS_VERSION }}
-- run: mv docs/_build/html .github/pages/$DOCS_VERSION
+- run: |
+    mkdir -p _site
+    mv docs/_build/html _site/$DOCS_VERSION
 - uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>
   with:
     version: ${{ env.DOCS_VERSION }}
     repo: ${{ github.repository }}
+    output-dir: _site   # required: writes switcher.json + index.html into the publish root
 - uses: peaceiris/actions-gh-pages@v4
   with:
-    publish_dir: .github/pages
+    publish_dir: _site
     keep_files: true
 ```
 
