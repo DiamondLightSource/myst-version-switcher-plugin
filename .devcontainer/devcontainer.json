@@ -1,6 +1,6 @@
 // For format details, see https://containers.dev/implementors/json_reference/
 {
-    "name": "PandABlocks-server Developer Container",
+    "name": "myst-version-switcher-plugin Developer Container",
     "build": {
         "dockerfile": "../Dockerfile",
         "target": "developer"
@@ -10,27 +10,19 @@
         "DISPLAY": "${localEnv:DISPLAY}",
         // Put things that allow it in the persistent cache
         "PRE_COMMIT_HOME": "/cache/pre-commit",
-        "UV_CACHE_DIR": "/cache/uv",
-        "UV_PYTHON_CACHE_DIR": "/cache/uv-python",
         "npm_config_cache": "/cache/npm-cache"
     },
     "customizations": {
         "vscode": {
-            // Set *default* container specific settings.json values on container create.
-            "settings": {
-                // Workaround to prevent garbled python REPL in the terminal
-                // https://github.com/microsoft/vscode-python/issues/25505
-                "python.terminal.shellIntegration.enabled": false
-            },
-            // Add the IDs of extensions you want installed when the container is created.
             "extensions": [
-                "ms-python.python",
+                "biomejs.biome",
                 "ms-azuretools.vscode-docker"
             ]
         }
     },
-    // Create the config folder for the bash-config feature and uv cache
+    // Create the config folder for the bash-config feature
     "initializeCommand": "mkdir -p ${localEnv:HOME}/.config/terminal-config",
+    "postCreateCommand": "npm install && npx prek install",
     "runArgs": [
         // Allow the container to access the host X11 display and EPICS CA
         "--net=host",
@@ -44,13 +36,13 @@
             "target": "/user-terminal-config",
             "type": "bind"
         },
-        // Keep a persistent cross container cache for uv, pre-commit, and the venvs
+        // Keep a persistent cross-container cache for pre-commit and npm
         {
             "source": "devcontainer-shared-cache",
             "target": "/cache",
             "type": "volume"
         }
     ],
-    // Mount the parent as /workspaces so we can pip install peers as editable
+    // Mount the parent as /workspaces so sibling repos are accessible
     "workspaceMount": "source=${localWorkspaceFolder}/..,target=/workspaces,type=bind",
 }

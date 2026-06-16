@@ -16,8 +16,7 @@ inputs:
     required: true
   output:
     description: Path to write switcher.json to.
-    required: false
-    default: .github/pages/switcher.json
+    required: true
 
 runs:
   using: composite

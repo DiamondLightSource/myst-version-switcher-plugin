@@ -44,9 +44,9 @@ run: cd docs && myst build --html
 Without this, assets and links break under the versioned GitHub Pages sub-path.
 
 ### `.github/pages/index.html` must stay committed
-- Creates `.github/pages/` in the tree so the `mv docs/_build/html .github/pages/$DOCS_VERSION` step does not fail on first deploy.
 - Redirects the Pages root to `./main/index.html`.
-- `.gitignore` has `!.github/pages/index.html` to force-track it while ignoring locally-built versioned dirs.
+- CI copies it into `_staging/` before publishing, so it always lands on gh-pages.
+- `.github/pages/` is source-only; CI writes nothing there — versioned builds stage in `_staging/`.
 
 ### `make-switcher.mjs` degrades gracefully on first deploy
 When `origin/gh-pages` does not yet exist, it produces a single-entry `switcher.json`
@@ -72,6 +72,7 @@ Mirrors `python-copier-template-example` as closely as possible:
 
 ```bash
 npm test                    # run the test suite
+npm run docs                # build docs (same command CI uses)
 cd docs && myst start       # live-preview docs with the plugin loaded from local plugins/
 ```
 
