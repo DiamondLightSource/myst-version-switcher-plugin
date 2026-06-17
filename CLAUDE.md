@@ -139,6 +139,16 @@ site:
     keep_files: true
 ```
 
+## Planned: versioned-publish redesign
+
+[`DESIGN.md`](DESIGN.md) proposes replacing the current "switcher writes two
+files + caller stages/publishes with `keep_files: true`" model with a single
+`deploy` action that reconstructs the whole versioned site every deploy from
+durable sources (`docs.zip` release assets for tags, latest CI artifact for
+branches), then publishes the complete tree. Not yet implemented. The pure
+`make-switcher.mjs` functions carry over; only version discovery changes
+(directory scan instead of `git ls-tree origin/gh-pages`).
+
 ## Upstreaming
 
 `plugins/version-switcher/` mirrors
