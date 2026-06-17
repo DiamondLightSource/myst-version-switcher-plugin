@@ -9,13 +9,13 @@
 		"url": "https://github.com/DiamondLightSource/myst-version-switcher-plugin.git"
 	},
 	"scripts": {
-		"test": "node test/test-url-logic.mjs && node test/test-make-switcher.mjs",
+		"test": "node test/test-url-logic.mjs && node test/test-assemble.mjs",
 		"docs": "cd docs && myst build --html",
 		"docs-dev": "cd docs && myst start"
 	},
 	"files": [
 		"plugins/version-switcher/version-switcher.mjs",
-		"switcher/make-switcher.mjs",
+		"assemble/assemble.mjs",
 		"switcher/action.yml"
 	],
 	"devDependencies": {
