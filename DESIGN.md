@@ -2,9 +2,10 @@
 
 Status: **proposed** (not yet implemented). Captures the planned move from the
 current "switcher writes two files, caller stages + publishes to a `gh-pages`
-branch with `keep_files`" model to a single action that **reconstructs the whole
-versioned site from durable sources on every deploy and deploys it directly to
-GitHub Pages** (no `gh-pages` branch).
+branch with `keep_files`" model to a pair of small actions that **reconstruct the
+whole versioned site from durable sources on every deploy and publish it directly
+to GitHub Pages** (no `gh-pages` branch). The action assembles the site tree; the
+**caller** owns the Pages publish.
 
 ## Why change
 
@@ -42,136 +43,271 @@ Source must be **GitHub Actions**, not "Deploy from a branch".)
 
 Releases are permanent, so old versions never vanish. Branch previews come from
 CI artifacts and silently drop if the artifact has expired and the branch hasn't
-rebuilt — acceptable for dev/preview docs.
+rebuilt — acceptable for *optional* dev/preview docs (see required vs optional
+branches below).
 
 There is no `gh-pages` branch at all — neither source nor target. This removes the
 `origin/gh-pages` fetch requirement (we still need tags for ordering).
 
-### `docs.zip` contract
+### The `docs` artifact / `docs.zip` contract
 
-- Contains a **bare `html/` directory** at its root (`unzip docs.zip` → `html/`).
-- Built with `BASE_URL=/<repo>/<version>` matching the sub-path it will be served
-  at. A mismatch produces a version whose assets 404 — the build step (caller's
-  responsibility) owns this.
-- Published two ways by the action: as a CI artifact named `docs` (every run), and
-  attached to the GitHub Release (tag runs) so it is durable.
+The same built tree is delivered two ways; both expose a **bare `html/` directory
+at the archive root** (`unzip` / extract → `html/`):
 
-## The expanded action
+- a CI artifact named `docs` (every run), produced by `actions/upload-artifact`
+  (which does the zipping — no manual `zip`). To get `html/` at the root, stage
+  the build into `<tmp>/site-src/html/` and upload the **parent** (`site-src`).
+- a `docs.zip` asset attached to the **GitHub Release** on tag runs (see resolved
+  decision #2 — `_release.yml` owns this).
 
-One composite action does the full pipeline, starting from an already-built
-`_build/html`. The action does **not** run `myst build` — `BASE_URL` is set by the
-caller at build time (see contract above).
+Both are built with `BASE_URL=/<repo>/<version>` matching the sub-path they will
+be served at. A mismatch produces a version whose assets 404 — the build step
+(caller's responsibility) owns this.
 
-Proposed location: rename `switcher/` → `deploy/` (it is no longer just the
-switcher). The Node logic stays co-located and unit-testable.
+## The two actions
 
-### Inputs
+The pipeline is split into two small composite actions, sequenced around the
+caller's `myst build`:
+
+- **`current-version`** runs *before* the build. It sanitises the raw ref name so
+  `BASE_URL` can be set at build time.
+- **`assemble`** runs *after* the build. It gathers every version, generates
+  `switcher.json` + `index.html`, uploads this build's `docs` artifact, and
+  outputs the assembled site directory for the caller to publish.
+
+Proposed layout: rename `switcher/` → `assemble/` (the action no longer just
+writes the switcher, and it no longer deploys — the *caller* does). The Node
+logic stays co-located beside `assemble/action.yml` as `assemble.mjs`, and a
+sibling `current-version/action.yml` holds the tiny pre-build action.
+
+### Why `current-version` is its own action
+
+The sanitised version is consumed in **two** places that must be byte-identical or
+assets 404: the build-time `BASE_URL` sub-path, and the `site/<version>`
+directory name written by `assemble`. To guarantee they match, sanitisation has a
+**single implementation** — `sanitize()`, exported by `assemble.mjs` — that both
+actions invoke (`current-version` reaches it via the sibling path, since the whole
+repo is checked out with the action). `current-version` surfaces the value as an
+output *before* the build (when `assemble` hasn't run yet); `assemble` calls the
+same function for the version dir and for branch-preview dirs. One implementation
+means no bash-vs-JS drift and no parity test to maintain.
+
+### `assemble` inputs
 
 | input | required | default | meaning |
 |---|---|---|---|
 | `html-dir` | yes | — | path to the freshly built docs (e.g. `docs/_build/html`) |
-| `version` | yes | — | sanitised name for this build (`main`, `v2.1.0`) |
+| `ref-name` | yes | — | the **unsanitised** ref (`${{ github.ref_name }}`); sanitised internally |
 | `repo` | no | `${{ github.repository }}` | `org/repo`, for version URLs |
-| `branches` | no | default branch | branch previews to include (besides released tags) |
-| `deploy` | no | `false` | actually push to gh-pages (gate off for PRs) |
-| `token` | no | `${{ github.token }}` | API access: release assets + cross-run artifacts |
+| `required-branches` | no | default branch | branches that **must** be present, else the deploy hard-fails (satisfied by being the current ref or having a recent successful CI `docs` artifact) |
+| `optional-branches` | no | all branches with recent CI | branch previews to include if they have a recent CI artifact; missing → silently skipped |
+| `token` | no | `${{ github.token }}` | `gh` access: release assets + cross-run artifacts |
 
-### Pipeline
+### `assemble` outputs
+
+| output | meaning |
+|---|---|
+| `dir` | path to the assembled publish root, for the caller to hand to `upload-pages-artifact` |
+
+### `assemble` pipeline
+
+Everything lives under the runner temp dir.
 
 ```
-work/site/                      ← assembled publish root
-  index.html                    ← redirect to preferred (newest stable) version
-  switcher.json
-  <version>/ …                  ← every gathered version
+$RUNNER_TEMP/
+  site-src/html/          ← current build, staged for the docs artifact upload
+  site/                   ← assembled publish root (the action's `dir` output)
+    index.html            ← redirect to the preferred (newest stable) version
+    switcher.json
+    <version>/ …          ← every gathered version
 
-1. Stage current build
-     cp -r $html-dir  work/site/$version/
+1. Stage current build (bash; sanitise via the shared sanitize())
+     ver=$(node assemble.mjs sanitize "$ref-name")
+     cp -r "$html-dir"  "$RUNNER_TEMP/site-src/html"
+     cp -r "$html-dir"  "$RUNNER_TEMP/site/$ver"
 
-2. Package + publish this build's docs.zip   (bare html/ inside)
-     (cd "$(dirname "$html-dir")" && zip -r work/docs.zip html)
-     actions/upload-artifact  name=docs  path=work/docs.zip      # every run
-     if tag:  gh release upload "$version" work/docs.zip --clobber   # durable
+2. Upload this build's docs artifact (every run)         ← bare html/ at root
+     actions/upload-artifact  name=docs  path=$RUNNER_TEMP/site-src
+       # upload the PARENT so the archive root contains html/ (the contract)
 
-3. Gather released versions (durable, authoritative)
-     for tag in $(gh release list --json tagName -q '.[].tagName'):
-       [ "$tag" = "$version" ] && continue
-       gh release download "$tag" -p docs.zip -O r.zip || continue   # missing → skip
-       unzip r.zip 'html/*' -d t && mv t/html work/site/$tag
+3. Gather released tags (bash plumbing; gh's built-in -q, never a `jq` pipe)
+     for tag in $(git tag -l):                            # ordering done later, in JS
+       [ "$tag" = "$ver" ] && continue
+       gh release download "$tag" -p docs.zip -O r.zip || continue   # no asset → skip
+       unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$tag"
 
-4. Gather branch previews (ephemeral)
-     for br in $branches:
-       [ "$br" = "$version" ] && continue
-       rid=$(gh run list --branch "$br" --workflow ci.yml --status success \
-               -L1 --json databaseId -q '.[0].databaseId')
-       gh run download "$rid" -n docs -D t || continue              # expired → skip
-       unzip t/docs.zip 'html/*' -d t2 && mv t2/html work/site/$br
+4. Plan branch previews (JS kernel — pure, unit-tested)
+     ci=$(gh run list --workflow ci.yml --status success \
+            --json headBranch,databaseId -q '<latest run id per branch>')
+     plan=$(node assemble.mjs plan-branches --ref-name "$ref-name" \
+              --required "$required" --optional "$optional" --ci "$ci")
+       # planBranches() resolves required ∪ optional, sanitises each dest dir, and
+       # emits the {runId, destDir} fetch list. Any required branch that is neither
+       # the current ref nor present in $ci → exit 1 (hard-fail). Optional & absent
+       # → simply omitted from the plan.
 
-5. Generate switcher.json + redirect
-     node assemble.mjs --site-dir work/site --repo "$repo"
-       # versions discovered from work/site/ subdirs; tags (git) drive ordering
-       # + prerelease detection; preferred = newest stable tag present
+5. Fetch planned branches (bash plumbing; dumb IO)
+     for {runId, destDir} in plan:
+       gh run download "$runId" -n docs -D t           # gh extracts → t/html
+       mv t/html "$RUNNER_TEMP/site/$destDir"
 
-6. Publish to Pages (gated; needs job environment + permissions — see below)
-     if deploy:
-       actions/upload-pages-artifact  path=work/site
-       actions/deploy-pages
+6. Generate switcher.json + redirect, decide stable (JS — the pure core)
+     stable_src=$(node assemble.mjs generate --site-dir "$RUNNER_TEMP/site" --repo "$repo")
+       # writes switcher.json (★ on the latest-release entry) + index.html.
+       # versions discovered from site/ subdirs; git tags drive ordering +
+       # prerelease detection; preferred = newest deployed non-prerelease tag.
+       # index.html → stable/ when preferred is a release tag, else → the main
+       # fallback. Prints the preferred release dir to alias, or nothing if none.
+
+7. Stable alias (bash; symlink, inflated to a copy at deploy — see Stable alias)
+     [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
+
+8. Output the assembled dir
+     echo "dir=$RUNNER_TEMP/site" >> "$GITHUB_OUTPUT"
 ```
 
-`deploy-pages` publishes the uploaded tree as the *entire* site (no merge), so a
-stale branch preview that is no longer gathered is correctly dropped — exactly the
-whole-tree-replace this design relies on. Note the `github-pages` artifact that
-`upload-pages-artifact` produces is distinct from the per-version `docs` artifact
-in step 2. Because `deploy-pages` is job-scoped, the **caller's job** must set
-`environment: github-pages` and the Pages permissions; a composite action cannot
-declare those itself.
+The split is deliberate: **bash does the IO plumbing** (`gh` calls, `unzip`, `mv`)
+where shelling out is concise, and the **JS kernel does the logic** — `sanitize()`,
+`planBranches()`, and the pure generation. The kernel functions take plain data
+(ref name, branch lists, the `ci` catalogue JSON) and return plans/strings, so
+they unit-test without mocking `gh`, the network, or the filesystem. Bash never
+touches JSON itself: every extraction uses `gh`'s built-in `-q`/`--jq` (it embeds
+the real jq) or `gh api --jq`, never a piped standalone `jq`. That keeps `gh`'s
+exit code intact — a `gh … | jq` pipe would mask an API failure as empty output
+unless `pipefail` is set — and gets field-name validation from `--json`. Gather
+order is irrelevant (a directory is a directory); all ordering and prerelease
+logic lives in `generate`.
 
-### What stays in the caller workflow
+`required-branches` defaults to the default branch (so `main`'s preview can never
+silently vanish); `optional-branches` defaults to every branch with a recent
+successful CI run (distinct head branches of recent successful `ci.yml` runs).
 
-Only build + invoke — but the job must carry the Pages `environment` and
-permissions, since `deploy-pages` (run inside the action) is job-scoped:
+## What stays in the caller workflow
+
+The caller builds, invokes the two actions, and owns the Pages publish. The job
+**must** carry the Pages `environment`, permissions, and `concurrency`, because
+`deploy-pages` is job-scoped — a composite action cannot declare any of those.
+Keeping all Pages concerns together in the caller is why the action stops at
+"assemble" (see resolved decision #5).
 
 ```yaml
 jobs:
   docs:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
+    environment: { name: github-pages }
     permissions:
-      contents: read    # checkout + read release assets (write only if THIS action attaches docs.zip — decision #2)
-      actions: read     # download other runs' artifacts (cross-run)
-      pages: write      # deploy to Pages
-      id-token: write   # deploy-pages OIDC
+      contents: read     # checkout + read release assets
+      actions: read      # download other runs' artifacts (cross-run)
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
+    concurrency: { group: pages, cancel-in-progress: false }
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }          # tags, for ordering + prerelease
+        with: { fetch-depth: 0 }            # tags, for ordering + prerelease
+      - id: ver
+        uses: DiamondLightSource/myst-version-switcher-plugin/current-version@<tag>
+        with: { ref-name: ${{ github.ref_name }} }
       - run: cd docs && myst build --html
         env:
-          BASE_URL: /<repo>/${{ env.DOCS_VERSION }}
-      - uses: DiamondLightSource/myst-version-switcher-plugin/deploy@<tag>
+          BASE_URL: /<repo>/${{ steps.ver.outputs.version }}
+      - id: site
+        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' }}
+        uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
         with:
           html-dir: docs/_build/html
-          version: ${{ env.DOCS_VERSION }}
-          deploy: ${{ github.ref_type == 'tag' || github.ref_name == 'main' }}
+          ref-name: ${{ github.ref_name }}
+      - if: ${{ steps.site.outcome == 'success' }}
+        uses: actions/upload-pages-artifact
+        with: { path: ${{ steps.site.outputs.dir }} }
+      - if: ${{ steps.site.outcome == 'success' }}
+        uses: actions/deploy-pages
 ```
+
+`current-version` runs unconditionally (the PR build still needs the right
+`BASE_URL`). `assemble` + the publish steps are gated off for PRs by the `if:` —
+the build itself still runs on PRs to catch breakages; nothing is published and
+no `docs` artifact is uploaded (PR builds are not previews). `deploy-pages`
+publishes the uploaded tree as the *entire* site (no merge), so a stale branch
+preview that is no longer gathered is correctly dropped.
 
 ## Reused vs. new logic
 
-The pure functions already in `make-switcher.mjs` carry over unchanged:
-`orderVersions`, `isPrerelease`, `preferredVersion`, `switcherStruct`,
-`renderSwitcher`, `renderRedirect`. Only the **version source** changes:
+The pure functions already in `make-switcher.mjs` carry over unchanged into
+`assemble.mjs`: `orderVersions`, `isPrerelease`, `preferredVersion`,
+`switcherStruct`, `renderSwitcher`. `renderRedirect` retargets to `stable/` (see
+Stable alias). The **version source** changes, and two small pure functions join
+them:
 
 - **Drop** `getBranchContents("origin/gh-pages")` (git ls-tree of the publish
   branch).
 - **Add** `discoverVersions(siteDir)` = directory names under the assembled
-  `work/site/`. The current version is already a dir (step 1), so the `--add`
-  flag goes away.
-- `main()`/`assemble.mjs` reads `--site-dir` instead of an `--output-dir`, and
-  writes `switcher.json` + `index.html` into that same dir.
+  `site/`. The current version is already a dir (step 1), so the `--add` flag goes
+  away.
+- **Add** `sanitize(name)` — the single sanitisation implementation, shared with
+  `current-version` (replaces the duplicated rule + parity test).
+- **Add** `planBranches({ refName, required, optional, ci })` — resolves which
+  branches to fetch, their sanitised dest dirs, and which required branches are
+  unsatisfiable (→ hard-fail). Pure: fed the `ci` catalogue as data, tested with
+  fixtures.
+- `assemble.mjs` exposes `sanitize` / `plan-branches` / `generate` subcommands;
+  `generate` reads `--site-dir` instead of an `--output-dir`, and writes
+  `switcher.json` + `index.html` into that same dir.
 
-This keeps the testable core intact; the new IO (gh download, unzip, publish) is
-shell/`gh`/actions glue, integration-tested via a dry run.
+This keeps the testable core intact and pulls the only error-prone glue logic
+(branch resolution, sanitisation) into it; the remaining IO (`gh` download, unzip,
+upload) is bash plumbing, integration-tested via a dry run. `orderVersions`
+already has to order branch names (e.g. `main`) alongside version tags — that path
+matters more now, so the backfill adds an explicit mixed branch+tag ordering test.
 
-### Permissions
+## Stable alias
+
+Other projects fetch this site's `objects.inv` for cross-references, so they need
+a **stable URL that always points at the latest release** — not a version number
+that changes every release. The site therefore publishes a `stable/` alias.
+
+- **`stable/` is the newest deployed non-prerelease tag — never `main`.** Before
+  the first release there is no `stable/`; the root redirect falls back to `main`
+  as today (there is nothing stable to serve an inventory from yet).
+- **It is a symlink, not a copy, in the assembled tree** (`ln -s "$preferred"
+  stable`). `actions/upload-pages-artifact` tars with `--dereference`, so the link
+  is inflated to a real copy at deploy — Pages serves `stable/` as a full
+  duplicate of the release build.
+- **The root `index.html` redirects to `stable/`** (a constant target) whenever it
+  exists, so the canonical entry URL never changes.
+
+### Why a copy resolves correctly
+
+MyST writes **base-relative** URIs into `objects.inv` (the root doc's `uri` is the
+empty string — relative to the configured base, not a root-absolute
+`/repo/<version>/…`). So a consumer pointing intersphinx at `…/repo/stable/`
+fetches `stable/objects.inv` and resolves every target under `/stable/` — the
+links stay stable rather than pinning to the concrete version. (Verified on this
+repo's build; re-confirm on a richer multi-page site, but the relative-URI format
+is structural.)
+
+### Switcher behaviour: `/stable/` shows the concrete version
+
+Requirement: visiting `/stable/` must show **the release it aliases** selected in
+the dropdown (e.g. `v2.0`), not a separate "stable" item. So `switcher.json` gets
+**no** `stable` entry — it lists real versions only, with `preferred: true` on the
+latest-release entry as today. The widget (`version-switcher.mjs`) gains the alias
+handling instead:
+
+- `detectCurrent` falls back, when no version path matches, to the `preferred`
+  entry if the path is under `<base>/stable/` (where `<base>` is the preferred
+  entry's pathname with its version segment swapped for the literal `stable`). The
+  dropdown then shows the concrete release selected.
+- Detection returns the **actual base pathname** (`/repo/stable/`) alongside the
+  selected entry, and `computeTargetUrl` strips *that* base rather than the
+  entry's canonical pathname. For ordinary version pages the two coincide (no
+  behaviour change); on `/stable/guide.html`, switching to a pinned version
+  preserves the path → `/repo/v1.0/guide.html` (then the existing `pageExists`
+  probe handles pages absent in that version).
+
+`stable` is a fixed convention, so the widget hardcodes the segment name
+(`STABLE_ALIAS = "stable"`).
+
+## Permissions
 
 ```yaml
 permissions:
@@ -181,57 +317,154 @@ permissions:
   actions: read     # download other runs' artifacts (cross-run)
 ```
 
-Plus `environment: { name: github-pages }` at job level. `contents: write` is only
-needed if *this* action attaches `docs.zip` to releases (decision #2); otherwise
-`_release.yml` owns that. `gh` is preinstalled on GitHub runners. Cross-run
-artifact download needs `gh run download <id>` (the `actions/download-artifact`
-action only sees the current run).
+Plus `environment: { name: github-pages }` and `concurrency: { group: pages }` at
+job level. `assemble` needs only `contents: read` — it uploads the `docs` CI
+artifact and reads release assets, but does **not** attach release assets;
+`_release.yml` keeps `contents: write` for that (resolved decision #2). `gh` is
+preinstalled on GitHub runners. Cross-run artifact download needs
+`gh run download <id>` (the `actions/download-artifact` action only sees the
+current run).
 
 ## Edge cases
 
-- **First deploy:** no releases, `branches=main`, current=`main` → site has only
-  `main/`; switcher is single-entry; redirect → `main`. Graceful, same as today.
+- **First deploy:** no releases, `required-branches=main`, current=`main` → site
+  has only `main/`; switcher is single-entry; redirect → `main`. Graceful.
 - **Release without `docs.zip`** (cut before this scheme): `gh release download`
   fails for that asset → skip that version. No hard failure.
-- **Expired branch artifact:** skip; that preview is absent until the branch
-  rebuilds.
+- **Required branch missing:** a `required-branches` entry that is neither the
+  current ref nor has a recent successful CI artifact → **hard-fail the deploy**
+  rather than publish a site missing a version declared required.
+- **Optional / expired branch artifact:** skip silently; that preview is absent
+  until the branch rebuilds.
 - **Prereleases:** still excluded from `preferred`/redirect (the `a`/`b`/`rc`
   test, parity with `_release.yml`), but they still appear in the switcher if
   their `docs.zip`/artifact was gathered.
-- **Concurrency:** gate with `concurrency: { group: "pages", cancel-in-progress: false }`.
-  `deploy-pages` replaces the *entire* site, so it is last-writer-wins;
-  reconstructing from durable sources makes this mostly self-healing, except a
-  release created moments earlier may not yet be visible to an in-flight run.
-  GitHub also serialises deployments to the `github-pages` environment.
+- **Stable alias:** `stable/` symlinks the newest deployed non-prerelease tag
+  (never `main`), inflated to a copy at deploy; root `index.html` → `stable/`.
+  Before the first release there is no `stable/` and the root → `main` fallback.
+  See Stable alias.
+- **Concurrency:** `concurrency: { group: pages, cancel-in-progress: false }` on
+  the caller job. `deploy-pages` replaces the *entire* site, so it is
+  last-writer-wins; reconstructing from durable sources makes this mostly
+  self-healing, except a release created moments earlier may not yet be visible to
+  an in-flight run. GitHub also serialises deployments to the `github-pages`
+  environment.
 - **Scaling:** every deploy downloads every release's `docs.zip`. Fine for tens of
   releases; if it grows, cache downloads keyed by release id / asset digest.
 
-## Open decisions
+## Resolved decisions
 
-1. **Action name/path.** Recommend `deploy/` (consumed as `…/deploy@<tag>`); keep
-   the Node modules beside it. `switcher/` is now a misnomer. No back-compat
-   required, so a clean rename is fine.
-2. **Who attaches `docs.zip` to the Release?** Either this action on tag runs
-   (`gh release upload --clobber`, must run after the release exists) or
-   `_release.yml` (which already creates the release) downloads the `docs`
-   artifact and attaches it. Leaning toward `_release.yml` owning release assets
-   for separation of concerns; the deploy action only uploads the CI artifact.
-3. ~~Direct Pages publish vs. `gh-pages` branch.~~ **Resolved: direct publish.**
-   Step 6 uses `actions/upload-pages-artifact` + `actions/deploy-pages`; there is
-   no `gh-pages` branch. Requires the repo's Pages source set to **GitHub
-   Actions** and the job `environment`/permissions above.
+1. **Action layout.** Two actions: `current-version/` (pre-build sanitise) and
+   `assemble/` (post-build gather + generate + artifact upload). Renamed from
+   `switcher/`; `assemble.mjs` and its tests sit beside `assemble/action.yml`. No
+   back-compat required, so a clean rename is fine.
+2. **Who attaches `docs.zip` to the Release?** `_release.yml` (which already
+   creates the release): it downloads the run's `docs` artifact and attaches it as
+   `docs.zip`. `assemble` uploads only the CI artifact. This needs
+   `_release.yml` to declare `needs: _docs` so the `docs` artifact exists when it
+   runs; there is no same-run dependency for the tag being released (its build is
+   staged directly in step 1), so ordering is otherwise unconstrained.
+3. **Direct Pages publish vs. `gh-pages` branch.** Direct publish, via
+   `actions/upload-pages-artifact` + `actions/deploy-pages`; no `gh-pages` branch.
+   The two publish steps live in the **caller** (not the action), since
+   `deploy-pages` is job-scoped. Requires the repo's Pages source set to **GitHub
+   Actions**.
+4. **Language.** JS core + bash glue. The pure functions (and their existing
+   node-based tests) carry over to `assemble.mjs` unchanged; bash does the
+   `gh`/`unzip`/`mv` IO. Pure bash is ruled out — semver ordering, prerelease
+   detection and JSON rendering are not unit-testable in bash. Python was a
+   contender (team is Python-heavy; this half stays DLS infra, not upstreamed) but
+   loses on the one-time port plus a second toolchain on a JS-only repo.
+5. **Action scope.** `assemble` gathers, generates, and uploads the `docs`
+   artifact, then outputs the site dir; it does **not** publish. The caller owns
+   the Pages trio. `deploy-pages` being job-scoped forces the caller to declare
+   the environment/permissions regardless, so publishing from inside the action
+   would only fragment Pages knowledge across two files. The `docs`-artifact upload
+   stays inside the action so the bare-`html/` contract lives next to the gather
+   side that depends on it.
+
+## Migration from an existing `gh-pages` branch
+
+Repos already on the old `keep_files`/`gh-pages` model have their version history
+living as directories on the `gh-pages` branch, not as `docs.zip` release assets.
+Moving them onto the new model is a **one-time, guarded cutover**, not a backfill —
+it ends with two irreversible steps (flipping the Pages source, deleting the
+branch) that want a human watching with their own admin credentials.
+
+This is therefore a **local one-shot script** run by the operator with their own
+`gh auth`, **not** a CI job:
+
+- A CI `GITHUB_TOKEN` typically cannot change the Pages source
+  (`PATCH /repos/{owner}/{repo}/pages` needs repo-admin); the operator's `gh`
+  already can.
+- The cutover needs a human pause-and-verify gate before anything destructive,
+  which a fire-and-forget workflow handles poorly.
+- It leaves nothing behind — no `workflow_dispatch` stub to add to (and later
+  delete from) each consumer repo. The same script serves DLS and external
+  adopters alike.
+
+The non-destructive **backfill** is the reusable, unit-tested `migrate` subcommand
+of `assemble.mjs` (read `gh-pages` → zip each tag dir as bare `html/` →
+`gh release upload`). The **flip / verify / delete** steps are thin interactive
+`gh api` calls the script orchestrates around it.
+
+### Cutover sequence
+
+```
+1. Backfill (non-destructive, idempotent)
+     for each release tag with a matching gh-pages dir lacking docs.zip:
+       stage <dir> as html/ ; zip ; gh release upload <tag> docs.zip --clobber
+     # MUST be first: the reconstructed site is built from these assets.
+     # Branch dirs (main/) need nothing — they self-heal on the next branch CI.
+
+2. Flip Pages source → GitHub Actions          (gh api PATCH …/pages)
+     # Forced to be here: deploy-pages refuses to publish unless the source is
+     # already "GitHub Actions", so you cannot verify a new deploy before flipping.
+
+3. Trigger a deploy                            (gh workflow run docs.yml)
+     # Reconstructs the full tree (backfilled docs.zip + current build) + publishes.
+
+4. PAUSE + verify (auto-probe AND explicit human OK)
+     # switcher.json lists every expected version; each <version>/ URL returns 200
+     # and is styled (not a bare-HTML 404).
+
+5. Delete gh-pages — only after step 4 is green.
+```
+
+Between steps 2 and 5 the `gh-pages` branch is no longer *served* but still
+*exists*: it is the **rollback**. If verification fails, flip the Pages source
+back to "Deploy from a branch / `gh-pages`" and serving is restored instantly with
+no data lost — which is exactly why the delete is last and gated. The script
+should say this out loud when it pauses.
+
+(This repo is the test bed: `gh-pages` already holds `v0.1.0/`, `v0.2.0/`, and
+`main/`, with no `docs.zip` assets yet. A dry run exercising step 1 + step 4's
+probe — skipping the flip and delete — validates the real path.)
 
 ## Implementation phases
 
 1. Refactor `make-switcher.mjs` → `assemble.mjs`: replace gh-pages discovery with
-   `discoverVersions(siteDir)`; keep pure functions + their tests; add tests for
-   directory discovery.
-2. Write the `deploy/action.yml` pipeline (steps 1–6) with `gh`-based gathering.
-3. Switch `_docs.yml` to build-then-invoke; add the `github-pages` environment,
-   Pages permissions, and `concurrency`. Set the repo's Pages source to GitHub
-   Actions.
-4. Add `docs.zip` attachment to `_release.yml` (decision #2).
-5. Update `docs/index.md` + `CLAUDE.md` consuming instructions.
-6. Backfill: attach `docs.zip` to existing releases (or accept they show only if
-   rebuilt).
-```
+   `discoverVersions(siteDir)`; add `sanitize()` and `planBranches()`; retarget
+   `renderRedirect` to `stable/` and have `generate` emit the stable-alias source;
+   keep the pure functions + their tests; add tests for directory discovery, mixed
+   branch+tag ordering, sanitisation, branch planning (incl. required-missing →
+   fail), and the redirect/stable-source decision (incl. the no-release fallback).
+2. Add stable-alias handling to `plugins/version-switcher/version-switcher.mjs`:
+   `detectCurrent` selects the `preferred` entry under `<base>/stable/` and returns
+   the actual base pathname; `computeTargetUrl` strips the passed base. Tests:
+   detect on `/stable/x` → preferred + base `/stable/`; path-preserve from a stable
+   page; ordinary pages unchanged.
+3. Write `current-version/action.yml` (calls the shared `sanitize()` → `version`
+   output) and `assemble/action.yml` (pipeline steps 1–8) with `gh`-based plumbing
+   (gh's built-in `-q`, never a `jq` pipe).
+4. Switch `_docs.yml` to current-version → build → assemble → publish; add the
+   `github-pages` environment, Pages permissions, `concurrency`, and the explicit
+   `upload-pages-artifact` + `deploy-pages` steps. Set the repo's Pages source to
+   GitHub Actions.
+5. Add `docs.zip` attachment to `_release.yml` (downloads the `docs` artifact),
+   with `needs: _docs` (decision #2).
+6. Update `docs/index.md` + `CLAUDE.md` consuming instructions.
+7. Write the `migrate` subcommand of `assemble.mjs` (backfill `docs.zip` from a
+   `gh-pages` tree) + its tests, and the local cutover script wrapping it (flip
+   Pages source → trigger deploy → pause/verify → delete `gh-pages`). See
+   Migration above. Dry-run it against this repo's `gh-pages` branch.
