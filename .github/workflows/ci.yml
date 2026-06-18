@@ -18,7 +18,10 @@ jobs:
   docs:
     uses: ./.github/workflows/_docs.yml
     permissions:
-      contents: write
+      contents: read    # checkout + read release assets
+      actions: read     # download other runs' docs artifacts (cross-run)
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
 
   release:
     needs: [lint, test, docs]

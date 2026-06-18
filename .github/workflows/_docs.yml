@@ -1,14 +1,26 @@
 on:
   workflow_call:
 
-# Mirrors python-copier-template-example .github/workflows/_docs.yml, adapted for a
-# MyST/JS project: this repo has no uv/tox, so docs are built with mystmd via npm
-# rather than `uv run tox -e docs`, and switcher.json is written by this repo's own
-# `switcher` composite action instead of `make_switcher.py`.
+# Reconstruct the whole versioned site from durable sources and publish it
+# directly to GitHub Pages (no gh-pages branch). See DESIGN.md.
+#
+# Split into build + deploy: only the deploy job enters the `github-pages`
+# environment, so PR build-checks (which never deploy) aren't gated by the
+# environment's deployment-branch protection. Requires the repo's Pages source
+# set to "GitHub Actions" (Settings → Pages).
+
+# Publish on: any tag, the default branch, or any push to a FORK (whose own
+# Pages serves the contributor's preview — see DESIGN "External-PR previews").
+# A base-repo PR only build-checks; nothing is published.
+env:
+  UPSTREAM: DiamondLightSource/myst-version-switcher-plugin
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read   # checkout + read release assets
+      actions: read     # download other runs' docs artifacts (cross-run)
     steps:
       - name: Avoid git conflicts when tag and branch pushed at same time
         if: github.ref_type == 'tag'
@@ -17,51 +29,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          # Need tags (for the switcher version list) and origin/gh-pages.
-          fetch-depth: 0
+          fetch-depth: 0   # tags, for version ordering + prerelease detection
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Sanitize ref name for docs version
-        run: echo "DOCS_VERSION=${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}" >> $GITHUB_ENV
+      - name: Sanitise the current ref to a docs version
+        id: ver
+        uses: ./current-version
+        with:
+          ref-name: ${{ github.ref_name }}
 
-      # BASE_URL is required so assets/links resolve under the versioned Pages
-      # sub-path (https://<org>.github.io/<repo>/$DOCS_VERSION/).
+      # BASE_URL must match the versioned sub-path the build is served at, or its
+      # root-absolute assets 404. Same token the assemble action names site/<v>.
       - name: Build docs
         env:
-          BASE_URL: /${{ github.event.repository.name }}/${{ env.DOCS_VERSION }}
+          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version }}
         run: npm run docs
 
-      # Two layouts from the one build: `artifact/html` for the uploaded artifact
-      # (downstream relies on the `html` dir name), and `pages/<version>` for
-      # the gh-pages publish tree, into which the action also writes switcher.json
-      # and the root redirect.
-      - name: Stage built docs
-        run: |
-          mkdir -p $RUNNER_TEMP/artifact $RUNNER_TEMP/pages
-          cp -r docs/_build/html $RUNNER_TEMP/artifact/html
-          cp -r docs/_build/html $RUNNER_TEMP/pages/${{ env.DOCS_VERSION }}
-
-      - name: Upload built docs artifact
-        uses: actions/upload-artifact@v4
+      # Gather every version + this build, write switcher.json + redirect, upload
+      # this build's `docs` artifact, and emit the assembled site dir. On a fork,
+      # required-branches is the current ref (so its own preview always satisfies
+      # the guard); upstream guards `main`.
+      - name: Assemble versioned site
+        id: site
+        if: github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM
+        uses: ./assemble
         with:
-          name: docs
-          path: ${{ runner.temp }}/artifact
+          html-dir: docs/_build/html
+          ref-name: ${{ github.ref_name }}
+          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
 
-      - name: Write switcher.json + redirect
-        uses: ./switcher
+      - name: Upload Pages artifact
+        if: steps.site.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
         with:
-          version: ${{ env.DOCS_VERSION }}
-          repo: ${{ github.repository }}
-          output-dir: ${{ runner.temp }}/pages
+          path: ${{ steps.site.outputs.dir }}
 
-      - name: Publish Docs to gh-pages
-        if: github.ref_type == 'tag' || github.ref_name == 'main'
-        # We pin to the SHA, not the tag, for security reasons.
-        # https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#using-third-party-actions
-        uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e # v4.0.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ${{ runner.temp }}/pages
-          keep_files: true
+  deploy:
+    needs: build
+    if: github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

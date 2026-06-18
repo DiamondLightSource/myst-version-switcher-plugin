@@ -184,23 +184,25 @@ successful CI run (distinct head branches of recent successful `ci.yml` runs).
 
 ## What stays in the caller workflow
 
-The caller builds, invokes the two actions, and owns the Pages publish. The job
-**must** carry the Pages `environment`, permissions, and `concurrency`, because
-`deploy-pages` is job-scoped — a composite action cannot declare any of those.
-Keeping all Pages concerns together in the caller is why the action stops at
-"assemble" (see resolved decision #5).
+The caller builds, invokes the two actions, and owns the Pages publish. It is
+split into a **build** job and a **deploy** job: only `deploy` enters the
+`github-pages` environment (and carries `pages`/`id-token` + `concurrency`),
+because `deploy-pages` is job-scoped — a composite action cannot declare any of
+those. The split matters because the environment's deployment-branch protection
+is evaluated when a job *enters* it, so a single job carrying the environment
+would block PR build-checks that never deploy. Keeping all Pages concerns in the
+caller is why the action stops at "assemble" (see resolved decision #5).
 
 ```yaml
+env:
+  UPSTREAM: <org>/<repo>    # the canonical repo; pushes elsewhere = a fork preview
+
 jobs:
-  docs:
+  build:
     runs-on: ubuntu-latest
-    environment: { name: github-pages }
     permissions:
       contents: read     # checkout + read release assets
       actions: read      # download other runs' artifacts (cross-run)
-      pages: write       # deploy to Pages
-      id-token: write    # deploy-pages OIDC
-    concurrency: { group: pages, cancel-in-progress: false }
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }            # tags, for ordering + prerelease
@@ -211,24 +213,41 @@ jobs:
         env:
           BASE_URL: /<repo>/${{ steps.ver.outputs.version }}
       - id: site
-        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' }}
+        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
         uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
+          # forks guard only their own ref; upstream guards main
+          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
       - if: ${{ steps.site.outcome == 'success' }}
         uses: actions/upload-pages-artifact
         with: { path: ${{ steps.site.outputs.dir }} }
-      - if: ${{ steps.site.outcome == 'success' }}
+
+  deploy:
+    needs: build
+    # NB: env context is unavailable in a job-level `if`, so the upstream slug is
+    # inlined here (it can be templated by copier).
+    if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != '<org>/<repo>' }}
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
+    permissions:
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
+    concurrency: { group: pages, cancel-in-progress: false }
+    steps:
+      - id: deployment
         uses: actions/deploy-pages
 ```
 
 `current-version` runs unconditionally (the PR build still needs the right
-`BASE_URL`). `assemble` + the publish steps are gated off for PRs by the `if:` —
-the build itself still runs on PRs to catch breakages; nothing is published and
-no `docs` artifact is uploaded (PR builds are not previews). `deploy-pages`
-publishes the uploaded tree as the *entire* site (no merge), so a stale branch
-preview that is no longer gathered is correctly dropped.
+`BASE_URL`). `assemble` + publish are gated off for *base-repo* PRs by the `if:`
+— the build itself still runs on PRs to catch breakages; nothing is published and
+no `docs` artifact is uploaded (PR builds are not previews). The `github.repository
+!= UPSTREAM` arm lets a **fork's own push** publish to the fork's Pages (see
+External-PR previews). `deploy-pages` publishes the uploaded tree as the *entire*
+site (no merge), so a stale branch preview that is no longer gathered is correctly
+dropped.
 
 ## Reused vs. new logic
 
