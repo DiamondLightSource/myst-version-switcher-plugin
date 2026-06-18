@@ -1,6 +1,7 @@
 # Design note: versioned docs publishing
 
-Status: **proposed** (not yet implemented). Captures the planned move from the
+Status: **implemented** (phases 1–7 in code; see "Implementation phases"). Two
+operator actions remain, called out at the end. Captures the move from the
 current "switcher writes two files, caller stages + publishes to a `gh-pages`
 branch with `keep_files`" model to a pair of small actions that **reconstruct the
 whole versioned site from durable sources on every deploy and publish it directly
@@ -548,30 +549,38 @@ probe — skipping the flip and delete — validates the real path.)
 
 ## Implementation phases
 
-1. Refactor `make-switcher.mjs` → `assemble.mjs`: replace gh-pages discovery with
-   `discoverVersions(siteDir)`; add `sanitize()` and `planBranches()`; retarget
-   `renderRedirect` to `stable/` and have `generate` emit the stable-alias source;
-   keep the pure functions + their tests; add tests for directory discovery, mixed
-   branch+tag ordering, sanitisation, branch planning (incl. required-missing →
-   fail), and the redirect/stable-source decision (incl. the no-release fallback).
-2. Add stable-alias handling to `plugins/version-switcher/version-switcher.mjs`:
-   `detectCurrent` selects the `preferred` entry under `<base>/stable/` and returns
-   the actual base pathname; `computeTargetUrl` strips the passed base. Tests:
-   detect on `/stable/x` → preferred + base `/stable/`; path-preserve from a stable
-   page; ordinary pages unchanged.
-3. Write `current-version/action.yml` (calls the shared `sanitize()` → `version`
+1. **[done]** Refactor `make-switcher.mjs` → `assemble.mjs`: replace gh-pages
+   discovery with `discoverVersions(siteDir)`; add `sanitize()` and
+   `planBranches()`; retarget `renderRedirect` to `stable/` and have `generate`
+   emit the stable-alias source; keep the pure functions + their tests; add tests
+   for directory discovery, mixed branch+tag ordering, sanitisation, branch
+   planning (incl. required-missing → fail), and the redirect/stable-source
+   decision (incl. the no-release fallback).
+2. **[done]** Add stable-alias handling to `version-switcher.mjs`: `detectCurrent`
+   selects the `preferred` entry under `<base>/stable/` and returns the actual base
+   pathname; `computeTargetUrl`/`resolveTargetUrl` strip the passed base.
+3. **[done]** Write `current-version/action.yml` (shared `sanitize()` → `version`
    output) and `assemble/action.yml` (pipeline steps 1–8) with `gh`-based plumbing
    (gh's built-in `-q`, never a `jq` pipe). Step 3 caches the extracted release
-   layer (`docs-html-<tag>-<digest>`; see Release-layer cache).
-4. Switch `_docs.yml` to current-version → build → assemble → publish; add the
-   `github-pages` environment, Pages permissions, `concurrency`, and the explicit
-   `upload-pages-artifact` + `deploy-pages` steps. Gate publish so fork pushes
-   deploy to the fork's Pages (see External-PR previews). Set the repo's Pages
-   source to GitHub Actions.
-5. Add `docs.zip` attachment to `_release.yml` (downloads the `docs` artifact),
-   with `needs: _docs` (decision #2).
-6. Update `docs/index.md` + `CLAUDE.md` consuming instructions.
-7. Write the `migrate` subcommand of `assemble.mjs` (backfill `docs.zip` from a
-   `gh-pages` tree) + its tests, and the local cutover script wrapping it (flip
-   Pages source → trigger deploy → pause/verify → delete `gh-pages`). See
-   Migration above. Dry-run it against this repo's `gh-pages` branch.
+   bundle (`docs-releases-v1-<tag-set-hash>`; see Release-layer cache).
+   `plan-branches` emits `<runId>\t<destDir>` TSV for the bash loop.
+4. **[done]** Switch `_docs.yml` to current-version → build → assemble → publish,
+   split into build + deploy jobs (only deploy carries the `github-pages`
+   environment + `pages`/`id-token` perms + `concurrency`). Gate publish on
+   tag/main/fork so fork pushes deploy to the fork's Pages. *(Operator: set the
+   repo's Pages source to GitHub Actions.)*
+5. **[done]** Attach `docs.zip` in `_release.yml` (downloads the `docs` artifact);
+   ci.yml's release job already `needs: docs` (decision #2).
+6. **[done]** Update `docs/index.md` + `CLAUDE.md` consuming instructions.
+7. **[done]** `migrate` subcommand of `assemble.mjs` (+ `planMigration` tests) and
+   the cutover script `scripts/cutover.sh` (backfill → flip → deploy → pause/verify
+   → gated delete). *(Operator: dry-run it against this repo's `gh-pages` branch
+   before the real cutover.)*
+
+### Remaining operator actions (not code)
+
+- Set this repo's **Pages source → GitHub Actions** (Settings → Pages) before the
+  first new-model deploy; `deploy-pages` refuses to publish otherwise.
+- Run `scripts/cutover.sh <org/repo> --dry-run` against this repo's `gh-pages`
+  (which holds `v0.1.0/`, `v0.2.0/`, `main/` with no `docs.zip` yet) to validate
+  the backfill + probe, then the real cutover when ready.
