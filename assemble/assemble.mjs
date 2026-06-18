@@ -12,8 +12,10 @@
  *
  *   node assemble.mjs plan-branches --ref-name <r> --required <csv> \
  *       --optional <csv> --ci <json>
- *       → print the {runId, destDir} fetch list as JSON; exit 1 if a required
- *         branch is neither the current ref nor present in the CI catalogue.
+ *       → print the fetch list as `<runId>\t<destDir>` TSV lines (one per
+ *         branch, so bash reads it with `while read` and never parses JSON);
+ *         exit 1 if a required branch is neither the current ref nor present in
+ *         the CI catalogue.
  *
  *   node assemble.mjs generate --site-dir <dir> --repo <org/repo>
  *       → write switcher.json + index.html into <dir>; print the stable-alias
@@ -264,7 +266,11 @@ function cmdPlanBranches(rest) {
 		process.exitCode = 1;
 		return;
 	}
-	console.log(JSON.stringify(fetch));
+	// TSV (`<runId>\t<destDir>`) so the action reads it with `while read` rather
+	// than parsing JSON in bash.
+	for (const { runId, destDir } of fetch) {
+		console.log(`${runId}\t${destDir}`);
+	}
 }
 
 /** `generate --site-dir --repo` — write switcher.json + index.html; emit stable src. */

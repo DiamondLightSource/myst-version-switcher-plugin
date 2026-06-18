@@ -16,7 +16,8 @@
 	"files": [
 		"plugins/version-switcher/version-switcher.mjs",
 		"assemble/assemble.mjs",
-		"switcher/action.yml"
+		"assemble/action.yml",
+		"current-version/action.yml"
 	],
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.0",

@@ -350,13 +350,19 @@ distinction matters because GH cache semantics actively fight the obvious
   under a 10 GB/repo LRU cap), so the full durable-source gather must exist
   regardless. The cache only ever *accelerates* it.
 
-So cache **only the released-tags layer**, which is immutable and permanent:
+So cache **only the released-tags layer**, which is immutable and permanent. A
+composite action can't express a dynamic per-tag cache step, so the realisation
+is a single extracted-releases bundle dir (`<tag>/html` per release) behind one
+`actions/cache` step:
 
-- Key each extracted release `docs-html-<tag>-<asset-digest>` (digest from
-  `gh release view <tag> --json assets`). Immutable content ⇒ the key is never
-  invalidated; a new release is simply a new key (a miss for that one tag). On a
-  miss, fall back to `gh release download` + `unzip` as today, then save the
-  cache. Branches (incl. `main`) stay fresh from CI artifacts every deploy.
+- Key `docs-releases-v1-<hash of the sorted tag set>` with restore-keys prefix
+  `docs-releases-v1-`. Adding a release changes the key ⇒ the prefix restores the
+  previous superset (every prior release), the gather loop downloads only the one
+  new tag, and the post-step save stores the new superset. Released `docs.zip` is
+  immutable, so a restored tag dir is never stale (a deliberate `--clobber`
+  re-upload is out of scope — bump the `v1` key prefix if ever needed). On a miss
+  the loop falls back to `gh release download` + `unzip` as today. Branches (incl.
+  `main`) stay fresh from CI artifacts every deploy.
 
 This is a transparent enhancement to step 3 of the `assemble` pipeline, not a
 change to the action's contract. It is optional — correctness rests entirely on

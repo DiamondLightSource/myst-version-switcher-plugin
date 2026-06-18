@@ -1,0 +1,220 @@
+name: Assemble versioned docs site
+description: >-
+  Reconstruct the whole versioned docs site from durable sources and output its
+  directory for the CALLER to publish to GitHub Pages. Gathers this build, every
+  release's docs.zip asset, and recent branch CI artifacts; writes switcher.json
+  + a root redirect; uploads this build's `docs` artifact; and creates the
+  `stable/` alias. Does NOT publish (deploy-pages is job-scoped — the caller owns
+  it). Run AFTER `myst build`. Requires Node + `gh` on PATH (preinstalled on
+  GitHub runners) and the repo checked out with tags (fetch-depth: 0).
+
+inputs:
+  html-dir:
+    description: Path to the freshly built docs (e.g. docs/_build/html).
+    required: true
+  ref-name:
+    description: The raw, unsanitised ref (e.g. ${{ github.ref_name }}); sanitised internally.
+    required: true
+  repo:
+    description: org/repo slug, for version URLs and gh lookups.
+    required: false
+    default: ${{ github.repository }}
+  required-branches:
+    description: >-
+      Comma-separated branches that MUST be present, else the deploy hard-fails.
+      Empty → the repo's default branch.
+    required: false
+    default: ""
+  optional-branches:
+    description: >-
+      Comma-separated branch previews to include if they have a recent CI artifact
+      (missing → silently skipped). Empty → every branch with a recent successful
+      ci.yml run.
+    required: false
+    default: ""
+  token:
+    description: Token for gh (release assets + cross-run artifacts).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  dir:
+    description: Path to the assembled publish root, for upload-pages-artifact.
+    value: ${{ steps.out.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    # 1. Stage the current build: once as the docs-artifact source (bare html/ at
+    #    root) and once as site/<version>. Export shared paths to later steps.
+    - name: Stage current build
+      shell: bash
+      env:
+        REF_NAME: ${{ inputs.ref-name }}
+        HTML_DIR: ${{ inputs.html-dir }}
+      run: |
+        set -euo pipefail
+        ver=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$REF_NAME")
+        site="$RUNNER_TEMP/site"
+        src="$RUNNER_TEMP/site-src"
+        mkdir -p "$site" "$src"
+        cp -r "$HTML_DIR" "$src/html"
+        cp -r "$HTML_DIR" "$site/$ver"
+        {
+          echo "VS_VER=$ver"
+          echo "VS_SITE=$site"
+          echo "VS_SRC=$src"
+        } >> "$GITHUB_ENV"
+
+    # 2. Upload this build's docs artifact (every run). The archive root contains
+    #    html/ — the contract _release.yml's docs.zip also satisfies.
+    - name: Upload docs artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docs
+        path: ${{ env.VS_SRC }}
+
+    # 3a. Build the release manifest (tags that carry a docs.zip) and a cache key
+    #     over the sorted tag set. See DESIGN "Release-layer cache".
+    - name: Plan release downloads
+      id: releases
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        manifest="$RUNNER_TEMP/releases.manifest"
+        : > "$manifest"
+        for tag in $(git tag -l); do
+          if [ "$tag" = "$VS_VER" ]; then continue; fi
+          has=$(gh release view "$tag" --repo "$REPO" --json assets \
+                  -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)
+          if [ "$has" = "true" ]; then echo "$tag" >> "$manifest"; fi
+        done
+        sort -o "$manifest" "$manifest"
+        key=$(sha256sum "$manifest" | cut -d' ' -f1)
+        cache="$RUNNER_TEMP/releases-cache"
+        mkdir -p "$cache"
+        echo "key=docs-releases-v1-$key" >> "$GITHUB_OUTPUT"
+        {
+          echo "VS_MANIFEST=$manifest"
+          echo "VS_CACHE=$cache"
+        } >> "$GITHUB_ENV"
+
+    # 3b. Restore the extracted-releases bundle; the post-step saves the superset
+    #     under the new key when a release was added (immutable content).
+    - name: Restore cached release builds
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VS_CACHE }}
+        key: ${{ steps.releases.outputs.key }}
+        restore-keys: docs-releases-v1-
+
+    # 3c. Materialise each release into site/<tag>, downloading only cache misses.
+    - name: Gather released versions
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        while read -r tag; do
+          if [ -z "$tag" ]; then continue; fi
+          cached="$VS_CACHE/$tag/html"
+          if [ ! -d "$cached" ]; then
+            tmp="$RUNNER_TEMP/rel-$tag"
+            rm -rf "$tmp"; mkdir -p "$tmp"
+            if ! gh release download "$tag" --repo "$REPO" -p docs.zip -O "$tmp/docs.zip"; then
+              echo "::warning::no docs.zip for $tag — skipping"; continue
+            fi
+            if ! unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" || [ ! -d "$tmp/html" ]; then
+              echo "::warning::$tag docs.zip has no html/ root — skipping"; continue
+            fi
+            mkdir -p "$VS_CACHE/$tag"
+            rm -rf "$cached"
+            mv "$tmp/html" "$cached"
+          fi
+          rm -rf "${VS_SITE:?}/$tag"
+          cp -r "$cached" "$VS_SITE/$tag"
+        done < "$VS_MANIFEST"
+
+    # 4. Plan branch previews (pure JS kernel): resolve required ∪ optional to a
+    #    <runId>\t<destDir> TSV. A missing required branch makes node exit 1, which
+    #    (set -e) fails the step and the caller's deploy.
+    - name: Plan branch previews
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        REF_NAME: ${{ inputs.ref-name }}
+        REQUIRED_IN: ${{ inputs.required-branches }}
+        OPTIONAL_IN: ${{ inputs.optional-branches }}
+      run: |
+        set -euo pipefail
+        ci=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
+               --json headBranch,databaseId \
+               -q '[.[] | {branch: .headBranch, runId: .databaseId}]')
+        required="$REQUIRED_IN"
+        if [ -z "$required" ]; then
+          required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+        fi
+        optional="$OPTIONAL_IN"
+        if [ -z "$optional" ]; then
+          optional=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
+                       --json headBranch -q '[.[].headBranch] | unique | join(",")')
+        fi
+        plan="$RUNNER_TEMP/branch-plan.tsv"
+        node "$GITHUB_ACTION_PATH/assemble.mjs" plan-branches \
+          --ref-name "$REF_NAME" \
+          --required "$required" \
+          --optional "$optional" \
+          --ci "$ci" > "$plan"
+        echo "VS_PLAN=$plan" >> "$GITHUB_ENV"
+
+    # 5. Fetch each planned branch's docs artifact into site/<destDir>.
+    - name: Fetch branch previews
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        while IFS=$'\t' read -r runId destDir; do
+          if [ -z "$runId" ]; then continue; fi
+          tmp="$RUNNER_TEMP/br-$destDir"
+          rm -rf "$tmp"; mkdir -p "$tmp"
+          gh run download "$runId" --repo "$REPO" -n docs -D "$tmp"
+          rm -rf "${VS_SITE:?}/$destDir"
+          mv "$tmp/html" "$VS_SITE/$destDir"
+        done < "$VS_PLAN"
+
+    # 6. Generate switcher.json + root redirect; print the stable-alias source.
+    - name: Generate switcher + redirect
+      id: generate
+      shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        stable_src=$(node "$GITHUB_ACTION_PATH/assemble.mjs" generate \
+          --site-dir "$VS_SITE" --repo "$REPO")
+        echo "stable_src=$stable_src" >> "$GITHUB_OUTPUT"
+
+    # 7. Stable alias: a symlink, inflated to a real copy by upload-pages-artifact
+    #    (it tars with --dereference). Absent before the first release.
+    - name: Create stable alias
+      shell: bash
+      env:
+        STABLE_SRC: ${{ steps.generate.outputs.stable_src }}
+      run: |
+        set -euo pipefail
+        if [ -n "$STABLE_SRC" ]; then
+          ln -s "$STABLE_SRC" "$VS_SITE/stable"
+        fi
+
+    # 8. Output the assembled dir for the caller's upload-pages-artifact step.
+    - name: Output assembled dir
+      id: out
+      shell: bash
+      run: echo "dir=$VS_SITE" >> "$GITHUB_OUTPUT"
