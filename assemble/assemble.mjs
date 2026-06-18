@@ -21,12 +21,25 @@
  *       → write switcher.json + index.html into <dir>; print the stable-alias
  *         source dir (the newest deployed release) on stdout, or nothing.
  *
+ *   node assemble.mjs migrate [--pages-ref <ref>] [--repo <org/repo>] [--dry-run]
+ *       → one-time gh-pages → durable-source backfill: for each release tag with a
+ *         gh-pages version dir but no docs.zip asset, zip that dir as bare html/
+ *         and `gh release upload --clobber`. Prints each backfilled tag; --dry-run
+ *         prints the plan and uploads nothing. Used by the cutover script.
+ *
  * The pure functions take plain data so they unit-test without git, the network,
  * or (mostly) the filesystem. Only `discoverVersions`, `getSortedTags` and the
  * `generate` file writes touch IO.
  */
 import { execFileSync } from "node:child_process";
-import { readdirSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	renameSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -181,6 +194,25 @@ export function planBranches({
 	return { fetch, missingRequired };
 }
 
+/**
+ * Plan the docs.zip backfill for the one-time gh-pages → durable-source
+ * migration. Pure. A tag needs backfilling iff it has a gh-pages version
+ * directory, is a real release tag, and lacks a docs.zip asset. Branch dirs
+ * (`main/`, …) are ignored — they self-heal on the next branch CI.
+ *
+ * @param {object}   args
+ * @param {string[]} [args.pagesDirs]  top-level dirs on the gh-pages branch
+ * @param {string[]} [args.tags]       release tag names
+ * @param {string[]} [args.withDocsZip] tags that already have a docs.zip asset
+ * @returns {{backfill: string[]}} tags to backfill, in `pagesDirs` order
+ */
+export function planMigration({ pagesDirs = [], tags = [], withDocsZip = [] }) {
+	const tagSet = new Set(tags);
+	const have = new Set(withDocsZip);
+	const backfill = pagesDirs.filter((d) => tagSet.has(d) && !have.has(d));
+	return { backfill };
+}
+
 /** Build the pydata switcher array for `org/repo`, flagging the stable entry. */
 export function switcherStruct(repository, versions, preferred) {
 	const [org, repoName] = repository.split("/");
@@ -319,6 +351,95 @@ function cmdGenerate(rest) {
 	if (stableSrc) console.log(stableSrc);
 }
 
+/** Top-level directory names on a git ref (e.g. `origin/gh-pages`). */
+function getBranchDirs(ref) {
+	try {
+		return gitLines(["ls-tree", "-d", "--name-only", ref]);
+	} catch {
+		return [];
+	}
+}
+
+/** Does `tag`'s GitHub Release carry a `docs.zip` asset? (false on any gh error.) */
+function releaseHasDocsZip(tag, repo) {
+	const args = [
+		"release",
+		"view",
+		tag,
+		"--json",
+		"assets",
+		"-q",
+		'any(.assets[]; .name=="docs.zip")',
+	];
+	if (repo) args.push("--repo", repo);
+	try {
+		const out = execFileSync("gh", args, {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return out.trim() === "true";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Zip the gh-pages `<tag>/` subtree as a bare `html/` archive and attach it as the
+ * release's `docs.zip` (clobbering any prior one). All IO; the operator runs this
+ * locally with their own `gh auth` (see DESIGN "Migration").
+ */
+function backfillTag(tag, pagesRef, repo) {
+	const tmp = mkdtempSync(join(tmpdir(), `migrate-${sanitize(tag)}-`));
+	const tarPath = join(tmp, "src.tar");
+	// git archive emits entries under `<tag>/…`; capture the tar (binary) to a file
+	// then extract, rather than piping through a shell.
+	writeFileSync(
+		tarPath,
+		execFileSync("git", ["archive", "--format=tar", pagesRef, tag], {
+			maxBuffer: 1024 * 1024 * 1024,
+		}),
+	);
+	const extract = join(tmp, "extract");
+	mkdirSync(extract);
+	execFileSync("tar", ["-xf", tarPath, "-C", extract]);
+	renameSync(join(extract, tag), join(tmp, "html"));
+	execFileSync("zip", ["-rq", "docs.zip", "html"], { cwd: tmp });
+	const args = ["release", "upload", tag, join(tmp, "docs.zip"), "--clobber"];
+	if (repo) args.push("--repo", repo);
+	execFileSync("gh", args, { stdio: "inherit" });
+}
+
+/** `migrate [--pages-ref --repo --dry-run]` — backfill docs.zip from gh-pages. */
+function cmdMigrate(rest) {
+	const { values } = parseArgs({
+		args: rest,
+		options: {
+			"pages-ref": { type: "string" },
+			repo: { type: "string" },
+			"dry-run": { type: "boolean" },
+		},
+	});
+	const pagesRef = values["pages-ref"] || "origin/gh-pages";
+	const repo = values.repo;
+	const dryRun = Boolean(values["dry-run"]);
+
+	const pagesDirs = getBranchDirs(pagesRef);
+	const tags = getSortedTags();
+	const withDocsZip = tags.filter((t) => releaseHasDocsZip(t, repo));
+	const { backfill } = planMigration({ pagesDirs, tags, withDocsZip });
+
+	console.error(`gh-pages (${pagesRef}) dirs: ${JSON.stringify(pagesDirs)}`);
+	console.error(`already have docs.zip: ${JSON.stringify(withDocsZip)}`);
+	console.error(
+		`${dryRun ? "would backfill" : "backfilling"}: ${JSON.stringify(backfill)}`,
+	);
+
+	for (const tag of backfill) {
+		if (!dryRun) backfillTag(tag, pagesRef, repo);
+		console.log(tag); // stdout: the backfilled (or planned) tags, one per line
+	}
+}
+
 export function main(argv = process.argv.slice(2)) {
 	const [cmd, ...rest] = argv;
 	switch (cmd) {
@@ -328,9 +449,11 @@ export function main(argv = process.argv.slice(2)) {
 			return cmdPlanBranches(rest);
 		case "generate":
 			return cmdGenerate(rest);
+		case "migrate":
+			return cmdMigrate(rest);
 		default:
 			throw new Error(
-				"usage: assemble.mjs <sanitize|plan-branches|generate> ...",
+				"usage: assemble.mjs <sanitize|plan-branches|generate|migrate> ...",
 			);
 	}
 }

@@ -15,6 +15,7 @@ import {
 	isPrerelease,
 	orderVersions,
 	planBranches,
+	planMigration,
 	preferredVersion,
 	renderRedirect,
 	renderSwitcher,
@@ -170,6 +171,37 @@ ok("planBranches reports an unsatisfiable required branch");
 plan = planBranches({ refName: "release-2", required: ["release-2"], ci });
 assert.deepEqual(plan, { fetch: [], missingRequired: [] });
 ok("planBranches treats the current ref as satisfying a required branch");
+
+// --- planMigration: which tags need a docs.zip backfilled from gh-pages ---
+// release tags with a gh-pages dir and no docs.zip → backfill, in pagesDirs order;
+// branch dirs (main) and tags without a dir are skipped.
+assert.deepEqual(
+	planMigration({
+		pagesDirs: ["main", "v0.1.0", "v0.2.0"],
+		tags: ["v0.2.0", "v0.1.0"],
+		withDocsZip: [],
+	}),
+	{ backfill: ["v0.1.0", "v0.2.0"] },
+);
+ok("planMigration backfills release dirs lacking docs.zip, skips branches");
+
+// tags that already have docs.zip are not re-backfilled.
+assert.deepEqual(
+	planMigration({
+		pagesDirs: ["main", "v0.1.0", "v0.2.0"],
+		tags: ["v0.2.0", "v0.1.0"],
+		withDocsZip: ["v0.1.0"],
+	}),
+	{ backfill: ["v0.2.0"] },
+);
+ok("planMigration skips tags that already have docs.zip");
+
+// a release tag with no gh-pages dir is nothing to backfill from.
+assert.deepEqual(
+	planMigration({ pagesDirs: ["main"], tags: ["v1.0"], withDocsZip: [] }),
+	{ backfill: [] },
+);
+ok("planMigration ignores tags with no gh-pages directory");
 
 // --- switcherStruct shape, with the stable entry flagged ---
 assert.deepEqual(
