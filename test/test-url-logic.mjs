@@ -13,8 +13,8 @@ import {
 	resolveTargetUrl,
 	withLocalFallback,
 	withTrailingSlash,
-} from "../plugins/version-switcher/version-switcher.mjs";
-import plugin from "../plugins/version-switcher/version-switcher.mjs";
+} from "../plugins/version-switcher.mjs";
+import plugin from "../plugins/version-switcher.mjs";
 
 const switcher = [
 	{

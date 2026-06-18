@@ -8,7 +8,7 @@ publish it directly to GitHub Pages.
 ## Repo layout
 
 ```
-plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
+plugins/version-switcher.mjs                   # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
 current-version/action.yml                     # pre-build: sanitise ref → version token (BASE_URL sub-path)
 assemble/action.yml                            # post-build: gather all versions, write switcher.json + redirect, output site dir
 lib/assemble.mjs                               # dependency-free Node kernel shared by both actions (sanitize / generate / migrate)
@@ -21,7 +21,7 @@ docs/                                          # this repo's own docs (dogfoods 
 
 | half | file | how consumers use it |
 |------|------|----------------------|
-| Plugin (widget) | `plugins/version-switcher/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
+| Plugin (widget) | `plugins/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
 | Site actions | `current-version/`, `assemble/` | `uses: DiamondLightSource/myst-version-switcher-plugin/{current-version,assemble}@<tag>` |
 
 One `vX.Y.Z` tag versions both. The plugin is published as a GitHub Release asset
@@ -104,7 +104,7 @@ npm run docs                # build docs (same command CI uses)
 npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
 ```
 
-`docs/myst.yml` loads the plugin from `../plugins/version-switcher/version-switcher.mjs`
+`docs/myst.yml` loads the plugin from `../plugins/version-switcher.mjs`
 (not a release URL), so edits are reflected on rebuild.
 
 **Browser caveat:** `<select>` popups don't open in VS Code Simple Browser. Open the
@@ -151,7 +151,7 @@ Attach each tag's built docs as a `docs.zip` Release asset (bare `html/` root) s
 
 ## Upstreaming
 
-`plugins/version-switcher/` mirrors
+`plugins/version-switcher.mjs` follows
 [`jupyter-book/myst-plugins`](https://github.com/jupyter-book/myst-plugins)
 conventions (single self-contained `.mjs`, distributed as a release asset) so it
 can later be contributed there. The `current-version/` + `assemble/` producers are

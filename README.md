@@ -1,8 +1,9 @@
 # myst-version-switcher-plugin
 
 A pydata-style documentation **version switcher** for [MyST](https://mystmd.org),
-delivered as a single `anywidget` plugin plus a CI action that generates the
-`switcher.json` the widget reads.
+delivered as a single `anywidget` plugin plus a pair of CI actions that
+reconstruct the whole versioned docs site every deploy and publish it to GitHub
+Pages.
 
 **[Full documentation and usage guide →](https://diamondlightsource.github.io/myst-version-switcher-plugin/)**
 
@@ -11,8 +12,8 @@ differently:
 
 | half | file | how consumers use it |
 |------|------|----------------------|
-| Plugin (widget) | `plugins/version-switcher/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
-| Switcher action | `switcher/` | `uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>` |
+| Plugin (widget) | `plugins/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
+| Site actions | `current-version/`, `assemble/` | `uses: DiamondLightSource/myst-version-switcher-plugin/{current-version,assemble}@<tag>` |
 
 ## Developing
 
@@ -34,8 +35,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 CI runs tests and the docs build/deploy, then `_release.yml` publishes a GitHub
-Release with `version-switcher.mjs` as an asset. The `switcher` action is
-consumed from the repo tree at the same tag, so one tag versions both halves.
+Release with `version-switcher.mjs` (and the tag's `docs.zip`) as assets. The
+`current-version` + `assemble` actions are consumed from the repo tree at the
+same tag, so one tag versions both halves.
 
 ## License
 

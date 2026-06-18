@@ -5,7 +5,7 @@ project:
   # Develop against the local plugin file. The directive's esm self-reference
   # makes MyST localize this same file as the anywidget runtime.
   plugins:
-    - ../plugins/version-switcher/version-switcher.mjs
+    - ../plugins/version-switcher.mjs
   toc:
     - file: index.md
 site:

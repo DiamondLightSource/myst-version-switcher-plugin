@@ -34,7 +34,7 @@ jobs:
         with:
           prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
           files: |
-            plugins/version-switcher/version-switcher.mjs
+            plugins/version-switcher.mjs
             docs-artifact/docs.zip
           generate_release_notes: true
         env:

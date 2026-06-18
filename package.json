@@ -14,7 +14,7 @@
 		"docs-dev": "cd docs && myst start"
 	},
 	"files": [
-		"plugins/version-switcher/version-switcher.mjs",
+		"plugins/version-switcher.mjs",
 		"lib/assemble.mjs",
 		"assemble/action.yml",
 		"current-version/action.yml"
