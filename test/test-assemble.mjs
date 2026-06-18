@@ -3,8 +3,9 @@
  *
  * Covers the pure functions carried over from make-switcher (ordering,
  * prerelease/preferred, switcher shape + serialisation) plus the new pieces:
- * directory discovery, mixed branch+tag ordering, sanitisation, branch planning
- * (incl. required-missing → fail), and the redirect/stable-alias decision.
+ * directory discovery, mixed branch+tag ordering, sanitisation, the
+ * required-branch check (incl. required-missing → fail), migration planning, and
+ * the redirect/stable-alias decision.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
