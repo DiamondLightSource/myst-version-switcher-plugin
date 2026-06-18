@@ -81,18 +81,19 @@ caller's `myst build`:
   `switcher.json` + `index.html`, uploads this build's `docs` artifact, and
   outputs the assembled site directory for the caller to publish.
 
-Proposed layout: rename `switcher/` → `assemble/` (the action no longer just
-writes the switcher, and it no longer deploys — the *caller* does). The Node
-logic stays co-located beside `assemble/action.yml` as `assemble.mjs`, and a
-sibling `current-version/action.yml` holds the tiny pre-build action.
+Layout: `assemble/action.yml` and `current-version/action.yml` are thin wrappers;
+the shared Node kernel lives at `lib/assemble.mjs` (not inside either action, so
+neither reaches into the other's directory). Both actions invoke it via
+`$GITHUB_ACTION_PATH/../lib/assemble.mjs` — when an action is used as
+`org/repo/<action>@ref` the whole repo is checked out, so `../lib/` resolves.
 
 ### Why `current-version` is its own action
 
 The sanitised version is consumed in **two** places that must be byte-identical or
 assets 404: the build-time `BASE_URL` sub-path, and the `site/<version>`
 directory name written by `assemble`. To guarantee they match, sanitisation has a
-**single implementation** — `sanitize()`, exported by `assemble.mjs` — that both
-actions invoke (`current-version` reaches it via the sibling path, since the whole
+**single implementation** — `sanitize()`, exported by `lib/assemble.mjs` — that both
+actions invoke (each reaches it via `../lib/`, since the whole
 repo is checked out with the action). `current-version` surfaces the value as an
 output *before* the build (when `assemble` hasn't run yet); `assemble` calls the
 same function for the version dir and for branch-preview dirs. One implementation
@@ -491,9 +492,9 @@ all.
 
 ## Resolved decisions
 
-1. **Action layout.** Two actions: `current-version/` (pre-build sanitise) and
-   `assemble/` (post-build gather + generate + artifact upload). Renamed from
-   `switcher/`; `assemble.mjs` and its tests sit beside `assemble/action.yml`. No
+1. **Action layout.** Two thin action wrappers: `current-version/` (pre-build
+   sanitise) and `assemble/` (post-build gather + generate + artifact upload),
+   over a shared `lib/assemble.mjs` kernel (+ its tests in `test/`). No
    back-compat required, so a clean rename is fine.
 2. **Who attaches `docs.zip` to the Release?** `_release.yml` (which already
    creates the release): it downloads the run's `docs` artifact and attaches it as

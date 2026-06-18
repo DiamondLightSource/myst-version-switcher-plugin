@@ -1,5 +1,5 @@
 /**
- * Tests for assemble.mjs — the kernel behind the `assemble` action.
+ * Tests for lib/assemble.mjs — the shared kernel behind the actions.
  *
  * Covers the pure functions carried over from make-switcher (ordering,
  * prerelease/preferred, switcher shape + serialisation) plus the new pieces:
@@ -23,7 +23,7 @@ import {
 	sanitize,
 	stablePlan,
 	switcherStruct,
-} from "../assemble/assemble.mjs";
+} from "../lib/assemble.mjs";
 
 let passed = 0;
 function ok(name) {

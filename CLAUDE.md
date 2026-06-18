@@ -11,7 +11,7 @@ publish it directly to GitHub Pages.
 plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
 current-version/action.yml                     # pre-build: sanitise ref → version token (BASE_URL sub-path)
 assemble/action.yml                            # post-build: gather all versions, write switcher.json + redirect, output site dir
-assemble/assemble.mjs                          # dependency-free Node kernel (sanitize / generate / migrate)
+lib/assemble.mjs                               # dependency-free Node kernel shared by both actions (sanitize / generate / migrate)
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/ci.yml                       # orchestrator → _lint / _test / _docs / _release
@@ -43,7 +43,7 @@ The **caller** owns the Pages publish because `deploy-pages` is job-scoped.
 ### Two actions around the build
 `current-version` (before the build) sanitises the ref into the version token so
 `BASE_URL` can be set; `assemble` (after) gathers + generates + uploads the `docs`
-artifact + outputs the site dir. Both share one `sanitize()` in `assemble.mjs`, so
+artifact + outputs the site dir. Both share one `sanitize()` in `lib/assemble.mjs`, so
 the `BASE_URL` sub-path and the `site/<version>` dir name can never drift. Bash
 does the `gh`/`unzip`/`mv` IO (incl. the dumb branch-preview fetch); the JS kernel
 does the pure logic (`sanitize`, `generate`, and the folded-in `missingRequired`

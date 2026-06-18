@@ -63,7 +63,7 @@ echo "== cutover: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN) =="
 echo
 echo "-- 1. Backfilling docs.zip from $PAGES_REF --"
 git fetch --tags --quiet origin "${PAGES_REF#origin/}" || true
-node "$ROOT/assemble/assemble.mjs" migrate --repo "$REPO" --pages-ref "$PAGES_REF"
+node "$ROOT/lib/assemble.mjs" migrate --repo "$REPO" --pages-ref "$PAGES_REF"
 
 # --- verify helper (step 4 body) --------------------------------------------
 verify() {

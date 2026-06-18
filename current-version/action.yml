@@ -3,9 +3,9 @@ description: >-
   Sanitise the raw git ref into the version token used as BOTH the build-time
   BASE_URL sub-path and the site/<version> directory written by `assemble`, so
   the two can never drift. Run this BEFORE `myst build`. Shares the single
-  sanitize() implementation in the sibling assemble.mjs (the whole repo is checked
-  out with the action), so there is no bash-vs-JS rule to keep in sync. Requires
-  Node on PATH.
+  sanitize() implementation in `lib/assemble.mjs` with the `assemble` action (the
+  whole repo is checked out with the action, so `../lib/` resolves), so there is no
+  bash-vs-JS rule to keep in sync. Requires Node on PATH.
 
 inputs:
   ref-name:
@@ -27,5 +27,5 @@ runs:
       env:
         REF_NAME: ${{ inputs.ref-name }}
       run: |
-        version=$(node "$GITHUB_ACTION_PATH/../assemble/assemble.mjs" sanitize "$REF_NAME")
+        version=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" sanitize "$REF_NAME")
         echo "version=$version" >> "$GITHUB_OUTPUT"

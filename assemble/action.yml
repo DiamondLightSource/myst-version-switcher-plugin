@@ -52,7 +52,7 @@ runs:
         HTML_DIR: ${{ inputs.html-dir }}
       run: |
         set -euo pipefail
-        ver=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$REF_NAME")
+        ver=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" sanitize "$REF_NAME")
         site="$RUNNER_TEMP/site"
         zip="$RUNNER_TEMP/docs.zip"
         mkdir -p "$site"
@@ -90,7 +90,7 @@ runs:
         tags=$(gh api --paginate "repos/$REPO/releases" \
           -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
         for tag in $tags; do
-          dest=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$tag")
+          dest=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" sanitize "$tag")
           if [ "$dest" = "$VS_VER" ]; then continue; fi   # current build already staged
           tmp="$RUNNER_TEMP/rel-$dest"
           rm -rf "$tmp"; mkdir -p "$tmp"
@@ -123,7 +123,7 @@ runs:
         while IFS=$'\t' read -r runId branch; do
           if [ -z "$runId" ]; then continue; fi
           if [ "$branch" = "$REF_NAME" ]; then continue; fi
-          dest=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$branch")
+          dest=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" sanitize "$branch")
           if [ "$dest" = "$VS_VER" ]; then continue; fi   # don't clobber the current build
           tmp="$RUNNER_TEMP/br-$dest"
           rm -rf "$tmp"; mkdir -p "$tmp"
@@ -152,7 +152,7 @@ runs:
         if [ -z "$required" ]; then
           required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
         fi
-        stable_src=$(node "$GITHUB_ACTION_PATH/assemble.mjs" generate \
+        stable_src=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" generate \
           --site-dir "$VS_SITE" --repo "$REPO" --required "$required")
         echo "stable_src=$stable_src" >> "$GITHUB_OUTPUT"
 

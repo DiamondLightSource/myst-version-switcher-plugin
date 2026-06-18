@@ -15,7 +15,7 @@
 	},
 	"files": [
 		"plugins/version-switcher/version-switcher.mjs",
-		"assemble/assemble.mjs",
+		"lib/assemble.mjs",
 		"assemble/action.yml",
 		"current-version/action.yml"
 	],
