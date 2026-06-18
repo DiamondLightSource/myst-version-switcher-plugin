@@ -10,14 +10,11 @@
  *   node assemble.mjs sanitize <ref-name>
  *       → print the sanitised version (the BASE_URL sub-path + site/ dir name).
  *
- *   node assemble.mjs check-required --required <csv> --present <csv>
- *       → exit 1 (with a message) if any required branch is absent from the
- *         present set (the current ref + the branches gathered from CI); the
- *         branch fetch itself is dumb bash in the action.
- *
- *   node assemble.mjs generate --site-dir <dir> --repo <org/repo>
+ *   node assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
- *         source dir (the newest deployed release) on stdout, or nothing.
+ *         source dir (the newest deployed release) on stdout, or nothing. Runs
+ *         after all gathering, so it also exit-1s if a --required branch is
+ *         absent from the site (the load-bearing-branch guard).
  *
  *   node assemble.mjs migrate [--pages-ref <ref>] [--repo <org/repo>] [--dry-run]
  *       → one-time gh-pages → durable-source backfill: for each release tag with a
@@ -143,24 +140,22 @@ export function stablePlan(versions, tags) {
 }
 
 /**
- * Validate that every required branch will be present in the assembled site.
- * Pure — fed plain data, so it tests with fixtures.
+ * Required branches that did not end up in the assembled site. Pure. `versions`
+ * are the discovered (already sanitised) site dirs; a required branch is present
+ * iff its sanitised name is among them. By the time `generate` runs, the current
+ * ref and every gathered branch are already dirs, so this needs no separate
+ * "present" bookkeeping. The action gathers a preview for every branch with a
+ * recent CI build (dumb bash); this only guards that the load-bearing branches
+ * (default: the repo's default branch) didn't silently vanish. `generate`
+ * hard-fails on a non-empty result.
  *
- * The action gathers a branch preview for every branch with a recent successful
- * CI build (dumb bash); this only guards that the load-bearing branches (default:
- * the repo's default branch) didn't silently vanish. A required branch is
- * satisfied if it is the current ref (its build is staged directly) or was among
- * the gathered branches. The caller hard-fails on a non-empty `missing`.
- *
- * @param {object}   args
- * @param {string[]} [args.required] branches that must be present
- * @param {string[]} [args.present]  branches present in the site (current ref +
- *                                   the branches gathered from CI)
- * @returns {{missing: string[]}}
+ * @param {string[]} [required] branches that must be present (raw names)
+ * @param {string[]} [versions] discovered site dir names (sanitised)
+ * @returns {string[]} the absent required branches
  */
-export function checkRequired({ required = [], present = [] }) {
-	const have = new Set(present);
-	return { missing: required.filter((branch) => !have.has(branch)) };
+export function missingRequired(required = [], versions = []) {
+	const have = new Set(versions);
+	return required.filter((branch) => !have.has(sanitize(branch)));
 }
 
 /**
@@ -239,45 +234,41 @@ function csv(value) {
 		.filter(Boolean);
 }
 
-/** `check-required --required --present` — exit 1 if a required branch is absent. */
-function cmdCheckRequired(rest) {
-	const { values } = parseArgs({
-		args: rest,
-		options: {
-			required: { type: "string" },
-			present: { type: "string" },
-		},
-	});
-	const { missing } = checkRequired({
-		required: csv(values.required),
-		present: csv(values.present),
-	});
-	if (missing.length > 0) {
-		console.error(
-			`Required branch(es) not present in the assembled site (no current build or recent CI artifact): ${missing.join(", ")}`,
-		);
-		process.exitCode = 1;
-	}
-}
-
-/** `generate --site-dir --repo` — write switcher.json + index.html; emit stable src. */
+/**
+ * `generate --site-dir --repo [--required <csv>]` — write switcher.json +
+ * index.html and emit the stable-alias source. Runs after all gathering, so it
+ * also hard-fails (exit 1) if a `--required` branch is absent from the site.
+ */
 function cmdGenerate(rest) {
 	const { values } = parseArgs({
 		args: rest,
 		options: {
 			"site-dir": { type: "string" },
 			repo: { type: "string" },
+			required: { type: "string" },
 		},
 	});
 	const siteDir = values["site-dir"];
 	const repo = values.repo;
 	if (!siteDir || !repo) {
 		throw new Error(
-			"usage: assemble.mjs generate --site-dir <dir> --repo <org/repo>",
+			"usage: assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]",
 		);
 	}
 
 	const builds = discoverVersions(siteDir);
+
+	// Guard the load-bearing branches before writing anything: a required branch
+	// with no gathered dir means the deploy would publish a hole.
+	const missing = missingRequired(csv(values.required), builds);
+	if (missing.length > 0) {
+		console.error(
+			`Required branch(es) not present in the assembled site (no current build or recent CI artifact): ${missing.join(", ")}`,
+		);
+		process.exitCode = 1;
+		return;
+	}
+
 	const tags = getSortedTags();
 	const versions = orderVersions(builds, tags);
 	const preferred = preferredVersion(versions, tags);
@@ -400,16 +391,12 @@ export function main(argv = process.argv.slice(2)) {
 	switch (cmd) {
 		case "sanitize":
 			return cmdSanitize(rest);
-		case "check-required":
-			return cmdCheckRequired(rest);
 		case "generate":
 			return cmdGenerate(rest);
 		case "migrate":
 			return cmdMigrate(rest);
 		default:
-			throw new Error(
-				"usage: assemble.mjs <sanitize|check-required|generate|migrate> ...",
-			);
+			throw new Error("usage: assemble.mjs <sanitize|generate|migrate> ...");
 	}
 }
 

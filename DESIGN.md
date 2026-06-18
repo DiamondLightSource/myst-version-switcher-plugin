@@ -144,30 +144,28 @@ $RUNNER_TEMP/
        gh release download "$tag" -p docs.zip -O r.zip
        unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$tag"
 
-4. Gather branch previews + guard required (bash IO; one JS check)
+4. Gather branch previews (dumb bash IO)
      # latest successful ci.yml run per branch, newest wins:
      runs=$(gh run list --workflow ci.yml --status success --limit 100 \
               --json headBranch,databaseId \
               -q 'group_by(.headBranch)[] | max_by(.databaseId) | [.databaseId,.headBranch] | @tsv')
-     present="$ref-name"
      for {runId, branch} in runs:
-       present+=",$branch"
        [ "$branch" = "$ref-name" ] && continue           # current build already staged
        dest=$(node assemble.mjs sanitize "$branch")
        gh run download "$runId" -n docs -D t             # → t/docs.zip
        unzip t/docs.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$dest"
-     node assemble.mjs check-required --required "$required" --present "$present"
-       # exit 1 (hard-fail) if a required branch is neither the current ref nor
-       # among the gathered branches. The fetch itself is dumb bash; only the
-       # load-bearing-branch guarantee is the (pure, unit-tested) JS kernel.
 
-5. Generate switcher.json + redirect, decide stable (JS — the pure core)
-     stable_src=$(node assemble.mjs generate --site-dir "$RUNNER_TEMP/site" --repo "$repo")
+5. Generate switcher.json + redirect, decide stable, guard required (JS — the core)
+     stable_src=$(node assemble.mjs generate --site-dir "$RUNNER_TEMP/site" \
+                    --repo "$repo" --required "$required")
        # writes switcher.json (★ on the latest-release entry) + index.html.
        # versions discovered from site/ subdirs; git tags drive ordering +
        # prerelease detection; preferred = newest deployed non-prerelease tag.
        # index.html → stable/ when preferred is a release tag, else → the main
        # fallback. Prints the preferred release dir to alias, or nothing if none.
+       # Runs after all gathering, so it also exit-1s (hard-fail) if a --required
+       # branch's dir is absent — the only must-not-be-wrong branch logic, folded
+       # in here rather than a separate step.
 
 6. Stable alias (bash; symlink, inflated to a copy at deploy — see Stable alias)
      [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
@@ -178,9 +176,9 @@ $RUNNER_TEMP/
 
 The split is deliberate: **bash does the IO plumbing** (`gh` calls, `unzip`, `mv`)
 where shelling out is concise, and the **JS kernel does the logic** — `sanitize()`,
-`checkRequired()`, and the pure generation. The kernel functions take plain data
-(branch name lists, etc.) and return strings/verdicts, so they unit-test without
-mocking `gh`, the network, or the filesystem. Bash never
+the pure generation, and the folded-in required-branch guard. The kernel functions
+take plain data (branch name lists, etc.) and return strings/verdicts, so they
+unit-test without mocking `gh`, the network, or the filesystem. Bash never
 touches JSON itself: every extraction uses `gh`'s built-in `-q`/`--jq` (it embeds
 the real jq) or `gh api --jq`, never a piped standalone `jq`. That keeps `gh`'s
 exit code intact — a `gh … | jq` pipe would mask an API failure as empty output
@@ -278,13 +276,15 @@ them:
   away.
 - **Add** `sanitize(name)` — the single sanitisation implementation, shared with
   `current-version` (replaces the duplicated rule + parity test).
-- **Add** `checkRequired({ required, present })` — returns the required branches
-  absent from the site (current ref + gathered branches) for the caller to
-  hard-fail on. Pure, tested with fixtures. (The branch *fetch* is dumb bash —
-  list latest run per branch, download, unzip — so only this guarantee is JS.)
-- `assemble.mjs` exposes `sanitize` / `check-required` / `generate` subcommands;
-  `generate` reads `--site-dir` instead of an `--output-dir`, and writes
-  `switcher.json` + `index.html` into that same dir.
+- **Add** `missingRequired(required, versions)` — the required branches whose
+  sanitised name is absent from the discovered site dirs. Pure, tested with
+  fixtures. Called *inside* `generate` (which already discovers the dirs), so
+  there is no separate plan/check step and no `present` bookkeeping in bash; the
+  branch *fetch* stays dumb bash (list latest run per branch, download, unzip).
+- `assemble.mjs` exposes `sanitize` / `generate` / `migrate` subcommands;
+  `generate` reads `--site-dir` instead of an `--output-dir`, takes `--required`
+  (exit-1 on a missing one), and writes `switcher.json` + `index.html` into that
+  same dir.
 
 This keeps the testable core intact and pulls the only must-not-be-wrong logic
 (sanitisation, the required-branch guarantee) into it; the remaining IO (`gh`
@@ -578,7 +578,7 @@ probe — skipping the flip and delete — validates the real path.)
 
 1. **[done]** Refactor `make-switcher.mjs` → `assemble.mjs`: replace gh-pages
    discovery with `discoverVersions(siteDir)`; add `sanitize()` and
-   `checkRequired()`; retarget `renderRedirect` to `stable/` and have `generate`
+   `missingRequired()`; retarget `renderRedirect` to `stable/` and have `generate`
    emit the stable-alias source; keep the pure functions + their tests; add tests
    for directory discovery, mixed branch+tag ordering, sanitisation, the
    required-branch check (incl. required-missing → fail), and the
@@ -590,7 +590,8 @@ probe — skipping the flip and delete — validates the real path.)
    output) and `assemble/action.yml` (pipeline steps 1–7) with `gh`-based plumbing
    (gh's built-in `-q`, never a `jq` pipe). Step 3 lists releases in one
    `gh api --paginate` call; the release-layer cache is deferred (see above). The
-   branch gather is dumb bash; `check-required` is the only JS guard in it.
+   branch gather is dumb bash; the required-branch guard is folded into `generate`
+   (`missingRequired`).
 4. **[done]** Switch `_docs.yml` to current-version → build → assemble → publish,
    split into build + deploy jobs (only deploy carries the `github-pages`
    environment + `pages`/`id-token` perms + `concurrency`). Gate publish on

@@ -103,25 +103,22 @@ runs:
     # 4. Gather branch previews: the latest successful ci.yml run per branch
     #    (newest wins), download + unzip each into site/<destDir>. The current ref
     #    is skipped (its build is already staged fresh — its last CI artifact is
-    #    older). Then a pure JS check (set -e → hard-fail) verifies every required
-    #    branch ended up present. Deleted branches drop once their runs age out of
-    #    the recent list (~90d); that's accepted.
+    #    older). The required-branch guard is folded into `generate` (step 5),
+    #    which sees the finished site. Deleted branches drop once their runs age
+    #    out of the recent list (~90d); that's accepted.
     - name: Gather branch previews
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         REPO: ${{ inputs.repo }}
         REF_NAME: ${{ inputs.ref-name }}
-        REQUIRED_IN: ${{ inputs.required-branches }}
       run: |
         set -euo pipefail
         runs=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
                  --json headBranch,databaseId \
                  -q 'group_by(.headBranch)[] | max_by(.databaseId) | [.databaseId, .headBranch] | @tsv')
-        present="$REF_NAME"
         while IFS=$'\t' read -r runId branch; do
           if [ -z "$runId" ]; then continue; fi
-          present="$present,$branch"
           if [ "$branch" = "$REF_NAME" ]; then continue; fi
           dest=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$branch")
           if [ "$dest" = "$VS_VER" ]; then continue; fi   # don't clobber the current build
@@ -136,23 +133,24 @@ runs:
           fi
         done <<< "$runs"
 
-        required="$REQUIRED_IN"
-        if [ -z "$required" ]; then
-          required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
-        fi
-        node "$GITHUB_ACTION_PATH/assemble.mjs" check-required \
-          --required "$required" --present "$present"
-
     # 5. Generate switcher.json + root redirect; print the stable-alias source.
+    #    Also the load-bearing-branch guard: `generate` exit-1s (→ set -e → the
+    #    deploy fails) if a required branch is absent from the assembled site.
     - name: Generate switcher + redirect
       id: generate
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.token }}
         REPO: ${{ inputs.repo }}
+        REQUIRED_IN: ${{ inputs.required-branches }}
       run: |
         set -euo pipefail
+        required="$REQUIRED_IN"
+        if [ -z "$required" ]; then
+          required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+        fi
         stable_src=$(node "$GITHUB_ACTION_PATH/assemble.mjs" generate \
-          --site-dir "$VS_SITE" --repo "$REPO")
+          --site-dir "$VS_SITE" --repo "$REPO" --required "$required")
         echo "stable_src=$stable_src" >> "$GITHUB_OUTPUT"
 
     # 6. Stable alias: a symlink, inflated to a real copy by upload-pages-artifact

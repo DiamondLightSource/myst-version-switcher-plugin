@@ -11,9 +11,9 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	checkRequired,
 	discoverVersions,
 	isPrerelease,
+	missingRequired,
 	orderVersions,
 	planMigration,
 	preferredVersion,
@@ -133,31 +133,28 @@ assert.deepEqual(stablePlan(["3.0rc1"], ["3.0rc1"]), {
 });
 ok("stablePlan never aliases a prerelease as stable");
 
-// --- checkRequired: required branches must be present in the assembled site ---
-// present = the current ref + the branches gathered from CI.
-assert.deepEqual(
-	checkRequired({ required: ["main"], present: ["main", "dev", "feature/x"] }),
-	{ missing: [] },
-);
-ok("checkRequired passes when the required branch was gathered");
+// --- missingRequired: required branches absent from the site dirs (sanitised) ---
+// versions are the discovered site dirs (already sanitised); the current ref and
+// every gathered branch are among them by generate time.
+assert.deepEqual(missingRequired(["main"], ["main", "dev", "2.1"]), []);
+ok("missingRequired passes when the required branch dir is present");
 
-// a required branch absent from the present set is reported.
-assert.deepEqual(
-	checkRequired({ required: ["main", "release-2"], present: ["main", "dev"] }),
-	{ missing: ["release-2"] },
-);
-ok("checkRequired reports a required branch absent from the site");
+// a required branch with no dir is reported.
+assert.deepEqual(missingRequired(["main", "release-2"], ["main", "dev"]), [
+	"release-2",
+]);
+ok("missingRequired reports a required branch absent from the site");
 
-// the current ref counts as present (its build is staged directly).
-assert.deepEqual(
-	checkRequired({ required: ["release-2"], present: ["release-2"] }),
-	{ missing: [] },
-);
-ok("checkRequired treats the current ref as satisfying a required branch");
+// required names are sanitised before comparison (feature/x → feature_x dir).
+assert.deepEqual(missingRequired(["feature/x"], ["main", "feature_x"]), []);
+assert.deepEqual(missingRequired(["feature/y"], ["main", "feature_x"]), [
+	"feature/y",
+]);
+ok("missingRequired sanitises required names to match dir names");
 
-// no required branches → nothing to miss.
-assert.deepEqual(checkRequired({ present: ["main"] }), { missing: [] });
-ok("checkRequired is a no-op with no required branches");
+// no required branches → nothing missing.
+assert.deepEqual(missingRequired([], ["main"]), []);
+ok("missingRequired is a no-op with no required branches");
 
 // --- planMigration: which tags need a docs.zip backfilled from gh-pages ---
 // release tags with a gh-pages dir and no docs.zip → backfill, in pagesDirs order;
