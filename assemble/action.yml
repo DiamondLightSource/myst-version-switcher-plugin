@@ -79,44 +79,10 @@ runs:
         path: ${{ env.VS_ZIP }}
         compression-level: 0
 
-    # 3a. Build the release manifest (tags that carry a docs.zip) and a cache key
-    #     over the sorted tag set. See DESIGN "Release-layer cache".
-    - name: Plan release downloads
-      id: releases
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        REPO: ${{ inputs.repo }}
-      run: |
-        set -euo pipefail
-        manifest="$RUNNER_TEMP/releases.manifest"
-        : > "$manifest"
-        for tag in $(git tag -l); do
-          if [ "$tag" = "$VS_VER" ]; then continue; fi
-          has=$(gh release view "$tag" --repo "$REPO" --json assets \
-                  -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)
-          if [ "$has" = "true" ]; then echo "$tag" >> "$manifest"; fi
-        done
-        sort -o "$manifest" "$manifest"
-        key=$(sha256sum "$manifest" | cut -d' ' -f1)
-        cache="$RUNNER_TEMP/releases-cache"
-        mkdir -p "$cache"
-        echo "key=docs-releases-v1-$key" >> "$GITHUB_OUTPUT"
-        {
-          echo "VS_MANIFEST=$manifest"
-          echo "VS_CACHE=$cache"
-        } >> "$GITHUB_ENV"
-
-    # 3b. Restore the extracted-releases bundle; the post-step saves the superset
-    #     under the new key when a release was added (immutable content).
-    - name: Restore cached release builds
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.VS_CACHE }}
-        key: ${{ steps.releases.outputs.key }}
-        restore-keys: docs-releases-v1-
-
-    # 3c. Materialise each release into site/<tag>, downloading only cache misses.
+    # 3. Gather released versions into site/<tag>. One paginated API call lists the
+    #    tags whose release carries a docs.zip (vs N per-tag lookups); then download
+    #    + unzip each. (A cache of the extracted releases is a possible future
+    #    optimisation — see DESIGN "Release-layer cache" — left out for now.)
     - name: Gather released versions
       shell: bash
       env:
@@ -124,25 +90,20 @@ runs:
         REPO: ${{ inputs.repo }}
       run: |
         set -euo pipefail
-        while read -r tag; do
-          if [ -z "$tag" ]; then continue; fi
-          cached="$VS_CACHE/$tag/html"
-          if [ ! -d "$cached" ]; then
-            tmp="$RUNNER_TEMP/rel-$tag"
-            rm -rf "$tmp"; mkdir -p "$tmp"
-            if ! gh release download "$tag" --repo "$REPO" -p docs.zip -O "$tmp/docs.zip"; then
-              echo "::warning::no docs.zip for $tag — skipping"; continue
-            fi
-            if ! unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" || [ ! -d "$tmp/html" ]; then
-              echo "::warning::$tag docs.zip has no html/ root — skipping"; continue
-            fi
-            mkdir -p "$VS_CACHE/$tag"
-            rm -rf "$cached"
-            mv "$tmp/html" "$cached"
+        tags=$(gh api --paginate "repos/$REPO/releases" \
+          -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
+        for tag in $tags; do
+          if [ "$tag" = "$VS_VER" ]; then continue; fi
+          tmp="$RUNNER_TEMP/rel-$tag"
+          rm -rf "$tmp"; mkdir -p "$tmp"
+          gh release download "$tag" --repo "$REPO" -p docs.zip -O "$tmp/docs.zip"
+          if unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" && [ -d "$tmp/html" ]; then
+            rm -rf "${VS_SITE:?}/$tag"
+            mv "$tmp/html" "$VS_SITE/$tag"
+          else
+            echo "::warning::$tag docs.zip has no html/ root — skipping"
           fi
-          rm -rf "${VS_SITE:?}/$tag"
-          cp -r "$cached" "$VS_SITE/$tag"
-        done < "$VS_MANIFEST"
+        done
 
     # 4. Plan branch previews (pure JS kernel): resolve required ∪ optional to a
     #    <runId>\t<destDir> TSV. A missing required branch makes node exit 1, which

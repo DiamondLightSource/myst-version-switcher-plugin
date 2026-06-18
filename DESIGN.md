@@ -137,9 +137,12 @@ $RUNNER_TEMP/
        # _release.yml later attaches this same file as the release asset (no repack)
 
 3. Gather released tags (bash plumbing; gh's built-in -q, never a `jq` pipe)
-     for tag in $(git tag -l):                            # ordering done later, in JS
+     # one paginated call lists the tags whose release has a docs.zip:
+     tags=$(gh api --paginate repos/$repo/releases \
+              -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
+     for tag in $tags:                                    # ordering done later, in JS
        [ "$tag" = "$ver" ] && continue
-       gh release download "$tag" -p docs.zip -O r.zip || continue   # no asset → skip
+       gh release download "$tag" -p docs.zip -O r.zip
        unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$tag"
 
 4. Plan branch previews (JS kernel — pure, unit-tested)
@@ -350,13 +353,27 @@ preinstalled on GitHub runners. Cross-run artifact download needs
 `gh run download <id>` (the `actions/download-artifact` action only sees the
 current run).
 
-## Release-layer cache (optional optimisation)
+## Release-layer cache (deferred — not implemented)
 
 Re-downloading and unzipping every release's `docs.zip` on every deploy is the one
-cost this design carries (the Scaling edge case). A GitHub Actions cache removes
-it — but only for the **immutable release layer**, never the whole site. The
-distinction matters because GH cache semantics actively fight the obvious
-"cache the expanded site" idea:
+recurring cost this design carries (the Scaling edge case). A GitHub Actions cache
+could remove it — but the analysis below concluded it is **not worth building
+yet**, so the gather (`assemble` step 3) is deliberately cache-free.
+
+**Why deferred:**
+- The likely-dominant cost is the *N sequential `gh` API round-trips*, not the
+  downloads. That is addressed instead by listing all releases in **one**
+  `gh api --paginate repos/$repo/releases` call (vs N `gh release view`), which is
+  both faster and simpler — and needs no cache.
+- The cache's benefit is **zero at adoption** (a freshly-migrated repo has no
+  `docs.zip` releases yet) and grows only as releases accumulate; for a handful of
+  releases it is within noise.
+- It is a real readability cost *now* for an unproven, future, N-dependent saving.
+
+Bring it back only if profiling on a repo with many `docs.zip` releases shows the
+download/unzip phase dominating. The design that would apply, and why it must be
+scoped to the **immutable release layer** and never the whole site (GH cache
+semantics fight the obvious "cache the expanded site" idea):
 
 - **Cache scoping is one-directional.** A cache written on a branch is visible
   only to that branch and its descendants; the *default branch's* cache is the
@@ -389,9 +406,9 @@ is a single extracted-releases bundle dir (`<tag>/html` per release) behind one
   the loop falls back to `gh release download` + `unzip` as today. Branches (incl.
   `main`) stay fresh from CI artifacts every deploy.
 
-This is a transparent enhancement to step 3 of the `assemble` pipeline, not a
-change to the action's contract. It is optional — correctness rests entirely on
-the durable sources whether or not the cache hits.
+It would be a transparent enhancement to step 3, not a change to the action's
+contract; correctness rests entirely on the durable sources whether or not a cache
+hits. Deferred until there is profiling evidence to justify the complexity.
 
 ## External-PR previews via the contributor's fork
 
@@ -458,10 +475,9 @@ all.
   self-healing, except a release created moments earlier may not yet be visible to
   an in-flight run. GitHub also serialises deployments to the `github-pages`
   environment.
-- **Scaling:** every deploy downloads every release's `docs.zip`. Fine for tens of
-  releases; beyond that the **release-layer cache** (below) keys extracted
-  releases by tag + asset digest so unchanged releases are restored, not
-  re-downloaded.
+- **Scaling:** every deploy lists releases in one `gh api --paginate` call, then
+  downloads + unzips each release's `docs.zip`. Fine for tens of releases; beyond
+  that the deferred **release-layer cache** (above) would skip the re-downloads.
 
 ## Resolved decisions
 
@@ -566,8 +582,8 @@ probe — skipping the flip and delete — validates the real path.)
    pathname; `computeTargetUrl`/`resolveTargetUrl` strip the passed base.
 3. **[done]** Write `current-version/action.yml` (shared `sanitize()` → `version`
    output) and `assemble/action.yml` (pipeline steps 1–8) with `gh`-based plumbing
-   (gh's built-in `-q`, never a `jq` pipe). Step 3 caches the extracted release
-   bundle (`docs-releases-v1-<tag-set-hash>`; see Release-layer cache).
+   (gh's built-in `-q`, never a `jq` pipe). Step 3 lists releases in one
+   `gh api --paginate` call; the release-layer cache is deferred (see above).
    `plan-branches` emits `<runId>\t<destDir>` TSV for the bash loop.
 4. **[done]** Switch `_docs.yml` to current-version → build → assemble → publish,
    split into build + deploy jobs (only deploy carries the `github-pages`
