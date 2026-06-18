@@ -57,38 +57,63 @@ assert.equal(relativePath("/x/y", "/a/b/plugin.mjs"), "../../a/b/plugin.mjs");
 ok("relativePath computes POSIX relative paths");
 
 // --- detectCurrent by URL prefix (gh-pages project path) ---
-const cur = detectCurrent(switcher, "/widget/2.0/guide/install.html");
+const detected2_0 = detectCurrent(switcher, "/widget/2.0/guide/install.html");
+const cur = detected2_0.entry;
 assert.equal(cur.version, "2.0");
-ok("detectCurrent picks 2.0 from pathname");
+assert.equal(detected2_0.base, "/widget/2.0/");
+ok("detectCurrent picks 2.0 from pathname and reports its base");
 
 // longest-prefix wins, not first match
 const cur2 = detectCurrent(switcher, "/widget/2.1/");
-assert.equal(cur2.version, "2.1");
+assert.equal(cur2.entry.version, "2.1");
 ok("detectCurrent picks 2.1 root page");
 
 // no match -> null (e.g. local preview at /)
-assert.equal(detectCurrent(switcher, "/"), null);
+assert.equal(detectCurrent(switcher, "/").entry, null);
 ok("detectCurrent returns null when nothing matches");
 
 // --- detectCurrent via explicit version-match, incl. loose semver ---
-assert.equal(detectCurrent(switcher, "/", "2.1").version, "2.1");
-assert.equal(detectCurrent(switcher, "/", "2.1.3").version, "2.1"); // loose
+assert.equal(detectCurrent(switcher, "/", "2.1").entry.version, "2.1");
+assert.equal(detectCurrent(switcher, "/", "2.1.3").entry.version, "2.1"); // loose
 ok("detectCurrent honours version_match (exact + loose)");
+
+// --- detectCurrent maps a /stable/ page to the concrete preferred release ---
+const stableHit = detectCurrent(switcher, "/widget/stable/guide/install.html");
+assert.equal(stableHit.entry.version, "2.1"); // the preferred (★) entry
+assert.equal(stableHit.base, "/widget/stable/"); // the actual served base
+ok("detectCurrent maps /stable/ to the preferred entry with the stable base");
+
+// not under stable, no version match -> still null
+assert.equal(detectCurrent(switcher, "/widget/other/").entry, null);
+ok("detectCurrent does not over-match the stable alias");
 
 // --- computeTargetUrl preserves page path across versions ---
 const t1 = computeTargetUrl(
 	switcher[0], // -> dev
 	cur, // from 2.0
+	detected2_0.base,
 	{ pathname: "/widget/2.0/guide/install.html", hash: "#setup" },
 	true,
 );
 assert.equal(t1, "https://acme.github.io/widget/main/guide/install.html#setup");
 ok("computeTargetUrl carries page + hash to dev");
 
+// --- from a /stable/ page, strip the stable base onto the pinned version ---
+const tStable = computeTargetUrl(
+	switcher[2], // -> 2.0
+	stableHit.entry,
+	stableHit.base, // /widget/stable/
+	{ pathname: "/widget/stable/guide/install.html", hash: "" },
+	true,
+);
+assert.equal(tStable, "https://acme.github.io/widget/2.0/guide/install.html");
+ok("computeTargetUrl strips the stable base onto the chosen pinned version");
+
 // --- preserve_path = false goes to version root ---
 const t2 = computeTargetUrl(
 	switcher[1], // -> 2.1
 	cur,
+	detected2_0.base,
 	{ pathname: "/widget/2.0/guide/install.html", hash: "" },
 	false,
 );
@@ -98,6 +123,7 @@ ok("computeTargetUrl with preserve_path=false -> target root");
 // --- no current detected: still navigates to target root ---
 const t3 = computeTargetUrl(
 	switcher[2],
+	null,
 	null,
 	{ pathname: "/somewhere/else/", hash: "" },
 	true,
@@ -113,12 +139,13 @@ assert.ok(!isLocalHost("pandablocks.github.io"));
 ok("isLocalHost recognises local dev hosts");
 
 // --- withLocalFallback: synthesise a "local" current on localhost ---
-const lf = withLocalFallback(switcher, null, {
+const lf = withLocalFallback(switcher, null, null, {
 	hostname: "localhost",
 	origin: "http://localhost:3043",
 });
 assert.equal(lf.current.version, "local");
 assert.equal(lf.current.url, "http://localhost:3043/");
+assert.equal(lf.base, "/");
 assert.equal(lf.entries[0], lf.current);
 assert.equal(lf.entries.length, switcher.length + 1);
 ok("withLocalFallback adds a local entry rooted at / when nothing matched");
@@ -126,21 +153,23 @@ ok("withLocalFallback adds a local entry rooted at / when nothing matched");
 const localFromCommands = computeTargetUrl(
 	switcher[1],
 	lf.current,
+	lf.base,
 	{ pathname: "/commands", hash: "" },
 	true,
 );
 assert.equal(localFromCommands, "https://acme.github.io/widget/2.1/commands");
 ok("local current (base /) carries the page path to the target version");
 
-const lf2 = withLocalFallback(switcher, switcher[2], {
+const lf2 = withLocalFallback(switcher, switcher[2], "/widget/2.0/", {
 	hostname: "localhost",
 	origin: "http://localhost:3043",
 });
 assert.equal(lf2.current, switcher[2]);
+assert.equal(lf2.base, "/widget/2.0/");
 assert.equal(lf2.entries, switcher);
 ok("withLocalFallback leaves a detected version untouched");
 
-const lf3 = withLocalFallback(switcher, null, {
+const lf3 = withLocalFallback(switcher, null, null, {
 	hostname: "pandablocks.github.io",
 	origin: "https://pandablocks.github.io",
 });
@@ -159,13 +188,16 @@ function mockExists(verdict) {
 	return fn;
 }
 const fromDev = { pathname: "/widget/main/guide/install.html", hash: "#setup" };
-const devCur = detectCurrent(switcher, fromDev.pathname); // dev entry
+const devDetected = detectCurrent(switcher, fromDev.pathname); // dev entry
+const devCur = devDetected.entry;
+const devBase = devDetected.base;
 
 const exists = mockExists(true);
 assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[1],
 		currentEntry: devCur,
+		currentBase: devBase,
 		location: fromDev,
 		preservePath: true,
 		pageExists: exists,
@@ -182,6 +214,7 @@ assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[1],
 		currentEntry: devCur,
+		currentBase: devBase,
 		location: fromDev,
 		preservePath: true,
 		pageExists: missing,
@@ -194,6 +227,7 @@ assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[1],
 		currentEntry: devCur,
+		currentBase: devBase,
 		location: fromDev,
 		preservePath: true,
 		pageExists: mockExists(null),
@@ -207,6 +241,7 @@ assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[1],
 		currentEntry: devCur,
+		currentBase: devBase,
 		location: fromDev,
 		preservePath: false,
 		pageExists: notCalled1,
@@ -221,6 +256,7 @@ assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[2],
 		currentEntry: null,
+		currentBase: null,
 		location: fromDev,
 		preservePath: true,
 		pageExists: notCalled2,
@@ -230,11 +266,13 @@ assert.equal(
 assert.equal(notCalled2.calls.length, 0);
 ok("resolveTargetUrl skips probe when no current version");
 
+const rootDetected = detectCurrent(switcher, "/widget/main/");
 const notCalled3 = mockExists(false);
 assert.equal(
 	await resolveTargetUrl({
 		targetEntry: switcher[1],
-		currentEntry: detectCurrent(switcher, "/widget/main/"),
+		currentEntry: rootDetected.entry,
+		currentBase: rootDetected.base,
 		location: { pathname: "/widget/main/", hash: "" },
 		preservePath: true,
 		pageExists: notCalled3,

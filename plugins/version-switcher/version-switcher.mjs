@@ -26,6 +26,15 @@
  */
 const PLUGIN_PATH = new URL(import.meta.url).pathname;
 
+/**
+ * The `stable/` alias segment (a fixed convention shared with the `assemble`
+ * action; see DESIGN). The published site serves `stable/` as a copy of the
+ * newest release, so a page may be viewed under `<repo>/stable/…` even though no
+ * switcher entry has that pathname — the widget maps it back to the concrete
+ * release.
+ */
+const STABLE_ALIAS = "stable";
+
 /** POSIX relative path from `fromDir` to `toFile` (both absolute, no Node deps). */
 export function relativePath(fromDir, toFile) {
 	const from = String(fromDir).split("/").filter(Boolean);
@@ -50,8 +59,32 @@ export function entryLabel(entry) {
 	return entry.preferred ? `${base} ★` : base;
 }
 
+/** The pathname (with trailing slash) an entry is served under, or null. */
+function entryBase(entry) {
+	try {
+		return withTrailingSlash(new URL(entry.url, "http://x").pathname);
+	} catch {
+		return null;
+	}
+}
+
 /**
- * Decide which switcher entry corresponds to the page currently being viewed.
+ * The `stable/` alias base for the preferred entry: its pathname with the final
+ * version segment swapped for the literal `stable` (e.g. `/repo/v2.0/` →
+ * `/repo/stable/`). Null when there is no preferred entry or no version segment.
+ */
+export function stableBaseFor(entry) {
+	const base = entry && entryBase(entry);
+	if (!base) return null;
+	const segs = base.split("/").filter(Boolean);
+	if (segs.length === 0) return null;
+	segs[segs.length - 1] = STABLE_ALIAS;
+	return `/${segs.join("/")}/`;
+}
+
+/**
+ * Decide which switcher entry corresponds to the page currently being viewed,
+ * and the base pathname it is served under.
  *
  * Strategy:
  *   1. If `versionMatch` is provided, match it against entry.version (exact),
@@ -60,37 +93,52 @@ export function entryLabel(entry) {
  *   2. Otherwise infer from the URL: the entry whose url *pathname* is the
  *      longest prefix of the current pathname. This is origin-agnostic, so it
  *      works on gh-pages (/REPO/2.1/...) regardless of host.
+ *   3. If nothing matched but the path is under the preferred entry's `stable/`
+ *      alias (`/repo/stable/…`), select the preferred entry — the dropdown then
+ *      shows the concrete release the alias points at. The returned `base` is the
+ *      actual `/repo/stable/` pathname, not the entry's canonical version path,
+ *      so path preservation strips the right prefix.
  *
- * @returns {object|null} the active entry, or null if none matched.
+ * @returns {{entry: object|null, base: string|null}} the active entry and the
+ *   base pathname it is served under (both null when nothing matched).
  */
 export function detectCurrent(entries, locationPathname, versionMatch) {
-	if (!Array.isArray(entries) || entries.length === 0) return null;
+	if (!Array.isArray(entries) || entries.length === 0) {
+		return { entry: null, base: null };
+	}
 
 	if (versionMatch) {
 		const exact = entries.find((e) => e.version === versionMatch);
-		if (exact) return exact;
+		if (exact) return { entry: exact, base: entryBase(exact) };
 		const loose = entries.find(
 			(e) => e.version && String(versionMatch).startsWith(e.version),
 		);
-		if (loose) return loose;
+		if (loose) return { entry: loose, base: entryBase(loose) };
 	}
 
+	const hay = withTrailingSlash(locationPathname);
 	let best = null;
+	let bestBase = null;
 	let bestLen = -1;
 	for (const e of entries) {
-		let base;
-		try {
-			base = withTrailingSlash(new URL(e.url, "http://x").pathname);
-		} catch {
-			continue;
-		}
-		const hay = withTrailingSlash(locationPathname);
+		const base = entryBase(e);
+		if (base === null) continue;
 		if (hay.startsWith(base) && base.length > bestLen) {
 			best = e;
+			bestBase = base;
 			bestLen = base.length;
 		}
 	}
-	return best;
+	if (best) return { entry: best, base: bestBase };
+
+	// No version path matched — fall back to the preferred entry if we are under
+	// its `stable/` alias, reporting the alias path as the base.
+	const preferred = entries.find((e) => e.preferred);
+	const stableBase = stableBaseFor(preferred);
+	if (stableBase && hay.startsWith(stableBase)) {
+		return { entry: preferred, base: stableBase };
+	}
+	return { entry: null, base: null };
 }
 
 /** Is this a local dev host (localhost / 127.0.0.1 / ::1 / *.localhost)? */
@@ -115,16 +163,18 @@ export function isLocalHost(hostname) {
  * already matched.
  *
  * @param {object} location  `{ hostname, origin }` (window.location-like)
- * @returns {{entries: Array, current: object|null}}
+ * @returns {{entries: Array, current: object|null, base: string|null}}
  */
-export function withLocalFallback(entries, current, location) {
-	if (current || !isLocalHost(location.hostname)) return { entries, current };
+export function withLocalFallback(entries, current, base, location) {
+	if (current || !isLocalHost(location.hostname)) {
+		return { entries, current, base };
+	}
 	const local = {
 		version: "local",
 		name: "local (dev)",
 		url: new URL("/", location.origin).href,
 	};
-	return { entries: [local, ...entries], current: local };
+	return { entries: [local, ...entries], current: local, base: "/" };
 }
 
 /**
@@ -134,8 +184,15 @@ export function withLocalFallback(entries, current, location) {
  * relative to the current version root is carried over to the target version.
  * Otherwise we go to the target version root.
  *
+ * `currentBase` is the pathname the current page is served under (from
+ * `detectCurrent`). It usually equals the current entry's canonical pathname, but
+ * on a `stable/` page it is `/repo/stable/` — stripping *that* preserves the path
+ * onto the chosen pinned version (`/repo/v1.0/guide.html`). Falls back to the
+ * entry's own pathname when not supplied.
+ *
  * @param {object} targetEntry  entry chosen in the dropdown
  * @param {object|null} currentEntry  entry for the page being viewed
+ * @param {string|null} currentBase  pathname the current page is served under
  * @param {{pathname:string, hash:string}} location  current location-ish object
  * @param {boolean} preservePath
  * @returns {string} absolute href to navigate to
@@ -143,6 +200,7 @@ export function withLocalFallback(entries, current, location) {
 export function computeTargetUrl(
 	targetEntry,
 	currentEntry,
+	currentBase,
 	location,
 	preservePath,
 ) {
@@ -150,11 +208,11 @@ export function computeTargetUrl(
 	target.pathname = withTrailingSlash(target.pathname);
 
 	if (preservePath && currentEntry) {
-		const currentBase = withTrailingSlash(new URL(currentEntry.url).pathname);
+		const base = withTrailingSlash(
+			currentBase || new URL(currentEntry.url).pathname,
+		);
 		const here = location.pathname || "";
-		const rel = here.startsWith(currentBase)
-			? here.slice(currentBase.length)
-			: "";
+		const rel = here.startsWith(base) ? here.slice(base.length) : "";
 		target.pathname = withTrailingSlash(target.pathname) + rel;
 		if (location.hash) target.hash = location.hash;
 	}
@@ -179,6 +237,7 @@ export function computeTargetUrl(
 export async function resolveTargetUrl({
 	targetEntry,
 	currentEntry,
+	currentBase,
 	location,
 	preservePath,
 	pageExists,
@@ -186,13 +245,20 @@ export async function resolveTargetUrl({
 	const candidate = computeTargetUrl(
 		targetEntry,
 		currentEntry,
+		currentBase,
 		location,
 		preservePath,
 	);
 
 	// Nothing to probe: we're already heading to the version root.
 	if (!preservePath || !currentEntry) return candidate;
-	const root = computeTargetUrl(targetEntry, currentEntry, location, false);
+	const root = computeTargetUrl(
+		targetEntry,
+		currentEntry,
+		currentBase,
+		location,
+		false,
+	);
 	if (candidate === root) return candidate;
 
 	const found = await pageExists(candidate);
@@ -313,12 +379,17 @@ export async function render({ model, el }) {
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const raw = await res.json();
 
-		const detected = detectCurrent(raw, window.location.pathname, versionMatch);
+		const { entry: detected, base: detectedBase } = detectCurrent(
+			raw,
+			window.location.pathname,
+			versionMatch,
+		);
 		// On localhost, fall back to a synthetic "local" version rooted at `/` so
 		// the switcher is usable in `myst start` against live version URLs.
-		const { entries, current } = withLocalFallback(
+		const { entries, current, base } = withLocalFallback(
 			raw,
 			detected,
+			detectedBase,
 			window.location,
 		);
 
@@ -330,6 +401,7 @@ export async function render({ model, el }) {
 				const href = await resolveTargetUrl({
 					targetEntry,
 					currentEntry: current,
+					currentBase: base,
 					location: {
 						pathname: window.location.pathname,
 						hash: window.location.hash,
