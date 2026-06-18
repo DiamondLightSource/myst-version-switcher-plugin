@@ -286,7 +286,7 @@ them:
   fixtures. Called *inside* `generate` (which already discovers the dirs), so
   there is no separate plan/check step and no `present` bookkeeping in bash; the
   branch *fetch* stays dumb bash (list latest run per branch, download, unzip).
-- `assemble.mjs` exposes `sanitize` / `generate` / `migrate` subcommands;
+- `lib/assemble.mjs` exposes `sanitize` / `generate` subcommands;
   `generate` reads `--site-dir` instead of an `--output-dir`, takes `--required`
   (exit-1 on a missing one), and writes `switcher.json` + `index.html` into that
   same dir.
@@ -525,9 +525,9 @@ all.
 
 Repos already on the old `keep_files`/`gh-pages` model have their version history
 living as directories on the `gh-pages` branch, not as `docs.zip` release assets.
-Moving them onto the new model is a **one-time, guarded cutover**, not a backfill —
-it ends with two irreversible steps (flipping the Pages source, deleting the
-branch) that want a human watching with their own admin credentials.
+Moving them onto the new model is a **one-time, guarded migration**, not just a
+backfill — it ends with two irreversible steps (flipping the Pages source,
+deleting the branch) that want a human watching with their own admin credentials.
 
 This is therefore a **local one-shot script** run by the operator with their own
 `gh auth`, **not** a CI job:
@@ -535,18 +535,20 @@ This is therefore a **local one-shot script** run by the operator with their own
 - A CI `GITHUB_TOKEN` typically cannot change the Pages source
   (`PATCH /repos/{owner}/{repo}/pages` needs repo-admin); the operator's `gh`
   already can.
-- The cutover needs a human pause-and-verify gate before anything destructive,
+- The migration needs a human pause-and-verify gate before anything destructive,
   which a fire-and-forget workflow handles poorly.
 - It leaves nothing behind — no `workflow_dispatch` stub to add to (and later
   delete from) each consumer repo. The same script serves DLS and external
   adopters alike.
 
-The non-destructive **backfill** is the reusable, unit-tested `migrate` subcommand
-of `assemble.mjs` (read `gh-pages` → zip each tag dir as bare `html/` →
-`gh release upload`). The **flip / verify / delete** steps are thin interactive
-`gh api` calls the script orchestrates around it.
+It is all one bash script, `scripts/migrate.sh`. The non-destructive **backfill**
+is a bash loop (read `gh-pages` → zip each tag dir as bare `html/` →
+`gh release upload`), using the shared `sanitize` from `lib/assemble.mjs` so the
+tag→dir rule matches the deploy path — IO in bash, no separate JS subcommand. The
+**flip / verify / delete** steps are thin interactive `gh api` calls in the same
+script.
 
-### Cutover sequence
+### Migration sequence
 
 ```
 1. Backfill (non-destructive, idempotent)
@@ -605,15 +607,15 @@ probe — skipping the flip and delete — validates the real path.)
 5. **[done]** Attach `docs.zip` in `_release.yml` (downloads the `docs` artifact);
    ci.yml's release job already `needs: docs` (decision #2).
 6. **[done]** Update `docs/index.md` + `CLAUDE.md` consuming instructions.
-7. **[done]** `migrate` subcommand of `assemble.mjs` (+ `planMigration` tests) and
-   the cutover script `scripts/cutover.sh` (backfill → flip → deploy → pause/verify
-   → gated delete). *(Operator: dry-run it against this repo's `gh-pages` branch
-   before the real cutover.)*
+7. **[done]** `scripts/migrate.sh` — the one-shot operator migration in bash
+   (backfill via `sanitize` + `git archive`/`zip`/`gh release upload` → flip →
+   deploy → pause/verify → gated delete). *(Operator: dry-run it against this
+   repo's `gh-pages` branch before the real run.)*
 
 ### Remaining operator actions (not code)
 
 - Set this repo's **Pages source → GitHub Actions** (Settings → Pages) before the
   first new-model deploy; `deploy-pages` refuses to publish otherwise.
-- Run `scripts/cutover.sh <org/repo> --dry-run` against this repo's `gh-pages`
+- Run `scripts/migrate.sh <org/repo> --dry-run` against this repo's `gh-pages`
   (which holds `v0.1.0/`, `v0.2.0/`, `main/` with no `docs.zip` yet) to validate
-  the backfill + probe, then the real cutover when ready.
+  the backfill plan + probe, then the real run when ready.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-time gh-pages → durable-source cutover, run LOCALLY by an operator.
+# One-time gh-pages → durable-source migration, run LOCALLY by an operator.
 #
 # Why local, not CI (see DESIGN.md "Migration"):
 #   - flipping the Pages source needs repo-admin, which a CI GITHUB_TOKEN lacks;
@@ -18,11 +18,11 @@
 # the Pages source back to "Deploy from a branch" to restore serving instantly.
 #
 # Usage:
-#   scripts/cutover.sh <org/repo> [--dry-run] [--pages-ref <ref>]
+#   scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>]
 #                                 [--deploy-workflow <file>] [--yes]
 #
-#   --dry-run            do steps 1 + 4 only (real, idempotent backfill + probe);
-#                        skip the flip, the deploy trigger, and the delete.
+#   --dry-run            print the backfill plan + probe the current site only;
+#                        upload nothing, skip the flip / deploy / delete.
 #   --pages-ref <ref>    gh-pages ref to read (default: origin/gh-pages)
 #   --deploy-workflow    `gh workflow run <file>` to trigger step 3 automatically;
 #                        omit to be prompted to trigger a deploy by hand.
@@ -35,35 +35,58 @@ DEPLOY_WORKFLOW=""
 DRY_RUN=false
 ASSUME_YES=false
 
+usage() {
+  echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--deploy-workflow <file>] [--yes]" >&2
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
     --yes) ASSUME_YES=true; shift ;;
     --pages-ref) PAGES_REF="$2"; shift 2 ;;
     --deploy-workflow) DEPLOY_WORKFLOW="$2"; shift 2 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) if [ -z "$REPO" ]; then REPO="$1"; else echo "unexpected arg: $1" >&2; exit 2; fi; shift ;;
   esac
 done
 
-if [ -z "$REPO" ]; then
-  echo "usage: scripts/cutover.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--deploy-workflow <file>] [--yes]" >&2
-  exit 2
-fi
+if [ -z "$REPO" ]; then usage; exit 2; fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 BASE="https://$(echo "$OWNER" | tr '[:upper:]' '[:lower:]').github.io/$NAME"
 
-echo "== cutover: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN) =="
+echo "== migrate: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN) =="
 
-# --- Step 1: backfill (non-destructive, idempotent) -------------------------
-echo
-echo "-- 1. Backfilling docs.zip from $PAGES_REF --"
-git fetch --tags --quiet origin "${PAGES_REF#origin/}" || true
-node "$ROOT/lib/assemble.mjs" migrate --repo "$REPO" --pages-ref "$PAGES_REF"
+# --- Step 1: backfill docs.zip from the gh-pages tree (non-destructive) ------
+# For each release tag whose *sanitised* name is a gh-pages dir and whose release
+# lacks a docs.zip, zip that dir as a bare html/ and attach it (raw tag). Branch
+# dirs (main/) need nothing — they self-heal on the next branch CI. sanitize()
+# comes from the shared kernel, so the dir rule matches the deploy path exactly.
+backfill() {
+  echo
+  echo "-- 1. Backfilling docs.zip from $PAGES_REF --"
+  git fetch --tags --quiet origin "${PAGES_REF#origin/}" || true
+  local pages_dirs tag dir has tmp
+  pages_dirs=$(git ls-tree -d --name-only "$PAGES_REF")
+  for tag in $(git tag -l); do
+    dir=$(node "$ROOT/lib/assemble.mjs" sanitize "$tag")
+    if ! grep -qxF "$dir" <<<"$pages_dirs"; then continue; fi      # no gh-pages dir
+    has=$(gh release view "$tag" --repo "$REPO" --json assets \
+            -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)
+    if [ "$has" = "true" ]; then continue; fi                      # already has it
+    echo "   backfill $tag  (from $dir/)"
+    if $DRY_RUN; then continue; fi
+    tmp=$(mktemp -d)
+    git archive "$PAGES_REF" "$dir" | tar -x -C "$tmp"             # → $tmp/$dir/…
+    mv "$tmp/$dir" "$tmp/html"
+    ( cd "$tmp" && zip -rq docs.zip html )                         # bare html/ root
+    gh release upload "$tag" "$tmp/docs.zip" --repo "$REPO" --clobber
+    rm -rf "$tmp"
+  done
+}
 
 # --- verify helper (step 4 body) --------------------------------------------
 verify() {
@@ -85,12 +108,14 @@ verify() {
   $ok
 }
 
+backfill
+
 if $DRY_RUN; then
   echo
-  echo "-- 4. (dry-run) verifying current site --"
+  echo "-- 4. (dry-run) probing current site --"
   verify || echo "(dry-run probe failed — expected if the site isn't deployed yet)"
   echo
-  echo "Dry run complete: backfill done; flip/deploy/delete skipped."
+  echo "Dry run complete: backfill plan shown (nothing uploaded); flip/deploy/delete skipped."
   exit 0
 fi
 

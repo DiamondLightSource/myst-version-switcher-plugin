@@ -4,8 +4,8 @@
  * Covers the pure functions carried over from make-switcher (ordering,
  * prerelease/preferred, switcher shape + serialisation) plus the new pieces:
  * directory discovery, mixed branch+tag ordering, sanitisation, the
- * required-branch check (incl. required-missing → fail), migration planning, and
- * the redirect/stable-alias decision.
+ * required-branch check (incl. required-missing → fail), and the
+ * redirect/stable-alias decision.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
@@ -16,7 +16,6 @@ import {
 	isPrerelease,
 	missingRequired,
 	orderVersions,
-	planMigration,
 	preferredVersion,
 	renderRedirect,
 	renderSwitcher,
@@ -157,49 +156,8 @@ ok("missingRequired sanitises required names to match dir names");
 assert.deepEqual(missingRequired([], ["main"]), []);
 ok("missingRequired is a no-op with no required branches");
 
-// --- planMigration: which tags need a docs.zip backfilled from gh-pages ---
-// returns RAW tags (in tags order) whose sanitised dir is on gh-pages and which
-// lack docs.zip; branch dirs (main) and tags without a dir are skipped.
-assert.deepEqual(
-	planMigration({
-		pagesDirs: ["main", "v0.1.0", "v0.2.0"],
-		tags: ["v0.2.0", "v0.1.0"],
-		withDocsZip: [],
-	}),
-	{ backfill: ["v0.2.0", "v0.1.0"] },
-);
-ok("planMigration backfills release dirs lacking docs.zip, skips branches");
-
-// tags that already have docs.zip are not re-backfilled.
-assert.deepEqual(
-	planMigration({
-		pagesDirs: ["main", "v0.1.0", "v0.2.0"],
-		tags: ["v0.2.0", "v0.1.0"],
-		withDocsZip: ["v0.1.0"],
-	}),
-	{ backfill: ["v0.2.0"] },
-);
-ok("planMigration skips tags that already have docs.zip");
-
-// a release tag with no gh-pages dir is nothing to backfill from.
-assert.deepEqual(
-	planMigration({ pagesDirs: ["main"], tags: ["v1.0"], withDocsZip: [] }),
-	{ backfill: [] },
-);
-ok("planMigration ignores tags with no gh-pages directory");
-
-// a tag with `/` matches its sanitised gh-pages dir; the RAW tag is returned.
-assert.deepEqual(
-	planMigration({
-		pagesDirs: ["main", "release_1.0"],
-		tags: ["release/1.0"],
-		withDocsZip: [],
-	}),
-	{ backfill: ["release/1.0"] },
-);
-ok(
-	"planMigration matches a slash tag by its sanitised dir, returns the raw tag",
-);
+// (gh-pages → docs.zip backfill planning now lives in scripts/migrate.sh, in
+// bash over the tested `sanitize`, so there is no planMigration unit here.)
 
 // --- switcherStruct shape, with the stable entry flagged ---
 assert.deepEqual(

@@ -11,7 +11,8 @@ publish it directly to GitHub Pages.
 plugins/version-switcher.mjs                   # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
 current-version/action.yml                     # pre-build: sanitise ref → version token (BASE_URL sub-path)
 assemble/action.yml                            # post-build: gather all versions, write switcher.json + redirect, output site dir
-lib/assemble.mjs                               # dependency-free Node kernel shared by both actions (sanitize / generate / migrate)
+lib/assemble.mjs                               # dependency-free Node kernel shared by both actions (sanitize / generate)
+scripts/migrate.sh                             # one-shot operator gh-pages → durable-source migration (bash)
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/ci.yml                       # orchestrator → _lint / _test / _docs / _release
