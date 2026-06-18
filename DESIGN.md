@@ -105,8 +105,7 @@ means no bash-vs-JS drift and no parity test to maintain.
 | `html-dir` | yes | — | path to the freshly built docs (e.g. `docs/_build/html`) |
 | `ref-name` | yes | — | the **unsanitised** ref (`${{ github.ref_name }}`); sanitised internally |
 | `repo` | no | `${{ github.repository }}` | `org/repo`, for version URLs |
-| `required-branches` | no | default branch | branches that **must** be present, else the deploy hard-fails (satisfied by being the current ref or having a recent successful CI `docs` artifact) |
-| `optional-branches` | no | all branches with recent CI | branch previews to include if they have a recent CI artifact; missing → silently skipped |
+| `required-branches` | no | default branch | branches that **must** end up in the site, else the deploy hard-fails (satisfied by being the current ref or having a recent successful CI `docs` artifact). Every branch with recent CI is gathered regardless — this only guards the load-bearing ones |
 | `token` | no | `${{ github.token }}` | `gh` access: release assets + cross-run artifacts |
 
 ### `assemble` outputs
@@ -145,22 +144,24 @@ $RUNNER_TEMP/
        gh release download "$tag" -p docs.zip -O r.zip
        unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$tag"
 
-4. Plan branch previews (JS kernel — pure, unit-tested)
-     ci=$(gh run list --workflow ci.yml --status success \
-            --json headBranch,databaseId -q '<latest run id per branch>')
-     plan=$(node assemble.mjs plan-branches --ref-name "$ref-name" \
-              --required "$required" --optional "$optional" --ci "$ci")
-       # planBranches() resolves required ∪ optional, sanitises each dest dir, and
-       # emits the {runId, destDir} fetch list. Any required branch that is neither
-       # the current ref nor present in $ci → exit 1 (hard-fail). Optional & absent
-       # → simply omitted from the plan.
+4. Gather branch previews + guard required (bash IO; one JS check)
+     # latest successful ci.yml run per branch, newest wins:
+     runs=$(gh run list --workflow ci.yml --status success --limit 100 \
+              --json headBranch,databaseId \
+              -q 'group_by(.headBranch)[] | max_by(.databaseId) | [.databaseId,.headBranch] | @tsv')
+     present="$ref-name"
+     for {runId, branch} in runs:
+       present+=",$branch"
+       [ "$branch" = "$ref-name" ] && continue           # current build already staged
+       dest=$(node assemble.mjs sanitize "$branch")
+       gh run download "$runId" -n docs -D t             # → t/docs.zip
+       unzip t/docs.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$dest"
+     node assemble.mjs check-required --required "$required" --present "$present"
+       # exit 1 (hard-fail) if a required branch is neither the current ref nor
+       # among the gathered branches. The fetch itself is dumb bash; only the
+       # load-bearing-branch guarantee is the (pure, unit-tested) JS kernel.
 
-5. Fetch planned branches (bash plumbing; dumb IO)
-     for {runId, destDir} in plan:
-       gh run download "$runId" -n docs -D t           # → t/docs.zip
-       unzip t/docs.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$destDir"
-
-6. Generate switcher.json + redirect, decide stable (JS — the pure core)
+5. Generate switcher.json + redirect, decide stable (JS — the pure core)
      stable_src=$(node assemble.mjs generate --site-dir "$RUNNER_TEMP/site" --repo "$repo")
        # writes switcher.json (★ on the latest-release entry) + index.html.
        # versions discovered from site/ subdirs; git tags drive ordering +
@@ -168,18 +169,18 @@ $RUNNER_TEMP/
        # index.html → stable/ when preferred is a release tag, else → the main
        # fallback. Prints the preferred release dir to alias, or nothing if none.
 
-7. Stable alias (bash; symlink, inflated to a copy at deploy — see Stable alias)
+6. Stable alias (bash; symlink, inflated to a copy at deploy — see Stable alias)
      [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
 
-8. Output the assembled dir
+7. Output the assembled dir
      echo "dir=$RUNNER_TEMP/site" >> "$GITHUB_OUTPUT"
 ```
 
 The split is deliberate: **bash does the IO plumbing** (`gh` calls, `unzip`, `mv`)
 where shelling out is concise, and the **JS kernel does the logic** — `sanitize()`,
-`planBranches()`, and the pure generation. The kernel functions take plain data
-(ref name, branch lists, the `ci` catalogue JSON) and return plans/strings, so
-they unit-test without mocking `gh`, the network, or the filesystem. Bash never
+`checkRequired()`, and the pure generation. The kernel functions take plain data
+(branch name lists, etc.) and return strings/verdicts, so they unit-test without
+mocking `gh`, the network, or the filesystem. Bash never
 touches JSON itself: every extraction uses `gh`'s built-in `-q`/`--jq` (it embeds
 the real jq) or `gh api --jq`, never a piped standalone `jq`. That keeps `gh`'s
 exit code intact — a `gh … | jq` pipe would mask an API failure as empty output
@@ -187,9 +188,13 @@ unless `pipefail` is set — and gets field-name validation from `--json`. Gathe
 order is irrelevant (a directory is a directory); all ordering and prerelease
 logic lives in `generate`.
 
-`required-branches` defaults to the default branch (so `main`'s preview can never
-silently vanish); `optional-branches` defaults to every branch with a recent
-successful CI run (distinct head branches of recent successful `ci.yml` runs).
+Branch previews are gathered for **every** branch with a recent successful
+`ci.yml` run (latest run per branch); there is no opt-in list. `required-branches`
+defaults to the default branch, so `main`'s preview can never silently vanish —
+if a required branch is neither the current ref nor gathered, the deploy
+hard-fails. A deleted branch's preview persists until its runs age out of the
+recent list (~90 days, GitHub's run/artifact retention); that staleness window is
+accepted in exchange for not maintaining a live-branch list.
 
 ## What stays in the caller workflow
 
@@ -273,17 +278,18 @@ them:
   away.
 - **Add** `sanitize(name)` — the single sanitisation implementation, shared with
   `current-version` (replaces the duplicated rule + parity test).
-- **Add** `planBranches({ refName, required, optional, ci })` — resolves which
-  branches to fetch, their sanitised dest dirs, and which required branches are
-  unsatisfiable (→ hard-fail). Pure: fed the `ci` catalogue as data, tested with
-  fixtures.
-- `assemble.mjs` exposes `sanitize` / `plan-branches` / `generate` subcommands;
+- **Add** `checkRequired({ required, present })` — returns the required branches
+  absent from the site (current ref + gathered branches) for the caller to
+  hard-fail on. Pure, tested with fixtures. (The branch *fetch* is dumb bash —
+  list latest run per branch, download, unzip — so only this guarantee is JS.)
+- `assemble.mjs` exposes `sanitize` / `check-required` / `generate` subcommands;
   `generate` reads `--site-dir` instead of an `--output-dir`, and writes
   `switcher.json` + `index.html` into that same dir.
 
-This keeps the testable core intact and pulls the only error-prone glue logic
-(branch resolution, sanitisation) into it; the remaining IO (`gh` download, unzip,
-upload) is bash plumbing, integration-tested via a dry run. `orderVersions`
+This keeps the testable core intact and pulls the only must-not-be-wrong logic
+(sanitisation, the required-branch guarantee) into it; the remaining IO (`gh`
+download, unzip, upload) is bash plumbing, integration-tested via a dry run.
+`orderVersions`
 already has to order branch names (e.g. `main`) alongside version tags — that path
 matters more now, so the backfill adds an explicit mixed branch+tag ordering test.
 
@@ -572,19 +578,19 @@ probe — skipping the flip and delete — validates the real path.)
 
 1. **[done]** Refactor `make-switcher.mjs` → `assemble.mjs`: replace gh-pages
    discovery with `discoverVersions(siteDir)`; add `sanitize()` and
-   `planBranches()`; retarget `renderRedirect` to `stable/` and have `generate`
+   `checkRequired()`; retarget `renderRedirect` to `stable/` and have `generate`
    emit the stable-alias source; keep the pure functions + their tests; add tests
-   for directory discovery, mixed branch+tag ordering, sanitisation, branch
-   planning (incl. required-missing → fail), and the redirect/stable-source
-   decision (incl. the no-release fallback).
+   for directory discovery, mixed branch+tag ordering, sanitisation, the
+   required-branch check (incl. required-missing → fail), and the
+   redirect/stable-source decision (incl. the no-release fallback).
 2. **[done]** Add stable-alias handling to `version-switcher.mjs`: `detectCurrent`
    selects the `preferred` entry under `<base>/stable/` and returns the actual base
    pathname; `computeTargetUrl`/`resolveTargetUrl` strip the passed base.
 3. **[done]** Write `current-version/action.yml` (shared `sanitize()` → `version`
-   output) and `assemble/action.yml` (pipeline steps 1–8) with `gh`-based plumbing
+   output) and `assemble/action.yml` (pipeline steps 1–7) with `gh`-based plumbing
    (gh's built-in `-q`, never a `jq` pipe). Step 3 lists releases in one
-   `gh api --paginate` call; the release-layer cache is deferred (see above).
-   `plan-branches` emits `<runId>\t<destDir>` TSV for the bash loop.
+   `gh api --paginate` call; the release-layer cache is deferred (see above). The
+   branch gather is dumb bash; `check-required` is the only JS guard in it.
 4. **[done]** Switch `_docs.yml` to current-version → build → assemble → publish,
    split into build + deploy jobs (only deploy carries the `github-pages`
    environment + `pages`/`id-token` perms + `concurrency`). Gate publish on

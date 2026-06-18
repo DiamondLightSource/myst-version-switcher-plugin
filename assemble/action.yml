@@ -21,15 +21,10 @@ inputs:
     default: ${{ github.repository }}
   required-branches:
     description: >-
-      Comma-separated branches that MUST be present, else the deploy hard-fails.
+      Comma-separated branches that MUST end up in the site, else the deploy
+      hard-fails. Every branch with a recent successful ci.yml run is gathered
+      regardless; this only guards that the load-bearing ones didn't vanish.
       Empty → the repo's default branch.
-    required: false
-    default: ""
-  optional-branches:
-    description: >-
-      Comma-separated branch previews to include if they have a recent CI artifact
-      (missing → silently skipped). Empty → every branch with a recent successful
-      ci.yml run.
     required: false
     default: ""
   token:
@@ -105,61 +100,50 @@ runs:
           fi
         done
 
-    # 4. Plan branch previews (pure JS kernel): resolve required ∪ optional to a
-    #    <runId>\t<destDir> TSV. A missing required branch makes node exit 1, which
-    #    (set -e) fails the step and the caller's deploy.
-    - name: Plan branch previews
+    # 4. Gather branch previews: the latest successful ci.yml run per branch
+    #    (newest wins), download + unzip each into site/<destDir>. The current ref
+    #    is skipped (its build is already staged fresh — its last CI artifact is
+    #    older). Then a pure JS check (set -e → hard-fail) verifies every required
+    #    branch ended up present. Deleted branches drop once their runs age out of
+    #    the recent list (~90d); that's accepted.
+    - name: Gather branch previews
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         REPO: ${{ inputs.repo }}
         REF_NAME: ${{ inputs.ref-name }}
         REQUIRED_IN: ${{ inputs.required-branches }}
-        OPTIONAL_IN: ${{ inputs.optional-branches }}
       run: |
         set -euo pipefail
-        ci=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
-               --json headBranch,databaseId \
-               -q '[.[] | {branch: .headBranch, runId: .databaseId}]')
+        runs=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
+                 --json headBranch,databaseId \
+                 -q 'group_by(.headBranch)[] | max_by(.databaseId) | [.databaseId, .headBranch] | @tsv')
+        present="$REF_NAME"
+        while IFS=$'\t' read -r runId branch; do
+          if [ -z "$runId" ]; then continue; fi
+          present="$present,$branch"
+          if [ "$branch" = "$REF_NAME" ]; then continue; fi
+          dest=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$branch")
+          if [ "$dest" = "$VS_VER" ]; then continue; fi   # don't clobber the current build
+          tmp="$RUNNER_TEMP/br-$dest"
+          rm -rf "$tmp"; mkdir -p "$tmp"
+          gh run download "$runId" --repo "$REPO" -n docs -D "$tmp"
+          if unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" && [ -d "$tmp/html" ]; then
+            rm -rf "${VS_SITE:?}/$dest"
+            mv "$tmp/html" "$VS_SITE/$dest"
+          else
+            echo "::warning::branch $branch docs.zip has no html/ root — skipping"
+          fi
+        done <<< "$runs"
+
         required="$REQUIRED_IN"
         if [ -z "$required" ]; then
           required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
         fi
-        optional="$OPTIONAL_IN"
-        if [ -z "$optional" ]; then
-          optional=$(gh run list --repo "$REPO" --workflow ci.yml --status success --limit 100 \
-                       --json headBranch -q '[.[].headBranch] | unique | join(",")')
-        fi
-        plan="$RUNNER_TEMP/branch-plan.tsv"
-        node "$GITHUB_ACTION_PATH/assemble.mjs" plan-branches \
-          --ref-name "$REF_NAME" \
-          --required "$required" \
-          --optional "$optional" \
-          --ci "$ci" > "$plan"
-        echo "VS_PLAN=$plan" >> "$GITHUB_ENV"
+        node "$GITHUB_ACTION_PATH/assemble.mjs" check-required \
+          --required "$required" --present "$present"
 
-    # 5. Fetch each planned branch's docs.zip artifact, unzip its html/ into
-    #    site/<destDir> (symmetric with the release gather in step 3c).
-    - name: Fetch branch previews
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        REPO: ${{ inputs.repo }}
-      run: |
-        set -euo pipefail
-        while IFS=$'\t' read -r runId destDir; do
-          if [ -z "$runId" ]; then continue; fi
-          tmp="$RUNNER_TEMP/br-$destDir"
-          rm -rf "$tmp"; mkdir -p "$tmp"
-          gh run download "$runId" --repo "$REPO" -n docs -D "$tmp"
-          if ! unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" || [ ! -d "$tmp/html" ]; then
-            echo "::warning::branch $destDir docs.zip has no html/ root — skipping"; continue
-          fi
-          rm -rf "${VS_SITE:?}/$destDir"
-          mv "$tmp/html" "$VS_SITE/$destDir"
-        done < "$VS_PLAN"
-
-    # 6. Generate switcher.json + root redirect; print the stable-alias source.
+    # 5. Generate switcher.json + root redirect; print the stable-alias source.
     - name: Generate switcher + redirect
       id: generate
       shell: bash
@@ -171,7 +155,7 @@ runs:
           --site-dir "$VS_SITE" --repo "$REPO")
         echo "stable_src=$stable_src" >> "$GITHUB_OUTPUT"
 
-    # 7. Stable alias: a symlink, inflated to a real copy by upload-pages-artifact
+    # 6. Stable alias: a symlink, inflated to a real copy by upload-pages-artifact
     #    (it tars with --dereference). Absent before the first release.
     - name: Create stable alias
       shell: bash
@@ -183,7 +167,7 @@ runs:
           ln -s "$STABLE_SRC" "$VS_SITE/stable"
         fi
 
-    # 8. Output the assembled dir for the caller's upload-pages-artifact step.
+    # 7. Output the assembled dir for the caller's upload-pages-artifact step.
     - name: Output assembled dir
       id: out
       shell: bash

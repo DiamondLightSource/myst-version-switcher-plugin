@@ -10,12 +10,10 @@
  *   node assemble.mjs sanitize <ref-name>
  *       → print the sanitised version (the BASE_URL sub-path + site/ dir name).
  *
- *   node assemble.mjs plan-branches --ref-name <r> --required <csv> \
- *       --optional <csv> --ci <json>
- *       → print the fetch list as `<runId>\t<destDir>` TSV lines (one per
- *         branch, so bash reads it with `while read` and never parses JSON);
- *         exit 1 if a required branch is neither the current ref nor present in
- *         the CI catalogue.
+ *   node assemble.mjs check-required --required <csv> --present <csv>
+ *       → exit 1 (with a message) if any required branch is absent from the
+ *         present set (the current ref + the branches gathered from CI); the
+ *         branch fetch itself is dumb bash in the action.
  *
  *   node assemble.mjs generate --site-dir <dir> --repo <org/repo>
  *       → write switcher.json + index.html into <dir>; print the stable-alias
@@ -145,53 +143,24 @@ export function stablePlan(versions, tags) {
 }
 
 /**
- * Resolve which branch previews to fetch, given the current ref, the required and
- * optional branch lists, and the CI catalogue (latest successful `docs` run per
- * branch). Pure — fed plain data, so it tests with fixtures.
+ * Validate that every required branch will be present in the assembled site.
+ * Pure — fed plain data, so it tests with fixtures.
  *
- * The current ref's build is already staged as a directory, so it is never
- * fetched. A required branch that is neither the current ref nor present in the
- * catalogue is unsatisfiable; the caller hard-fails on a non-empty
- * `missingRequired`. Optional-and-absent branches are silently dropped.
+ * The action gathers a branch preview for every branch with a recent successful
+ * CI build (dumb bash); this only guards that the load-bearing branches (default:
+ * the repo's default branch) didn't silently vanish. A required branch is
+ * satisfied if it is the current ref (its build is staged directly) or was among
+ * the gathered branches. The caller hard-fails on a non-empty `missing`.
  *
  * @param {object}   args
- * @param {string}   args.refName    unsanitised current ref
  * @param {string[]} [args.required] branches that must be present
- * @param {string[]} [args.optional] branches to include if available
- * @param {Array<{branch:string, runId:(string|number)}>} [args.ci]
- *        latest successful run id per branch (newest-first; first wins on dupes)
- * @returns {{fetch: Array<{runId:(string|number), destDir:string}>, missingRequired: string[]}}
+ * @param {string[]} [args.present]  branches present in the site (current ref +
+ *                                   the branches gathered from CI)
+ * @returns {{missing: string[]}}
  */
-export function planBranches({
-	refName,
-	required = [],
-	optional = [],
-	ci = [],
-}) {
-	const currentDir = sanitize(refName);
-	const ciMap = new Map();
-	for (const { branch, runId } of ci) {
-		if (!ciMap.has(branch)) ciMap.set(branch, runId); // newest-first: first wins
-	}
-
-	const requiredSet = new Set(required);
-	const all = [...new Set([...required, ...optional])];
-	const fetch = [];
-	const missingRequired = [];
-	const seenDirs = new Set([currentDir]); // current build already staged
-
-	for (const branch of all) {
-		const destDir = sanitize(branch);
-		if (seenDirs.has(destDir)) continue;
-		if (ciMap.has(branch)) {
-			fetch.push({ runId: ciMap.get(branch), destDir });
-			seenDirs.add(destDir);
-		} else if (requiredSet.has(branch)) {
-			missingRequired.push(branch);
-		}
-		// optional & absent → skip silently
-	}
-	return { fetch, missingRequired };
+export function checkRequired({ required = [], present = [] }) {
+	const have = new Set(present);
+	return { missing: required.filter((branch) => !have.has(branch)) };
 }
 
 /**
@@ -270,38 +239,24 @@ function csv(value) {
 		.filter(Boolean);
 }
 
-/** `plan-branches --ref-name --required --optional --ci` — print the fetch list. */
-function cmdPlanBranches(rest) {
+/** `check-required --required --present` — exit 1 if a required branch is absent. */
+function cmdCheckRequired(rest) {
 	const { values } = parseArgs({
 		args: rest,
 		options: {
-			"ref-name": { type: "string" },
 			required: { type: "string" },
-			optional: { type: "string" },
-			ci: { type: "string" },
+			present: { type: "string" },
 		},
 	});
-	if (!values["ref-name"]) {
-		throw new Error("plan-branches: --ref-name is required");
-	}
-	const ci = values.ci ? JSON.parse(values.ci) : [];
-	const { fetch, missingRequired } = planBranches({
-		refName: values["ref-name"],
+	const { missing } = checkRequired({
 		required: csv(values.required),
-		optional: csv(values.optional),
-		ci,
+		present: csv(values.present),
 	});
-	if (missingRequired.length > 0) {
+	if (missing.length > 0) {
 		console.error(
-			`Required branch(es) have no current build or recent CI artifact: ${missingRequired.join(", ")}`,
+			`Required branch(es) not present in the assembled site (no current build or recent CI artifact): ${missing.join(", ")}`,
 		);
 		process.exitCode = 1;
-		return;
-	}
-	// TSV (`<runId>\t<destDir>`) so the action reads it with `while read` rather
-	// than parsing JSON in bash.
-	for (const { runId, destDir } of fetch) {
-		console.log(`${runId}\t${destDir}`);
 	}
 }
 
@@ -445,15 +400,15 @@ export function main(argv = process.argv.slice(2)) {
 	switch (cmd) {
 		case "sanitize":
 			return cmdSanitize(rest);
-		case "plan-branches":
-			return cmdPlanBranches(rest);
+		case "check-required":
+			return cmdCheckRequired(rest);
 		case "generate":
 			return cmdGenerate(rest);
 		case "migrate":
 			return cmdMigrate(rest);
 		default:
 			throw new Error(
-				"usage: assemble.mjs <sanitize|plan-branches|generate|migrate> ...",
+				"usage: assemble.mjs <sanitize|check-required|generate|migrate> ...",
 			);
 	}
 }

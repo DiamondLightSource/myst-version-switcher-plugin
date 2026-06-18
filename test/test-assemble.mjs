@@ -11,10 +11,10 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	checkRequired,
 	discoverVersions,
 	isPrerelease,
 	orderVersions,
-	planBranches,
 	planMigration,
 	preferredVersion,
 	renderRedirect,
@@ -133,44 +133,31 @@ assert.deepEqual(stablePlan(["3.0rc1"], ["3.0rc1"]), {
 });
 ok("stablePlan never aliases a prerelease as stable");
 
-// --- planBranches: resolve required ∪ optional to a fetch list ---
-const ci = [
-	{ branch: "main", runId: 111 },
-	{ branch: "dev", runId: 222 },
-	{ branch: "dev", runId: 999 }, // older dup, ignored (newest-first)
-	{ branch: "feature/x", runId: 333 },
-];
-
-// current ref is never fetched; optional present → fetched; optional absent → skipped.
-let plan = planBranches({
-	refName: "main",
-	required: ["main"],
-	optional: ["dev", "ghost"],
-	ci,
-});
-assert.deepEqual(plan, {
-	fetch: [{ runId: 222, destDir: "dev" }],
-	missingRequired: [],
-});
-ok(
-	"planBranches fetches optional branches with CI, skips absent, omits current ref",
+// --- checkRequired: required branches must be present in the assembled site ---
+// present = the current ref + the branches gathered from CI.
+assert.deepEqual(
+	checkRequired({ required: ["main"], present: ["main", "dev", "feature/x"] }),
+	{ missing: [] },
 );
+ok("checkRequired passes when the required branch was gathered");
 
-// dest dirs are sanitised.
-plan = planBranches({ refName: "main", optional: ["feature/x"], ci });
-assert.deepEqual(plan.fetch, [{ runId: 333, destDir: "feature_x" }]);
-ok("planBranches sanitises dest dirs");
+// a required branch absent from the present set is reported.
+assert.deepEqual(
+	checkRequired({ required: ["main", "release-2"], present: ["main", "dev"] }),
+	{ missing: ["release-2"] },
+);
+ok("checkRequired reports a required branch absent from the site");
 
-// a required branch with neither a current build nor CI → missingRequired.
-plan = planBranches({ refName: "main", required: ["main", "release-2"], ci });
-assert.deepEqual(plan.fetch, []);
-assert.deepEqual(plan.missingRequired, ["release-2"]);
-ok("planBranches reports an unsatisfiable required branch");
+// the current ref counts as present (its build is staged directly).
+assert.deepEqual(
+	checkRequired({ required: ["release-2"], present: ["release-2"] }),
+	{ missing: [] },
+);
+ok("checkRequired treats the current ref as satisfying a required branch");
 
-// a required branch that IS the current ref is satisfied (not fetched, not missing).
-plan = planBranches({ refName: "release-2", required: ["release-2"], ci });
-assert.deepEqual(plan, { fetch: [], missingRequired: [] });
-ok("planBranches treats the current ref as satisfying a required branch");
+// no required branches → nothing to miss.
+assert.deepEqual(checkRequired({ present: ["main"] }), { missing: [] });
+ok("checkRequired is a no-op with no required branches");
 
 // --- planMigration: which tags need a docs.zip backfilled from gh-pages ---
 // release tags with a gh-pages dir and no docs.zip → backfill, in pagesDirs order;
