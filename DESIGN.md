@@ -325,6 +325,84 @@ preinstalled on GitHub runners. Cross-run artifact download needs
 `gh run download <id>` (the `actions/download-artifact` action only sees the
 current run).
 
+## Release-layer cache (optional optimisation)
+
+Re-downloading and unzipping every release's `docs.zip` on every deploy is the one
+cost this design carries (the Scaling edge case). A GitHub Actions cache removes
+it — but only for the **immutable release layer**, never the whole site. The
+distinction matters because GH cache semantics actively fight the obvious
+"cache the expanded site" idea:
+
+- **Cache scoping is one-directional.** A cache written on a branch is visible
+  only to that branch and its descendants; the *default branch's* cache is the
+  only one all other branches/PRs can restore. Writes never flow upward — a
+  feature branch **cannot** write into the cache `main`'s deploy reads. So
+  "active branches write their build into a shared cache" is impossible; that is
+  exactly why branch previews come from cross-run CI **artifacts**
+  (`gh run download`), which *do* cross the run/branch boundary. The cache cannot
+  replace artifact gathering for branches.
+- **A cached site reintroduces drift.** An accumulating tree never forgets a
+  deleted branch unless actively pruned — the very `keep_files` problem (#3) this
+  redesign kills. Reconstructing the live set every deploy and letting
+  `deploy-pages` replace the whole site is what makes deletion self-healing; a
+  cached tree forfeits that.
+- **A cache is never a source of truth.** GH caches evict after 7 idle days (and
+  under a 10 GB/repo LRU cap), so the full durable-source gather must exist
+  regardless. The cache only ever *accelerates* it.
+
+So cache **only the released-tags layer**, which is immutable and permanent:
+
+- Key each extracted release `docs-html-<tag>-<asset-digest>` (digest from
+  `gh release view <tag> --json assets`). Immutable content ⇒ the key is never
+  invalidated; a new release is simply a new key (a miss for that one tag). On a
+  miss, fall back to `gh release download` + `unzip` as today, then save the
+  cache. Branches (incl. `main`) stay fresh from CI artifacts every deploy.
+
+This is a transparent enhancement to step 3 of the `assemble` pipeline, not a
+change to the action's contract. It is optional — correctness rests entirely on
+the durable sources whether or not the cache hits.
+
+## External-PR previews via the contributor's fork
+
+A `pull_request` run from a **fork** gets a read-only `GITHUB_TOKEN` and no
+secrets, and cannot deploy to the base repo's Pages — a deliberate security
+boundary (otherwise any PR could deface the site or exfiltrate secrets). So the
+canonical Pages site cannot show external-PR docs. Of the three escape hatches:
+
+- **`pull_request_target`** runs privileged but defaults to base code; checking
+  out + *building* PR-head content under it is the classic RCE footgun (a MyST
+  build executes PR-authored plugins/transforms = untrusted code). Rejected.
+- **`workflow_run`** (PR build uploads an artifact unprivileged; a base-context
+  job publishes it) is GitHub's documented fork-preview pattern and is safe, but
+  publishes on our infra/domain and is the most machinery.
+- **Publish to the contributor's own fork Pages** — chosen. The contributor's
+  `push` to their fork runs in the fork with the fork's own write-scoped token
+  and deploys to `https://<contributor>.github.io/<repo>/<branch>/`. Zero
+  base-repo resources or secrets are touched; compute is on the contributor's
+  account.
+
+It composes with this design with **no action changes** — only caller-workflow
+gating:
+
+- It is driven by `push` in the fork, not the base repo's `pull_request` run
+  (which still only build-checks, publishing nothing). Base-repo PR behaviour is
+  unchanged.
+- The only adjustment: the publish gate must not be hardcoded `main`-only. Gate
+  publish as `ref_type == 'tag' || ref_name == 'main' || github.repository != <upstream>`.
+  On the fork, `repository != upstream` ⇒ its branch pushes deploy to the fork's
+  Pages; on upstream, feature-branch pushes still never publish.
+- `BASE_URL=/<repo>/<version>` is identical on a fork (same repo name) ⇒ builds
+  unchanged. On the fork, `gh release download` finds no releases (forks don't
+  copy them) ⇒ `assemble` gathers only the fork's current branch — a
+  self-contained single-branch preview, which is correct.
+
+The cost is UX/opt-in, not security: the contributor must enable Actions + Pages
+on their fork (off by default), and a fork run **cannot** comment the preview URL
+back on the base PR (read-only to base) — the link is pasted by the contributor
+or surfaced by an optional base-repo `workflow_run` job. For an org reviewing
+community PRs this is acceptable, and arguably cleaner: no base-repo surface at
+all.
+
 ## Edge cases
 
 - **First deploy:** no releases, `required-branches=main`, current=`main` → site
@@ -350,7 +428,9 @@ current run).
   an in-flight run. GitHub also serialises deployments to the `github-pages`
   environment.
 - **Scaling:** every deploy downloads every release's `docs.zip`. Fine for tens of
-  releases; if it grows, cache downloads keyed by release id / asset digest.
+  releases; beyond that the **release-layer cache** (below) keys extracted
+  releases by tag + asset digest so unchanged releases are restored, not
+  re-downloaded.
 
 ## Resolved decisions
 
@@ -456,11 +536,13 @@ probe — skipping the flip and delete — validates the real path.)
    page; ordinary pages unchanged.
 3. Write `current-version/action.yml` (calls the shared `sanitize()` → `version`
    output) and `assemble/action.yml` (pipeline steps 1–8) with `gh`-based plumbing
-   (gh's built-in `-q`, never a `jq` pipe).
+   (gh's built-in `-q`, never a `jq` pipe). Step 3 caches the extracted release
+   layer (`docs-html-<tag>-<digest>`; see Release-layer cache).
 4. Switch `_docs.yml` to current-version → build → assemble → publish; add the
    `github-pages` environment, Pages permissions, `concurrency`, and the explicit
-   `upload-pages-artifact` + `deploy-pages` steps. Set the repo's Pages source to
-   GitHub Actions.
+   `upload-pages-artifact` + `deploy-pages` steps. Gate publish so fork pushes
+   deploy to the fork's Pages (see External-PR previews). Set the repo's Pages
+   source to GitHub Actions.
 5. Add `docs.zip` attachment to `_release.yml` (downloads the `docs` artifact),
    with `needs: _docs` (decision #2).
 6. Update `docs/index.md` + `CLAUDE.md` consuming instructions.
