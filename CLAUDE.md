@@ -1,19 +1,20 @@
 # myst-version-switcher-plugin
 
 A pydata-style version-switcher for [MyST](https://mystmd.org) docs, delivered as
-a single `anywidget` plugin **plus** a CI composite action that generates the
-`switcher.json` the widget reads and a root `index.html` redirect to the newest
-stable release.
+a single `anywidget` plugin **plus** a pair of CI composite actions that
+reconstruct the whole versioned docs site from durable sources every deploy and
+publish it directly to GitHub Pages.
 
 ## Repo layout
 
 ```
 plugins/version-switcher/version-switcher.mjs  # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
-switcher/action.yml                            # composite action: writes switcher.json + index.html
-switcher/make-switcher.mjs                     # dependency-free Node switcher + redirect generator
+current-version/action.yml                     # pre-build: sanitise ref → version token (BASE_URL sub-path)
+assemble/action.yml                            # post-build: gather all versions, write switcher.json + redirect, output site dir
+assemble/assemble.mjs                          # dependency-free Node kernel (sanitize / plan-branches / generate)
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
-.github/workflows/ci.yml                       # orchestrator → _test / _docs / _release
+.github/workflows/ci.yml                       # orchestrator → _lint / _test / _docs / _release
 ```
 
 ## Two halves, different lifecycles
@@ -21,22 +22,31 @@ docs/                                          # this repo's own docs (dogfoods 
 | half | file | how consumers use it |
 |------|------|----------------------|
 | Plugin (widget) | `plugins/version-switcher/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
-| Switcher action | `switcher/` | `uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>` |
+| Site actions | `current-version/`, `assemble/` | `uses: DiamondLightSource/myst-version-switcher-plugin/{current-version,assemble}@<tag>` |
 
-One `vX.Y.Z` tag versions both. The plugin is published as a GitHub Release asset;
-the action is consumed from the repo tree at the same tag.
+One `vX.Y.Z` tag versions both. The plugin is published as a GitHub Release asset
+(alongside the tag's `docs.zip`); the actions are consumed from the repo tree at
+the same tag.
 
 ## Key design decisions
 
-### `switcher` action only writes the two derived files
-The action writes `switcher.json` and a root `index.html` (a redirect to the
-newest stable release) into the caller-supplied `output-dir` — the gh-pages
-publish root — and nothing else. It does NOT `mv` the built docs, does NOT
-`git fetch`. Staging the versioned dir (`mv`) and `fetch-depth: 0` (for tags +
-`origin/gh-pages`) are the caller's responsibility (pattern lifted from
-`python-copier-template-example`). Both files are derived purely from the git
-version ordering, so regenerating them every deploy is intentional — with
-`keep_files: true` each deploy refreshes the root redirect to the latest release.
+See [`DESIGN.md`](DESIGN.md) for the full rationale. In short:
+
+### Reconstruct from durable sources, publish the whole tree
+Every deploy rebuilds the **complete** site from authoritative inputs — this
+build, each release's `docs.zip` asset, recent branch CI artifacts — and deploys
+it as the *entire* Pages site via `upload-pages-artifact` + `deploy-pages` (no
+`gh-pages` branch; Pages source = "GitHub Actions"). A version that is no longer
+gathered (e.g. a deleted branch) is correctly dropped — no `keep_files` drift.
+The **caller** owns the Pages publish because `deploy-pages` is job-scoped.
+
+### Two actions around the build
+`current-version` (before the build) sanitises the ref into the version token so
+`BASE_URL` can be set; `assemble` (after) gathers + generates + uploads the `docs`
+artifact + outputs the site dir. Both share one `sanitize()` in `assemble.mjs`, so
+the `BASE_URL` sub-path and the `site/<version>` dir name can never drift. Bash
+does the `gh`/`unzip`/`mv` IO; the JS kernel does the pure logic (`sanitize`,
+`planBranches`, `generate`) and is unit-tested without git/network/fs.
 
 ### BASE_URL must be set before `myst build`
 ```yaml
@@ -46,27 +56,40 @@ run: cd docs && myst build --html
 ```
 Without this, assets and links break under the versioned GitHub Pages sub-path.
 
-### `make-switcher.mjs` degrades gracefully on first deploy
-When `origin/gh-pages` does not yet exist (no deployed builds, no tags), it
-produces a single-entry `switcher.json` for just the current version and an
-`index.html` redirecting to it, rather than failing. The "preferred" version (the
-`index.html` target, flagged `preferred: true` in switcher.json) is the newest
-non-prerelease tag with a deployed build, falling back to `main`/`master`.
-Prerelease detection mirrors `_release.yml` (an `a`/`b`/`rc` marker).
+### `assemble` degrades gracefully on first deploy
+With no releases and no other branches, `assemble` produces a single-entry
+`switcher.json` for the current build and an `index.html` redirecting to it,
+rather than failing. The "preferred" version (the redirect target, flagged
+`preferred: true` in switcher.json, rendered with a ★) is the newest deployed
+non-prerelease tag, falling back to `main`/`master`. Prerelease detection mirrors
+`_release.yml` (an `a`/`b`/`rc` marker).
+
+### `stable/` alias
+When a non-prerelease release is deployed, the site serves a `stable/` symlink
+(inflated to a real copy by `upload-pages-artifact`'s `--dereference`) to the
+newest release, and the root redirect targets the constant `stable/` URL — a
+stable inventory URL for cross-project `objects.inv`. `switcher.json` has no
+`stable` entry; the widget maps a `…/stable/` page back to the concrete release.
 
 ## CI structure
 
-Mirrors `python-copier-template-example` as closely as possible:
-
 - `ci.yml` — orchestrator; triggers on `push: main`, tags, and PRs
+- `_lint.yml` — biome
 - `_test.yml` — `npm test`
-- `_docs.yml` — full docs build + deploy (see deviations below)
-- `_release.yml` — publishes `version-switcher.mjs` as a GitHub Release asset (tag-only)
+- `_docs.yml` — build + deploy to Pages (see below)
+- `_release.yml` — publishes `version-switcher.mjs` + `docs.zip` as Release assets (tag-only)
 
-### `_docs.yml` deviations from template
-1. `npm install -g mystmd@1.10.1` instead of `uv run tox -e docs` (no Python here)
-2. `BASE_URL` env var set before `myst build`
-3. `uses: ./switcher` writes `switcher.json` + `index.html` (instead of `make_switcher.py`)
+### `_docs.yml`
+Split into a **build** job (checkout `fetch-depth: 0` → `current-version` →
+`myst build` with `BASE_URL` → `assemble` → `upload-pages-artifact`) and a
+**deploy** job (`deploy-pages`, carrying the `github-pages` environment +
+`pages`/`id-token` perms + `concurrency`). Only deploy enters the environment so
+PR build-checks aren't gated by its deployment-branch protection. Publish is gated
+on `tag || main || fork` — a fork's own push deploys to the fork's Pages (see
+DESIGN "External-PR previews"); base-repo PRs only build-check.
+
+`_release.yml` downloads the tag's `docs` artifact and attaches it as `docs.zip`
+(bare `html/` root) — the durable source `assemble` reconstructs that release from.
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 
@@ -90,13 +113,13 @@ forwarded port in a real browser and hard-reload (MyST caches the localized esm)
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-CI runs tests + docs deploy, then `_release.yml` creates a GitHub Release with
-`version-switcher.mjs` as an asset. Both the plugin URL and the action reference the
-same tag.
+CI runs lint + tests + docs deploy, then `_release.yml` creates a GitHub Release
+with `version-switcher.mjs` and the tag's `docs.zip` as assets. The plugin URL and
+both actions reference the same tag.
 
 ## Consuming this in another repo
 
-Pin `<tag>` in two places (with copier, one Jinja variable fills both):
+Pin `<tag>` in three places (with copier, one Jinja variable fills all):
 
 ```yaml
 # docs/myst.yml
@@ -116,43 +139,17 @@ site:
 :::
 ```
 
-```yaml
-# .github/workflows/docs.yml
-- uses: actions/checkout@v5
-  with:
-    fetch-depth: 0   # required: tags + origin/gh-pages for version list
-- run: echo "DOCS_VERSION=${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}" >> $GITHUB_ENV
-- run: cd docs && myst build --html
-  env:
-    BASE_URL: /<repo>/${{ env.DOCS_VERSION }}
-- run: |
-    mkdir -p _site
-    mv docs/_build/html _site/$DOCS_VERSION
-- uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>
-  with:
-    version: ${{ env.DOCS_VERSION }}
-    repo: ${{ github.repository }}
-    output-dir: _site   # required: writes switcher.json + index.html into the publish root
-- uses: peaceiris/actions-gh-pages@v4
-  with:
-    publish_dir: _site
-    keep_files: true
-```
-
-## Planned: versioned-publish redesign
-
-[`DESIGN.md`](DESIGN.md) proposes replacing the current "switcher writes two
-files + caller stages/publishes with `keep_files: true`" model with a single
-`deploy` action that reconstructs the whole versioned site every deploy from
-durable sources (`docs.zip` release assets for tags, latest CI artifact for
-branches), then publishes the complete tree. Not yet implemented. The pure
-`make-switcher.mjs` functions carry over; only version discovery changes
-(directory scan instead of `git ls-tree origin/gh-pages`).
+Set the repo's **Pages source to "GitHub Actions"**, then a build + deploy job
+pair (`current-version` → `myst build` with `BASE_URL` → `assemble` →
+`upload-pages-artifact` → `deploy-pages`). See the full snippet in
+[`DESIGN.md`](DESIGN.md) "What stays in the caller workflow" and `docs/index.md`.
+Attach each tag's built docs as a `docs.zip` Release asset (bare `html/` root) so
+`assemble` can reconstruct released versions.
 
 ## Upstreaming
 
 `plugins/version-switcher/` mirrors
 [`jupyter-book/myst-plugins`](https://github.com/jupyter-book/myst-plugins)
 conventions (single self-contained `.mjs`, distributed as a release asset) so it
-can later be contributed there. The `switcher/` producer is DLS deployment
-infrastructure and stays here.
+can later be contributed there. The `current-version/` + `assemble/` producers are
+DLS deployment infrastructure and stay here.

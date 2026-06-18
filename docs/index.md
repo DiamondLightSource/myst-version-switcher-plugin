@@ -59,17 +59,30 @@ same-origin (the production gh-pages case); cross-origin probes can be
 CORS-blocked and are treated as indeterminate — the path is kept rather than
 stranding users at the root.
 
-**Local dev.** On `localhost`, where no gh-pages version URL prefixes the page
-path, the widget synthesises a `local (dev)` entry rooted at `/` so the switcher
-is usable during `myst start`.
+**Local dev.** On `localhost`, where no version URL prefixes the page path, the
+widget synthesises a `local (dev)` entry rooted at `/` so the switcher is usable
+during `myst start`.
 
-## Generating switcher.json + the root redirect
+**Stable alias.** The site serves a `stable/` copy of the newest release, so the
+canonical entry URL never changes (handy for inter-project `objects.inv`
+cross-references). Visiting a `…/stable/` page selects the concrete release it
+aliases in the dropdown, and switching to a pinned version preserves the page
+path onto it.
 
-The `switcher` composite action reads your repo's tags and `origin/gh-pages` to
-produce two files in your publish root: a `switcher.json` in the standard pydata
-format, and an `index.html` that redirects the site root to your newest stable
-release. The newest non-prerelease tag is flagged `preferred` (rendered with a ★)
-and is the redirect target; before any release exists it falls back to `main`.
+## Assembling + publishing the versioned site
+
+Two composite actions reconstruct the whole versioned site from durable sources on
+every deploy and publish it **directly to GitHub Pages** (no `gh-pages` branch):
+
+- **`current-version`** (before the build) sanitises the ref into the version
+  token so `BASE_URL` can be set.
+- **`assemble`** (after the build) gathers this build, every release's `docs.zip`
+  asset, and recent branch CI artifacts; writes `switcher.json` + a root redirect;
+  uploads this build's `docs` artifact; creates the `stable/` alias; and outputs
+  the assembled site dir for **you** to publish.
+
+`switcher.json` is the standard pydata format, with the newest non-prerelease tag
+flagged `preferred` (rendered with a ★):
 
 ```json
 [
@@ -79,32 +92,52 @@ and is the redirect target; before any release exists it falls back to `main`.
 ]
 ```
 
-Wire it into your docs workflow after staging the built HTML and before publishing:
+Set your repo's **Pages source to "GitHub Actions"** (Settings → Pages), then wire
+a build + deploy job pair:
 
 ```yaml
-- uses: actions/checkout@v5
-  with:
-    fetch-depth: 0            # tags + origin/gh-pages, for the version list
-- run: echo "DOCS_VERSION=${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}" >> $GITHUB_ENV
-- run: cd docs && myst build --html
-  env:
-    BASE_URL: /<repo>/${{ env.DOCS_VERSION }}  # required for versioned sub-path
-- run: |
-    mkdir -p _site
-    mv docs/_build/html _site/$DOCS_VERSION
-- uses: DiamondLightSource/myst-version-switcher-plugin/switcher@<tag>
-  with:
-    version: ${{ env.DOCS_VERSION }}
-    repo: ${{ github.repository }}
-    output-dir: _site   # writes switcher.json + index.html into the publish root
-- uses: peaceiris/actions-gh-pages@v4
-  with:
-    publish_dir: _site
-    keep_files: true
+env:
+  UPSTREAM: ORG/REPO    # pushes to a fork publish the contributor's own preview
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, actions: read }
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }          # tags, for version ordering
+      - id: ver
+        uses: DiamondLightSource/myst-version-switcher-plugin/current-version@<tag>
+        with: { ref-name: ${{ github.ref_name }} }
+      - run: cd docs && myst build --html
+        env:
+          BASE_URL: /REPO/${{ steps.ver.outputs.version }}   # versioned sub-path
+      - id: site
+        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
+        uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
+        with:
+          html-dir: docs/_build/html
+          ref-name: ${{ github.ref_name }}
+          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
+      - if: ${{ steps.site.outcome == 'success' }}
+        uses: actions/upload-pages-artifact@v3
+        with: { path: ${{ steps.site.outputs.dir }} }
+
+  deploy:
+    needs: build
+    if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'ORG/REPO' }}
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
+    permissions: { pages: write, id-token: write }
+    concurrency: { group: pages, cancel-in-progress: false }
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
 ```
 
-The action **only writes `switcher.json` and `index.html`** — staging (`mv`) and
-publishing stay in the workflow. `fetch-depth: 0` is the consumer's
-responsibility. On the first deploy, when `origin/gh-pages` does not yet exist,
-the action produces a single-entry `switcher.json` for the current version and an
-`index.html` redirecting to it, rather than failing.
+Released versions live as `docs.zip` assets — attach the tag's built docs to its
+GitHub Release (the build's `docs` artifact, zipped with a bare `html/` root) so
+`assemble` can reconstruct it. Base-repo PRs only build-check; a fork's own push
+publishes a preview to the fork's Pages. The first deploy (no releases) produces a
+single-entry `switcher.json` and a redirect to the current version rather than
+failing.
