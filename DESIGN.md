@@ -140,9 +140,10 @@ $RUNNER_TEMP/
      tags=$(gh api --paginate repos/$repo/releases \
               -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
      for tag in $tags:                                    # ordering done later, in JS
-       [ "$tag" = "$ver" ] && continue
+       dest=$(node assemble.mjs sanitize "$tag")          # git allows `/` etc. in tags
+       [ "$dest" = "$ver" ] && continue                   # raw tag for gh; dir is sanitised
        gh release download "$tag" -p docs.zip -O r.zip
-       unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$tag"
+       unzip r.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$dest"
 
 4. Gather branch previews (dumb bash IO)
      # latest successful ci.yml run per branch, newest wins:
@@ -275,7 +276,10 @@ them:
   `site/`. The current version is already a dir (step 1), so the `--add` flag goes
   away.
 - **Add** `sanitize(name)` — the single sanitisation implementation, shared with
-  `current-version` (replaces the duplicated rule + parity test).
+  `current-version` (replaces the duplicated rule + parity test). Applied to
+  *every* ref→dir: the current ref, branch previews, **and** gathered release tags
+  (git allows `/` in tags; the raw tag is kept for `gh`, the dir is sanitised — and
+  `generate` sanitises the tag list before ordering so identities match the dirs).
 - **Add** `missingRequired(required, versions)` — the required branches whose
   sanitised name is absent from the discovered site dirs. Pure, tested with
   fixtures. Called *inside* `generate` (which already discovers the dirs), so

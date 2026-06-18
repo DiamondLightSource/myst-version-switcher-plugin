@@ -71,7 +71,11 @@ export function discoverVersions(siteDir) {
 		.map((d) => d.name);
 }
 
-/** Tags newest-first (semver-aware), matching `git tag -l --sort=-v:refname`. */
+/**
+ * Tags newest-first (semver-aware), matching `git tag -l --sort=-v:refname`.
+ * RAW names — git allows `/` and other chars; callers `sanitize()` before using a
+ * tag as a site dir, but keep the raw form for `gh` (release lookups/uploads).
+ */
 export function getSortedTags() {
 	return gitLines(["tag", "-l", "--sort=-v:refname"]);
 }
@@ -164,16 +168,20 @@ export function missingRequired(required = [], versions = []) {
  * directory, is a real release tag, and lacks a docs.zip asset. Branch dirs
  * (`main/`, …) are ignored — they self-heal on the next branch CI.
  *
+ * A tag's gh-pages dir is its *sanitised* name (the old `_docs.yml` staged it as
+ * `$DOCS_VERSION = sanitize(ref)`), but `gh release upload` needs the *raw* tag —
+ * so match by sanitised dir and return the raw tags.
+ *
  * @param {object}   args
- * @param {string[]} [args.pagesDirs]  top-level dirs on the gh-pages branch
- * @param {string[]} [args.tags]       release tag names
- * @param {string[]} [args.withDocsZip] tags that already have a docs.zip asset
- * @returns {{backfill: string[]}} tags to backfill, in `pagesDirs` order
+ * @param {string[]} [args.pagesDirs]  top-level dirs on the gh-pages branch (sanitised)
+ * @param {string[]} [args.tags]       release tag names (raw)
+ * @param {string[]} [args.withDocsZip] raw tags that already have a docs.zip asset
+ * @returns {{backfill: string[]}} raw tags to backfill, in `tags` order
  */
 export function planMigration({ pagesDirs = [], tags = [], withDocsZip = [] }) {
-	const tagSet = new Set(tags);
+	const dirs = new Set(pagesDirs);
 	const have = new Set(withDocsZip);
-	const backfill = pagesDirs.filter((d) => tagSet.has(d) && !have.has(d));
+	const backfill = tags.filter((t) => dirs.has(sanitize(t)) && !have.has(t));
 	return { backfill };
 }
 
@@ -269,7 +277,10 @@ function cmdGenerate(rest) {
 		return;
 	}
 
-	const tags = getSortedTags();
+	// Tags become site dirs via sanitize() (same rule as the ref), so order +
+	// preferred + stable must compare in sanitised space — a tag `release/1.0`
+	// lives at `release_1.0/`.
+	const tags = getSortedTags().map(sanitize);
 	const versions = orderVersions(builds, tags);
 	const preferred = preferredVersion(versions, tags);
 	const { stableSrc, redirectTarget } = stablePlan(versions, tags);
@@ -330,25 +341,27 @@ function releaseHasDocsZip(tag, repo) {
 }
 
 /**
- * Zip the gh-pages `<tag>/` subtree as a bare `html/` archive and attach it as the
- * release's `docs.zip` (clobbering any prior one). All IO; the operator runs this
- * locally with their own `gh auth` (see DESIGN "Migration").
+ * Zip the gh-pages `<dir>/` subtree (where `dir = sanitize(tag)`) as a bare
+ * `html/` archive and attach it as the *raw* tag's `docs.zip` (clobbering any
+ * prior one). All IO; the operator runs this locally with their own `gh auth`
+ * (see DESIGN "Migration").
  */
 function backfillTag(tag, pagesRef, repo) {
-	const tmp = mkdtempSync(join(tmpdir(), `migrate-${sanitize(tag)}-`));
+	const dir = sanitize(tag); // the gh-pages dir name for this tag
+	const tmp = mkdtempSync(join(tmpdir(), `migrate-${dir}-`));
 	const tarPath = join(tmp, "src.tar");
-	// git archive emits entries under `<tag>/…`; capture the tar (binary) to a file
+	// git archive emits entries under `<dir>/…`; capture the tar (binary) to a file
 	// then extract, rather than piping through a shell.
 	writeFileSync(
 		tarPath,
-		execFileSync("git", ["archive", "--format=tar", pagesRef, tag], {
+		execFileSync("git", ["archive", "--format=tar", pagesRef, dir], {
 			maxBuffer: 1024 * 1024 * 1024,
 		}),
 	);
 	const extract = join(tmp, "extract");
 	mkdirSync(extract);
 	execFileSync("tar", ["-xf", tarPath, "-C", extract]);
-	renameSync(join(extract, tag), join(tmp, "html"));
+	renameSync(join(extract, dir), join(tmp, "html"));
 	execFileSync("zip", ["-rq", "docs.zip", "html"], { cwd: tmp });
 	const args = ["release", "upload", tag, join(tmp, "docs.zip"), "--clobber"];
 	if (repo) args.push("--repo", repo);

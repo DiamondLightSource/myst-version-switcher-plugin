@@ -74,10 +74,12 @@ runs:
         path: ${{ env.VS_ZIP }}
         compression-level: 0
 
-    # 3. Gather released versions into site/<tag>. One paginated API call lists the
+    # 3. Gather released versions into site/<dest>. One paginated API call lists the
     #    tags whose release carries a docs.zip (vs N per-tag lookups); then download
-    #    + unzip each. (A cache of the extracted releases is a possible future
-    #    optimisation — see DESIGN "Release-layer cache" — left out for now.)
+    #    + unzip each. The dir is sanitize(tag) (git allows `/` etc. in tags; the
+    #    build was made with BASE_URL=/repo/<sanitised>), while gh keeps the raw tag.
+    #    (A cache of the extracted releases is a possible future optimisation —
+    #    see DESIGN "Release-layer cache" — left out for now.)
     - name: Gather released versions
       shell: bash
       env:
@@ -88,13 +90,14 @@ runs:
         tags=$(gh api --paginate "repos/$REPO/releases" \
           -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
         for tag in $tags; do
-          if [ "$tag" = "$VS_VER" ]; then continue; fi
-          tmp="$RUNNER_TEMP/rel-$tag"
+          dest=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$tag")
+          if [ "$dest" = "$VS_VER" ]; then continue; fi   # current build already staged
+          tmp="$RUNNER_TEMP/rel-$dest"
           rm -rf "$tmp"; mkdir -p "$tmp"
           gh release download "$tag" --repo "$REPO" -p docs.zip -O "$tmp/docs.zip"
           if unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" && [ -d "$tmp/html" ]; then
-            rm -rf "${VS_SITE:?}/$tag"
-            mv "$tmp/html" "$VS_SITE/$tag"
+            rm -rf "${VS_SITE:?}/$dest"
+            mv "$tmp/html" "$VS_SITE/$dest"
           else
             echo "::warning::$tag docs.zip has no html/ root — skipping"
           fi

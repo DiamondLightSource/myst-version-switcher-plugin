@@ -158,15 +158,15 @@ assert.deepEqual(missingRequired([], ["main"]), []);
 ok("missingRequired is a no-op with no required branches");
 
 // --- planMigration: which tags need a docs.zip backfilled from gh-pages ---
-// release tags with a gh-pages dir and no docs.zip → backfill, in pagesDirs order;
-// branch dirs (main) and tags without a dir are skipped.
+// returns RAW tags (in tags order) whose sanitised dir is on gh-pages and which
+// lack docs.zip; branch dirs (main) and tags without a dir are skipped.
 assert.deepEqual(
 	planMigration({
 		pagesDirs: ["main", "v0.1.0", "v0.2.0"],
 		tags: ["v0.2.0", "v0.1.0"],
 		withDocsZip: [],
 	}),
-	{ backfill: ["v0.1.0", "v0.2.0"] },
+	{ backfill: ["v0.2.0", "v0.1.0"] },
 );
 ok("planMigration backfills release dirs lacking docs.zip, skips branches");
 
@@ -187,6 +187,19 @@ assert.deepEqual(
 	{ backfill: [] },
 );
 ok("planMigration ignores tags with no gh-pages directory");
+
+// a tag with `/` matches its sanitised gh-pages dir; the RAW tag is returned.
+assert.deepEqual(
+	planMigration({
+		pagesDirs: ["main", "release_1.0"],
+		tags: ["release/1.0"],
+		withDocsZip: [],
+	}),
+	{ backfill: ["release/1.0"] },
+);
+ok(
+	"planMigration matches a slash tag by its sanitised dir, returns the raw tag",
+);
 
 // --- switcherStruct shape, with the stable entry flagged ---
 assert.deepEqual(
