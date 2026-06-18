@@ -19,17 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Download the tag's built docs artifact
+      # The `docs` artifact IS docs.zip (assemble packs it with a bare html/ root),
+      # so attach it verbatim — no repack.
+      - name: Download the tag's docs.zip
         uses: actions/download-artifact@v4
         with:
           name: docs
-          path: docs-artifact   # → docs-artifact/html/… (the bare-html/ contract)
-
-      - name: Package docs.zip (bare html/ at root)
-        run: |
-          set -euo pipefail
-          cd docs-artifact
-          zip -rq "$RUNNER_TEMP/docs.zip" html
+          path: docs-artifact   # → docs-artifact/docs.zip
 
       - name: Create GitHub Release
         # We pin to the SHA, not the tag, for security reasons.
@@ -39,7 +35,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
           files: |
             plugins/version-switcher/version-switcher.mjs
-            ${{ runner.temp }}/docs.zip
+            docs-artifact/docs.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

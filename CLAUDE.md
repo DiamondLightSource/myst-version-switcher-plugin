@@ -88,8 +88,10 @@ PR build-checks aren't gated by its deployment-branch protection. Publish is gat
 on `tag || main || fork` — a fork's own push deploys to the fork's Pages (see
 DESIGN "External-PR previews"); base-repo PRs only build-check.
 
-`_release.yml` downloads the tag's `docs` artifact and attaches it as `docs.zip`
-(bare `html/` root) — the durable source `assemble` reconstructs that release from.
+`assemble` packs the build into a `docs.zip` (bare `html/` root) and uploads it
+verbatim as the `docs` artifact; `_release.yml` attaches that same file as the
+release asset (no repack) — the durable source `assemble` reconstructs that
+release from. Branch previews gather + unzip the same artifact.
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 

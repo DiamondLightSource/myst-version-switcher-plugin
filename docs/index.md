@@ -135,9 +135,10 @@ jobs:
         uses: actions/deploy-pages@v4
 ```
 
-Released versions live as `docs.zip` assets — attach the tag's built docs to its
-GitHub Release (the build's `docs` artifact, zipped with a bare `html/` root) so
-`assemble` can reconstruct it. Base-repo PRs only build-check; a fork's own push
+Released versions live as `docs.zip` assets — `assemble` packs the build into a
+`docs.zip` (bare `html/` root) and uploads it as the `docs` artifact, so your
+release step can attach that same file to the tag's GitHub Release verbatim and
+`assemble` can later reconstruct it. Base-repo PRs only build-check; a fork's own push
 publishes a preview to the fork's Pages. The first deploy (no releases) produces a
 single-entry `switcher.json` and a redirect to the current version rather than
 failing.

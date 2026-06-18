@@ -52,18 +52,23 @@ There is no `gh-pages` branch at all — neither source nor target. This removes
 
 ### The `docs` artifact / `docs.zip` contract
 
-The same built tree is delivered two ways; both expose a **bare `html/` directory
-at the archive root** (`unzip` / extract → `html/`):
+`assemble` packs **one `docs.zip` with a bare `html/` root** from the build, then
+delivers that *same file* two ways — so there is a single contract and no repack:
 
-- a CI artifact named `docs` (every run), produced by `actions/upload-artifact`
-  (which does the zipping — no manual `zip`). To get `html/` at the root, stage
-  the build into `<tmp>/site-src/html/` and upload the **parent** (`site-src`).
-- a `docs.zip` asset attached to the **GitHub Release** on tag runs (see resolved
-  decision #2 — `_release.yml` owns this).
+- uploaded **verbatim** as the CI artifact named `docs` (every run), with
+  `compression-level: 0` since it is already compressed. Pre-zipping (rather than
+  letting `upload-artifact` zip a staged `html/` parent) also drops a `cp` of the
+  build: `zip` reads the tree in place.
+- attached **verbatim** as the `docs.zip` Release asset on tag runs —
+  `_release.yml` just downloads the `docs` artifact (which *is* `docs.zip`) and
+  uploads it (see resolved decision #2). No download-and-re-zip.
 
-Both are built with `BASE_URL=/<repo>/<version>` matching the sub-path they will
-be served at. A mismatch produces a version whose assets 404 — the build step
-(caller's responsibility) owns this.
+Both release and branch gather therefore unzip the same `html/` shape (`unzip
+'html/*'`).
+
+Built with `BASE_URL=/<repo>/<version>` matching the sub-path they will be served
+at. A mismatch produces a version whose assets 404 — the build step (caller's
+responsibility) owns this.
 
 ## The two actions
 
@@ -116,7 +121,7 @@ Everything lives under the runner temp dir.
 
 ```
 $RUNNER_TEMP/
-  site-src/html/          ← current build, staged for the docs artifact upload
+  docs.zip                ← current build packed (bare html/); the artifact + asset
   site/                   ← assembled publish root (the action's `dir` output)
     index.html            ← redirect to the preferred (newest stable) version
     switcher.json
@@ -124,12 +129,12 @@ $RUNNER_TEMP/
 
 1. Stage current build (bash; sanitise via the shared sanitize())
      ver=$(node assemble.mjs sanitize "$ref-name")
-     cp -r "$html-dir"  "$RUNNER_TEMP/site-src/html"
+     ( cd "$(dirname $html-dir)" && zip -rq "$RUNNER_TEMP/docs.zip" html )  # bare html/
      cp -r "$html-dir"  "$RUNNER_TEMP/site/$ver"
 
-2. Upload this build's docs artifact (every run)         ← bare html/ at root
-     actions/upload-artifact  name=docs  path=$RUNNER_TEMP/site-src
-       # upload the PARENT so the archive root contains html/ (the contract)
+2. Upload this build's docs artifact (every run)         ← IS docs.zip, verbatim
+     actions/upload-artifact  name=docs  path=$RUNNER_TEMP/docs.zip  compression-level=0
+       # _release.yml later attaches this same file as the release asset (no repack)
 
 3. Gather released tags (bash plumbing; gh's built-in -q, never a `jq` pipe)
      for tag in $(git tag -l):                            # ordering done later, in JS
@@ -149,8 +154,8 @@ $RUNNER_TEMP/
 
 5. Fetch planned branches (bash plumbing; dumb IO)
      for {runId, destDir} in plan:
-       gh run download "$runId" -n docs -D t           # gh extracts → t/html
-       mv t/html "$RUNNER_TEMP/site/$destDir"
+       gh run download "$runId" -n docs -D t           # → t/docs.zip
+       unzip t/docs.zip 'html/*' -d t && mv t/html "$RUNNER_TEMP/site/$destDir"
 
 6. Generate switcher.json + redirect, decide stable (JS — the pure core)
      stable_src=$(node assemble.mjs generate --site-dir "$RUNNER_TEMP/site" --repo "$repo")

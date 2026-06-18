@@ -45,8 +45,11 @@ outputs:
 runs:
   using: composite
   steps:
-    # 1. Stage the current build: once as the docs-artifact source (bare html/ at
-    #    root) and once as site/<version>. Export shared paths to later steps.
+    # 1. Pack docs.zip (bare html/ at root) straight from the build, and place the
+    #    build at site/<version>. The zip IS the durable contract: it is uploaded
+    #    verbatim as the `docs` artifact (step 2) and attached verbatim as the
+    #    release asset (_release.yml) — no later repack. html-dir's basename must be
+    #    `html` (it is, for myst's docs/_build/html), so the zip root is html/.
     - name: Stage current build
       shell: bash
       env:
@@ -56,23 +59,25 @@ runs:
         set -euo pipefail
         ver=$(node "$GITHUB_ACTION_PATH/assemble.mjs" sanitize "$REF_NAME")
         site="$RUNNER_TEMP/site"
-        src="$RUNNER_TEMP/site-src"
-        mkdir -p "$site" "$src"
-        cp -r "$HTML_DIR" "$src/html"
+        zip="$RUNNER_TEMP/docs.zip"
+        mkdir -p "$site"
+        ( cd "$(dirname "$HTML_DIR")" && zip -rq "$zip" "$(basename "$HTML_DIR")" )
         cp -r "$HTML_DIR" "$site/$ver"
         {
           echo "VS_VER=$ver"
           echo "VS_SITE=$site"
-          echo "VS_SRC=$src"
+          echo "VS_ZIP=$zip"
         } >> "$GITHUB_ENV"
 
-    # 2. Upload this build's docs artifact (every run). The archive root contains
-    #    html/ — the contract _release.yml's docs.zip also satisfies.
+    # 2. Upload the docs.zip verbatim as the `docs` artifact (every run). Branch
+    #    previews gather it (step 5) and _release.yml attaches it as the release
+    #    asset. compression-level 0: it is already compressed.
     - name: Upload docs artifact
       uses: actions/upload-artifact@v4
       with:
         name: docs
-        path: ${{ env.VS_SRC }}
+        path: ${{ env.VS_ZIP }}
+        compression-level: 0
 
     # 3a. Build the release manifest (tags that carry a docs.zip) and a cache key
     #     over the sorted tag set. See DESIGN "Release-layer cache".
@@ -172,7 +177,8 @@ runs:
           --ci "$ci" > "$plan"
         echo "VS_PLAN=$plan" >> "$GITHUB_ENV"
 
-    # 5. Fetch each planned branch's docs artifact into site/<destDir>.
+    # 5. Fetch each planned branch's docs.zip artifact, unzip its html/ into
+    #    site/<destDir> (symmetric with the release gather in step 3c).
     - name: Fetch branch previews
       shell: bash
       env:
@@ -185,6 +191,9 @@ runs:
           tmp="$RUNNER_TEMP/br-$destDir"
           rm -rf "$tmp"; mkdir -p "$tmp"
           gh run download "$runId" --repo "$REPO" -n docs -D "$tmp"
+          if ! unzip -q "$tmp/docs.zip" 'html/*' -d "$tmp" || [ ! -d "$tmp/html" ]; then
+            echo "::warning::branch $destDir docs.zip has no html/ root — skipping"; continue
+          fi
           rm -rf "${VS_SITE:?}/$destDir"
           mv "$tmp/html" "$VS_SITE/$destDir"
         done < "$VS_PLAN"
