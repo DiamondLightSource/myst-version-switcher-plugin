@@ -61,10 +61,11 @@ BASE="https://$(echo "$OWNER" | tr '[:upper:]' '[:lower:]').github.io/$NAME"
 echo "== migrate: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN) =="
 
 # --- Step 1: backfill docs.zip from the gh-pages tree (non-destructive) ------
-# For each release tag whose *sanitised* name is a gh-pages dir and whose release
-# lacks a docs.zip, zip that dir as a bare html/ and attach it (raw tag). Branch
-# dirs (main/) need nothing — they self-heal on the next branch CI. sanitize()
-# comes from the shared kernel, so the dir rule matches the deploy path exactly.
+# For each release tag that is a gh-pages dir and whose release lacks a docs.zip,
+# zip that dir as a bare html/ and attach it. Tags containing `/` are skipped:
+# they are never built/published under the new model. Branch dirs (main/) need
+# nothing — they self-heal on the next branch CI. The tag is used verbatim as the
+# dir name, matching the deploy path (no sanitisation under the new model).
 backfill() {
   echo
   echo "-- 1. Backfilling docs.zip from $PAGES_REF --"
@@ -72,7 +73,8 @@ backfill() {
   local pages_dirs tag dir has tmp
   pages_dirs=$(git ls-tree -d --name-only "$PAGES_REF")
   for tag in $(git tag -l); do
-    dir=$(node "$ROOT/lib/assemble.mjs" sanitize "$tag")
+    case "$tag" in */*) continue ;; esac                          # not published
+    dir="$tag"
     if ! grep -qxF "$dir" <<<"$pages_dirs"; then continue; fi      # no gh-pages dir
     has=$(gh release view "$tag" --repo "$REPO" --json assets \
             -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)

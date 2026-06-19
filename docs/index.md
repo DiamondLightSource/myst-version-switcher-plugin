@@ -71,15 +71,24 @@ path onto it.
 
 ## Assembling + publishing the versioned site
 
-Two composite actions reconstruct the whole versioned site from durable sources on
-every deploy and publish it **directly to GitHub Pages** (no `gh-pages` branch):
+Publishing is split into **two workflows**, so untrusted fork-PR builds can never
+deploy:
 
-- **`current-version`** (before the build) sanitises the ref into the version
-  token so `BASE_URL` can be set.
-- **`assemble`** (after the build) gathers this build, every release's `docs.zip`
-  asset, and recent branch CI artifacts; writes `switcher.json` + a root redirect;
-  uploads this build's `docs` artifact; creates the `stable/` alias; and outputs
-  the assembled site dir for **you** to publish.
+- An **unprivileged CI workflow** builds the docs at `BASE_URL=/REPO/<token>` and
+  uploads the build as a `docs` artifact (`docs.zip`, bare `html/` root). It runs
+  for every PR (including forks), push to `main`, and tag — but never publishes.
+  The version `<token>` is `pr-<number>` for PRs, else the ref name (`main`, or a
+  tag without `/`).
+- A **privileged publish workflow**, triggered by CI completing (`workflow_run`),
+  runs the **`assemble`** action: it reconstructs the *whole* site from durable
+  sources — `main`'s latest build, every release's `docs.zip` asset, and each
+  **open PR**'s build artifact — writes `switcher.json` + a root redirect, creates
+  the `stable/` alias, and outputs the site dir for `deploy-pages`. It publishes
+  **directly to GitHub Pages** (no `gh-pages` branch).
+
+Because the publish workflow always runs from the **default branch**, the
+`github-pages` environment only needs to allow that one ref — tags and PRs deploy
+through it, not from their own refs.
 
 `switcher.json` is the standard pydata format, with the newest non-prerelease tag
 flagged `preferred` (rendered with a ★):
@@ -92,62 +101,69 @@ flagged `preferred` (rendered with a ★):
 ]
 ```
 
-Set your repo's **Pages source to "GitHub Actions"** (Settings → Pages), then wire
-a build + deploy job pair. Trigger on all-branch pushes + tags + PRs; the job `if:`
-keeps a bare push to a non-default branch on the canonical repo inert, while a
-fork's branch push still builds + previews to its own Pages:
+Set your repo's **Pages source to "GitHub Actions"** (Settings → Pages), then add
+the two workflows:
 
 ```yaml
+# .github/workflows/ci.yml — build + verify (unprivileged; runs for forks)
+name: CI
 on:
-  push: { branches: ['**'], tags: ['*'] }
   pull_request:
-
-env:
-  UPSTREAM: ORG/REPO    # pushes to a fork publish the contributor's own preview
-
+  push: { branches: [main], tags: ['*'] }   # '*' never matches '/'
 jobs:
-  build:
-    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
+  docs:
     runs-on: ubuntu-latest
-    permissions: { contents: read, actions: read }
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }          # tags, for version ordering
-      - id: ver
-        uses: DiamondLightSource/myst-version-switcher-plugin/current-version@<tag>
-        with: { ref-name: ${{ github.ref_name }} }
+      - id: ver                              # pr-<n> on PRs, else main / a no-slash tag
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo "token=pr-${{ github.event.pull_request.number }}"
+          else echo "token=${{ github.ref_name }}"; fi >> "$GITHUB_OUTPUT"
       - run: cd docs && myst build --html
-        env:
-          BASE_URL: /REPO/${{ steps.ver.outputs.version }}   # versioned sub-path
-      - id: site                          # always assembles; verifies on PRs
-        uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
-        with:
-          html-dir: docs/_build/html
-          ref-name: ${{ github.ref_name }}
-          guard-default-branch: ${{ github.repository == env.UPSTREAM }}
-      - if: ${{ github.event_name == 'push' }}
-        uses: actions/upload-pages-artifact@v3
-        with: { path: ${{ steps.site.outputs.dir }} }
+        env: { BASE_URL: /REPO/${{ steps.ver.outputs.token }} }
+      - run: ( cd docs/_build && zip -rq "$RUNNER_TEMP/docs.zip" html )
+      - uses: actions/upload-artifact@v4
+        with: { name: docs, path: ${{ runner.temp }}/docs.zip, compression-level: 0 }
+  # + a tag-only `release` job attaching that docs.zip + version-switcher.mjs.
+```
 
-  deploy:
-    needs: build
-    if: ${{ github.event_name == 'push' }}   # tag/main → your Pages; fork branch → fork's Pages
+```yaml
+# .github/workflows/publish.yml — assemble + deploy (privileged; upstream only)
+name: Publish
+on:
+  workflow_run: { workflows: [CI], types: [completed] }
+  workflow_dispatch: { inputs: { pr: { required: false } } }   # fork-PR opt-in
+permissions: { contents: read, actions: read, pages: write, id-token: write, statuses: write }
+concurrency: { group: pages, cancel-in-progress: false }
+jobs:
+  publish:
+    if: >-
+      github.repository == 'ORG/REPO' &&
+      ( github.event_name == 'workflow_dispatch' ||
+        ( github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_repository.full_name == github.repository ) )
     runs-on: ubuntu-latest
     environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
-    permissions: { pages: write, id-token: write }
-    concurrency: { group: pages, cancel-in-progress: false }
     steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }            # tags, for ordering + prerelease
+      - id: site
+        uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
+        with: { repo: ${{ github.repository }} }
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: ${{ steps.site.outputs.dir }} }
       - id: deployment
         uses: actions/deploy-pages@v4
 ```
 
-Released versions live as `docs.zip` assets — `assemble` packs the build into a
-`docs.zip` (bare `html/` root) and uploads it as the `docs` artifact, so your
-release step can attach that same file to the tag's GitHub Release verbatim and
-`assemble` can later reconstruct it. Every PR builds the full site (and uploads its
-branch's `docs` artifact) but publishes nothing; pushes to main/tags publish; a
-fork's own push previews to the fork's Pages. The first deploy (no releases)
-produces a single-entry `switcher.json` and a redirect to the current version
-rather than failing. (The `github-pages` environment's deployment-branch policy
-must allow the refs that deploy — default branch + tags, and fork branches for
-previews.)
+Released versions live as `docs.zip` assets — the CI build uploads the `docs`
+artifact, your tag-only release step attaches that *same file* to the GitHub
+Release verbatim, and `assemble` reconstructs the release from it. **Every PR
+(internal or fork) builds the full site** to verify it; **internal PRs, `main`, and
+tags publish** as soon as CI passes; an **external fork PR** publishes only after a
+maintainer opts it in by running the publish workflow with its PR number
+(`workflow_dispatch` → `pr`), which pins that commit as approved (a later push
+drops it until re-approved). The first deploy (no releases) produces a single-entry
+`switcher.json` and a redirect to the current version rather than failing.

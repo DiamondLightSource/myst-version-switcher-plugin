@@ -1,41 +1,29 @@
 name: CI
 
-# Trigger on every branch push + tags + PRs. The per-job `if` below keeps a bare
-# push to a non-default branch on the CANONICAL repo inert (no double-runs with
-# its PR, nothing built) while still letting a FORK's branch push build + preview
-# to its own Pages. See DESIGN "External-PR previews".
+# Verify + build only. Runs on every PR (including forks), pushes to main, and
+# tags — lint, test, build the docs, and on tags publish the release assets. It
+# uploads each build's `docs` artifact but NEVER deploys to Pages; publish.yml
+# (triggered by this workflow completing) owns the deploy. Keeping CI unprivileged
+# is what lets fork PRs build safely. See DESIGN.md.
 on:
-  push:
-    branches:
-      - '**'
-    tags:
-      - '*'
   pull_request:
+  push:
+    branches: [main]
+    tags: ['*']            # '*' never matches '/', so e.g. release/x tags don't build
 
-# Run on: any PR, a tag, the default branch, or any push to a fork. Skip a bare
-# push to a non-default branch on the upstream repo (its work runs via the PR).
-# (env context is unavailable in a job-level `if`, so the upstream slug is inlined.)
 jobs:
   lint:
-    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_lint.yml
 
   test:
-    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_test.yml
 
   docs:
-    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_docs.yml
-    permissions:
-      contents: read    # checkout + read release assets
-      actions: read     # download other runs' docs artifacts (cross-run)
-      pages: write       # deploy to Pages
-      id-token: write    # deploy-pages OIDC
 
   release:
     needs: [lint, test, docs]
     if: github.ref_type == 'tag'
     uses: ./.github/workflows/_release.yml
     permissions:
-      contents: write
+      contents: write    # create the GitHub Release + attach assets

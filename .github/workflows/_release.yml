@@ -1,31 +1,21 @@
 on:
   workflow_call:
 
-# Publish the plugin module as a release asset AND attach the tag's built docs as
-# `docs.zip`, the durable source the `assemble` action reconstructs released
-# versions from (see DESIGN, resolved decision #2). Consumers reference:
-#   …/releases/download/<tag>/version-switcher.mjs   (the plugin)
-# and `assemble` downloads `docs.zip` per release. The `current-version`/`assemble`
-# composite actions are consumed via `uses: …@<tag>` (the repo tree), so need no
-# asset.
-#
-# The tag's `docs` artifact is uploaded by the docs build job; ci.yml's release
-# job `needs: [.., docs]`, so it exists in this run when this workflow runs.
 jobs:
   release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
 
-      # The `docs` artifact IS docs.zip (assemble packs it with a bare html/ root),
-      # so attach it verbatim — no repack.
-      - name: Download the tag's docs.zip
-        uses: actions/download-artifact@v4
+    steps:
+      # Version switcher file deployed straight from depo
+      - uses: actions/checkout@v5
         with:
-          name: docs
-          path: docs-artifact   # → docs-artifact/docs.zip
+          sparse-checkout: plugins/version-switcher.mjs
+
+      # All other release artifacts from other stages
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          merge-multiple: true
 
       - name: Create GitHub Release
         # We pin to the SHA, not the tag, for security reasons.
@@ -33,9 +23,7 @@ jobs:
         uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
         with:
           prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
-          files: |
-            plugins/version-switcher.mjs
-            docs-artifact/docs.zip
+          files: "*"
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

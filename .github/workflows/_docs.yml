@@ -1,91 +1,54 @@
 on:
   workflow_call:
 
-# Reconstruct the whole versioned site from durable sources and publish it
-# directly to GitHub Pages (no gh-pages branch). See DESIGN.md.
-#
-# WHICH events reach here is gated by ci.yml's `docs` job (PRs, tag/main pushes,
-# and any fork push — never a bare upstream branch push). This workflow then does:
-#   - build job: always builds + assembles (gathers every version, uploads this
-#     build's `docs` artifact, runs the default-branch guard). On a PR this verifies
-#     the site assembles and primes the branch's artifact, but publishes nothing.
-#   - deploy job: only on `push` events (tag/main → upstream Pages; fork branch →
-#     the fork's Pages). Only it enters the `github-pages` environment, so PR runs
-#     aren't gated by the environment's deployment-branch protection.
-# Requires the repo's Pages source set to "GitHub Actions" (Settings → Pages).
-env:
-  UPSTREAM: DiamondLightSource/myst-version-switcher-plugin
-
+# Build the docs at the versioned BASE_URL and upload this build's `docs` artifact
+# (docs.zip, bare html/ root). This is the UNPRIVILEGED half: it runs for every
+# event — PRs (including forks), pushes to main, and tags — but never publishes.
+# publish.yml (triggered by CI completing) reconstructs the whole site from these
+# artifacts + release assets and deploys it to Pages. See DESIGN.md.
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read   # checkout + read release assets
-      actions: read     # download other runs' docs artifacts (cross-run)
     steps:
-      - name: Avoid git conflicts when tag and branch pushed at same time
-        if: github.ref_type == 'tag'
-        run: sleep 60
-
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0   # tags, for version ordering + prerelease detection
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Sanitise the current ref to a docs version
+      # Version token = the site sub-dir this build is served at, and the BASE_URL
+      # it must be built with. pr-<n> for PRs (clean by construction); otherwise the
+      # ref name — `main`, or a tag without `/` (the `tags: ['*']` trigger never
+      # matches `/`). No sanitisation: every token is filesystem/URL-safe already.
+      - name: Compute version token
         id: ver
-        uses: ./current-version
-        with:
-          ref-name: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            token="pr-${{ github.event.pull_request.number }}"
+          else
+            token="${{ github.ref_name }}"
+          fi
+          echo "token=$token" >> "$GITHUB_OUTPUT"
 
       # BASE_URL must match the versioned sub-path the build is served at, or its
-      # root-absolute assets 404. Same token the assemble action names site/<v>.
+      # root-absolute assets 404. assemble files this build's artifact at the same
+      # token (site/main, site/<tag>, site/pr-<n>), so the two cannot drift.
       - name: Build docs
         env:
-          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version }}
+          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.token }}
         run: npm run docs
 
-      # Gather every version + this build, write switcher.json + redirect, upload
-      # this build's `docs` artifact, and emit the assembled site dir. Always runs
-      # (the event gating is in ci.yml). Guard the default branch only on the
-      # canonical repo; a fork's throwaway preview may hold only its own branch. On
-      # a PR a failed guard fails here — after the `docs` artifact upload, before any
-      # publish.
-      - name: Assemble versioned site
-        id: site
-        uses: ./assemble
-        with:
-          html-dir: docs/_build/html
-          ref-name: ${{ github.ref_name }}
-          guard-default-branch: ${{ github.repository == env.UPSTREAM }}
+      # Pack the build as docs.zip with a bare html/ root — the durable contract
+      # both publish.yml's gather and _release.yml's asset rely on.
+      - name: Pack docs.zip (bare html/ root)
+        run: |
+          set -euo pipefail
+          ( cd docs/_build && zip -rq "$RUNNER_TEMP/docs.zip" html )
 
-      # Only needed when we'll deploy (push events). PRs build + assemble to verify
-      # but don't publish, so they skip this.
-      - name: Upload Pages artifact
-        if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
+      # compression-level 0: docs.zip is already compressed.
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
         with:
-          path: ${{ steps.site.outputs.dir }}
-
-  # Publish on push only: tag/main → the upstream repo's Pages; a fork's branch
-  # push → the fork's own Pages. PRs never reach here.
-  deploy:
-    needs: build
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    permissions:
-      pages: write       # deploy to Pages
-      id-token: write    # deploy-pages OIDC
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          name: docs
+          path: ${{ runner.temp }}/docs.zip
+          compression-level: 0

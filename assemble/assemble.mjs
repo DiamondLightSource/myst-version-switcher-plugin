@@ -1,16 +1,11 @@
 /**
- * assemble — the shared logic kernel behind the `current-version` + `assemble`
- * composite actions.
+ * assemble — the logic kernel behind the `assemble` composite action.
  *
- * The actions reconstruct the *whole* versioned docs site on every deploy from
- * durable sources (this build, `docs.zip` release assets, branch CI artifacts),
- * then the caller publishes it directly to GitHub Pages. Bash does the IO
+ * The action reconstructs the *whole* versioned docs site on every deploy from
+ * durable sources (main's build, `docs.zip` release assets, open-PR CI artifacts),
+ * then the publish workflow deploys it directly to GitHub Pages. Bash does the IO
  * plumbing (`gh` downloads, `unzip`, `mv`); this file is the pure-ish kernel it
- * shells into, exposed as two subcommands:
- *
- *   node assemble.mjs sanitize <ref-name>
- *       → print the sanitised version (the BASE_URL sub-path + site/ dir name).
- *         Shared by both actions (and scripts/migrate.sh) so there is one rule.
+ * shells into, exposed as one subcommand:
  *
  *   node assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
@@ -20,8 +15,7 @@
  *
  * The pure functions take plain data so they unit-test without git, the network,
  * or (mostly) the filesystem. Only `discoverVersions`, `getSortedTags` and the
- * `generate` file writes touch IO. (The one-shot gh-pages → docs.zip backfill is
- * pure bash in scripts/migrate.sh, using `sanitize` from here.)
+ * `generate` file writes touch IO.
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, writeFileSync } from "node:fs";
@@ -35,17 +29,6 @@ export const STABLE_ALIAS = "stable";
 function gitLines(args) {
 	const out = execFileSync("git", args, { encoding: "utf8" });
 	return out.trim().split("\n").filter(Boolean);
-}
-
-/**
- * Sanitise a raw ref name into the single token used in two byte-identical
- * places: the build-time `BASE_URL` sub-path and the `site/<version>` directory.
- * Mirrors the shell rule `${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}` — every
- * character outside `[A-Za-z0-9._-]` becomes `_`. Shared with `current-version`
- * so there is one implementation and no bash-vs-JS drift.
- */
-export function sanitize(name) {
-	return String(name).replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
 /** Directory names directly under the assembled site root (the gathered versions). */
@@ -63,11 +46,14 @@ export function discoverVersions(siteDir) {
 
 /**
  * Tags newest-first (semver-aware), matching `git tag -l --sort=-v:refname`.
- * RAW names — git allows `/` and other chars; callers `sanitize()` before using a
- * tag as a site dir, but keep the raw form for `gh` (release lookups/uploads).
+ * Tags containing `/` are dropped: the build trigger (`tags: ['*']`) never builds
+ * them, so they have no matching `BASE_URL` build and would only create nested
+ * site dirs. Every other tag is used verbatim as its `site/<tag>` dir name.
  */
 export function getSortedTags() {
-	return gitLines(["tag", "-l", "--sort=-v:refname"]);
+	return gitLines(["tag", "-l", "--sort=-v:refname"]).filter(
+		(tag) => !tag.includes("/"),
+	);
 }
 
 /**
@@ -86,7 +72,13 @@ export function orderVersions(builds, tags) {
 			remaining.delete(version);
 		}
 	}
-	versions.push(...[...remaining].sort());
+	// Leftover dirs (pr-<n> previews, feature branches) sort naturally so that,
+	// e.g., pr-2 precedes pr-10 rather than sorting lexically.
+	versions.push(
+		...[...remaining].sort((a, b) =>
+			a.localeCompare(b, undefined, { numeric: true }),
+		),
+	);
 	return versions;
 }
 
@@ -135,8 +127,8 @@ export function stablePlan(versions, tags) {
 
 /**
  * Required branches that did not end up in the assembled site. Pure. `versions`
- * are the discovered (already sanitised) site dirs; a required branch is present
- * iff its sanitised name is among them. By the time `generate` runs, the current
+ * are the discovered site dirs; a required branch is present iff its name is
+ * among them. By the time `generate` runs, the current
  * ref and every gathered branch are already dirs, so this needs no separate
  * "present" bookkeeping. The action gathers a preview for every branch with a
  * recent CI build (dumb bash); this only guards that the load-bearing branches
@@ -144,12 +136,12 @@ export function stablePlan(versions, tags) {
  * hard-fails on a non-empty result.
  *
  * @param {string[]} [required] branches that must be present (raw names)
- * @param {string[]} [versions] discovered site dir names (sanitised)
+ * @param {string[]} [versions] discovered site dir names
  * @returns {string[]} the absent required branches
  */
 export function missingRequired(required = [], versions = []) {
 	const have = new Set(versions);
-	return required.filter((branch) => !have.has(sanitize(branch)));
+	return required.filter((branch) => !have.has(branch));
 }
 
 /** Build the pydata switcher array for `org/repo`, flagging the stable entry. */
@@ -191,15 +183,6 @@ export function renderRedirect(target) {
 }
 
 /* ------------------------------- subcommands ------------------------------ */
-
-/** `sanitize <ref-name>` — print the sanitised version. */
-function cmdSanitize(rest) {
-	const [name] = rest;
-	if (name === undefined) {
-		throw new Error("usage: assemble.mjs sanitize <ref-name>");
-	}
-	console.log(sanitize(name));
-}
 
 /** Split a comma-separated CLI list into trimmed, non-empty entries. */
 function csv(value) {
@@ -244,10 +227,9 @@ function cmdGenerate(rest) {
 		return;
 	}
 
-	// Tags become site dirs via sanitize() (same rule as the ref), so order +
-	// preferred + stable must compare in sanitised space — a tag `release/1.0`
-	// lives at `release_1.0/`.
-	const tags = getSortedTags().map(sanitize);
+	// Tags are used verbatim as site dirs (getSortedTags drops `/`-tags), so
+	// ordering + preferred + stable compare directly against the discovered dirs.
+	const tags = getSortedTags();
 	const versions = orderVersions(builds, tags);
 	const preferred = preferredVersion(versions, tags);
 	const { stableSrc, redirectTarget } = stablePlan(versions, tags);
@@ -278,12 +260,10 @@ function cmdGenerate(rest) {
 export function main(argv = process.argv.slice(2)) {
 	const [cmd, ...rest] = argv;
 	switch (cmd) {
-		case "sanitize":
-			return cmdSanitize(rest);
 		case "generate":
 			return cmdGenerate(rest);
 		default:
-			throw new Error("usage: assemble.mjs <sanitize|generate> ...");
+			throw new Error("usage: assemble.mjs generate ...");
 	}
 }
 

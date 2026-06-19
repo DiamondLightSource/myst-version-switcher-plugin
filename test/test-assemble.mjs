@@ -1,11 +1,10 @@
 /**
- * Tests for lib/assemble.mjs — the shared kernel behind the actions.
+ * Tests for assemble/assemble.mjs — the kernel behind the assemble action.
  *
  * Covers the pure functions carried over from make-switcher (ordering,
  * prerelease/preferred, switcher shape + serialisation) plus the new pieces:
- * directory discovery, mixed branch+tag ordering, sanitisation, the
- * required-branch check (incl. required-missing → fail), and the
- * redirect/stable-alias decision.
+ * directory discovery, mixed branch+tag ordering, the required-branch check
+ * (incl. required-missing → fail), and the redirect/stable-alias decision.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
@@ -19,10 +18,9 @@ import {
 	preferredVersion,
 	renderRedirect,
 	renderSwitcher,
-	sanitize,
 	stablePlan,
 	switcherStruct,
-} from "../lib/assemble.mjs";
+} from "../assemble/assemble.mjs";
 
 let passed = 0;
 function ok(name) {
@@ -64,6 +62,14 @@ ok(
 	"mixed branch + tag ordering: main, tags newest-first, branches alphabetical",
 );
 
+// pr-<n> preview dirs sort numerically (pr-2 before pr-10), not lexically.
+assert.deepEqual(orderVersions(["pr-10", "pr-2", "main"], []), [
+	"main",
+	"pr-2",
+	"pr-10",
+]);
+ok("orderVersions sorts pr-<n> previews numerically, not lexically");
+
 // --- discoverVersions: directory names under the site root ---
 const site = mkdtempSync(join(tmpdir(), "assemble-site-"));
 for (const d of ["main", "2.1", "2.0"]) mkdirSync(join(site, d));
@@ -75,14 +81,6 @@ ok("discoverVersions returns dirs only, excluding files and the stable alias");
 
 assert.deepEqual(discoverVersions(join(site, "does-not-exist")), []);
 ok("discoverVersions returns [] for a missing dir");
-
-// --- sanitize: mirrors ${REF//[^A-Za-z0-9._-]/_} ---
-assert.equal(sanitize("v2.1.0"), "v2.1.0");
-assert.equal(sanitize("main"), "main");
-assert.equal(sanitize("feature/foo bar"), "feature_foo_bar");
-assert.equal(sanitize("a@b#c"), "a_b_c");
-assert.equal(sanitize("keep_-.dots"), "keep_-.dots");
-ok("sanitize replaces every char outside [A-Za-z0-9._-] with _");
 
 // --- isPrerelease: rc/a/b markers (parity with _release.yml) ---
 assert.equal(isPrerelease("2.1"), false);
@@ -133,9 +131,9 @@ assert.deepEqual(stablePlan(["3.0rc1"], ["3.0rc1"]), {
 });
 ok("stablePlan never aliases a prerelease as stable");
 
-// --- missingRequired: required branches absent from the site dirs (sanitised) ---
-// versions are the discovered site dirs (already sanitised); the current ref and
-// every gathered branch are among them by generate time.
+// --- missingRequired: required branches absent from the discovered site dirs ---
+// versions are the discovered site dirs; the default branch and every gathered
+// PR/preview are among them by generate time. Names compare verbatim (no rule).
 assert.deepEqual(missingRequired(["main"], ["main", "dev", "2.1"]), []);
 ok("missingRequired passes when the required branch dir is present");
 
@@ -145,19 +143,9 @@ assert.deepEqual(missingRequired(["main", "release-2"], ["main", "dev"]), [
 ]);
 ok("missingRequired reports a required branch absent from the site");
 
-// required names are sanitised before comparison (feature/x → feature_x dir).
-assert.deepEqual(missingRequired(["feature/x"], ["main", "feature_x"]), []);
-assert.deepEqual(missingRequired(["feature/y"], ["main", "feature_x"]), [
-	"feature/y",
-]);
-ok("missingRequired sanitises required names to match dir names");
-
 // no required branches → nothing missing.
 assert.deepEqual(missingRequired([], ["main"]), []);
 ok("missingRequired is a no-op with no required branches");
-
-// (gh-pages → docs.zip backfill planning now lives in scripts/migrate.sh, in
-// bash over the tested `sanitize`, so there is no planMigration unit here.)
 
 // --- switcherStruct shape, with the stable entry flagged ---
 assert.deepEqual(
