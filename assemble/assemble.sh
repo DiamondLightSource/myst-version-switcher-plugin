@@ -31,15 +31,17 @@ TMP="${RUNNER_TEMP:-$(mktemp -d)}"
 default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
 mkdir -p "$SITE"
 
-# Unzip a docs.zip (bare html/ root) into SITE/<dest>, replacing any prior.
+# Unzip a docs.zip (bare html/ root) into SITE/<dest>, replacing any prior. A
+# missing file or a docs.zip without an html/ root (e.g. a pre-cutover artifact of
+# a different shape) is a clean skip, not a hard failure.
 extract() {  # $1=zip  $2=dest dir  $3=label
   local t="$TMP/x-$2"
   rm -rf "$t"; mkdir -p "$t"
-  if unzip -q "$1" 'html/*' -d "$t" && [ -d "$t/html" ]; then
+  if [ -f "$1" ] && unzip -q "$1" 'html/*' -d "$t" 2>/dev/null && [ -d "$t/html" ]; then
     rm -rf "${SITE:?}/$2"
     mv "$t/html" "$SITE/$2"
   else
-    echo "::warning::$3 docs.zip has no html/ root — skipping"
+    echo "::warning::$3: docs.zip missing or has no html/ root — skipping"
   fi
   rm -rf "$t"
 }
