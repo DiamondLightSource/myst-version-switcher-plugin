@@ -1,21 +1,31 @@
 name: CI
 
+# Trigger on every branch push + tags + PRs. The per-job `if` below keeps a bare
+# push to a non-default branch on the CANONICAL repo inert (no double-runs with
+# its PR, nothing built) while still letting a FORK's branch push build + preview
+# to its own Pages. See DESIGN "External-PR previews".
 on:
   push:
     branches:
-      - main
+      - '**'
     tags:
       - '*'
   pull_request:
 
+# Run on: any PR, a tag, the default branch, or any push to a fork. Skip a bare
+# push to a non-default branch on the upstream repo (its work runs via the PR).
+# (env context is unavailable in a job-level `if`, so the upstream slug is inlined.)
 jobs:
   lint:
+    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_lint.yml
 
   test:
+    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_test.yml
 
   docs:
+    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin' }}
     uses: ./.github/workflows/_docs.yml
     permissions:
       contents: read    # checkout + read release assets

@@ -4,14 +4,15 @@ on:
 # Reconstruct the whole versioned site from durable sources and publish it
 # directly to GitHub Pages (no gh-pages branch). See DESIGN.md.
 #
-# Split into build + deploy: only the deploy job enters the `github-pages`
-# environment, so PR build-checks (which never deploy) aren't gated by the
-# environment's deployment-branch protection. Requires the repo's Pages source
-# set to "GitHub Actions" (Settings → Pages).
-
-# Publish on: any tag, the default branch, or any push to a FORK (whose own
-# Pages serves the contributor's preview — see DESIGN "External-PR previews").
-# A base-repo PR only build-checks; nothing is published.
+# WHICH events reach here is gated by ci.yml's `docs` job (PRs, tag/main pushes,
+# and any fork push — never a bare upstream branch push). This workflow then does:
+#   - build job: always builds + assembles (gathers every version, uploads this
+#     build's `docs` artifact, runs the default-branch guard). On a PR this verifies
+#     the site assembles and primes the branch's artifact, but publishes nothing.
+#   - deploy job: only on `push` events (tag/main → upstream Pages; fork branch →
+#     the fork's Pages). Only it enters the `github-pages` environment, so PR runs
+#     aren't gated by the environment's deployment-branch protection.
+# Requires the repo's Pages source set to "GitHub Actions" (Settings → Pages).
 env:
   UPSTREAM: DiamondLightSource/myst-version-switcher-plugin
 
@@ -48,27 +49,32 @@ jobs:
         run: npm run docs
 
       # Gather every version + this build, write switcher.json + redirect, upload
-      # this build's `docs` artifact, and emit the assembled site dir. Guard the
-      # default branch only on the canonical repo; a fork's throwaway preview may
-      # legitimately hold only its own branch.
+      # this build's `docs` artifact, and emit the assembled site dir. Always runs
+      # (the event gating is in ci.yml). Guard the default branch only on the
+      # canonical repo; a fork's throwaway preview may hold only its own branch. On
+      # a PR a failed guard fails here — after the `docs` artifact upload, before any
+      # publish.
       - name: Assemble versioned site
         id: site
-        if: github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM
         uses: ./assemble
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
           guard-default-branch: ${{ github.repository == env.UPSTREAM }}
 
+      # Only needed when we'll deploy (push events). PRs build + assemble to verify
+      # but don't publish, so they skip this.
       - name: Upload Pages artifact
-        if: steps.site.outcome == 'success'
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ steps.site.outputs.dir }}
 
+  # Publish on push only: tag/main → the upstream repo's Pages; a fork's branch
+  # push → the fork's own Pages. PRs never reach here.
   deploy:
     needs: build
-    if: github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'DiamondLightSource/myst-version-switcher-plugin'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

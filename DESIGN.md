@@ -198,14 +198,37 @@ accepted in exchange for not maintaining a live-branch list.
 
 ## What stays in the caller workflow
 
-The caller builds, invokes the two actions, and owns the Pages publish. It is
-split into a **build** job and a **deploy** job: only `deploy` enters the
-`github-pages` environment (and carries `pages`/`id-token` + `concurrency`),
-because `deploy-pages` is job-scoped — a composite action cannot declare any of
-those. The split matters because the environment's deployment-branch protection
-is evaluated when a job *enters* it, so a single job carrying the environment
-would block PR build-checks that never deploy. Keeping all Pages concerns in the
-caller is why the action stops at "assemble" (see resolved decision #5).
+The caller builds, invokes the two actions, and owns the Pages publish. Two layers
+of gating, by event:
+
+| event | repo | ref | build + assemble (+ upload `docs` artifact) | deploy |
+|---|---|---|---|---|
+| `push` | upstream | `main` / tag | yes | → upstream Pages |
+| `push` | upstream | other branch | **no** — job skipped | no |
+| `pull_request` | base = upstream | any | yes (+ default-branch guard) | no |
+| `push` | fork | any branch | yes (no guard) | → fork Pages |
+
+So **every PR builds the full site** (verifying it assembles and priming that
+branch's `docs` artifact) but publishes nothing; **main/tag pushes** publish to the
+canonical Pages; a **fork's own push** publishes a preview to the fork's Pages; and
+a **bare push to a non-default branch on the canonical repo does nothing** (its work
+runs via the PR — this also avoids push-vs-PR double runs). A fork *PR* previews via
+the fork's **push** run, not the base `pull_request` run (which is read-only and
+can't deploy anywhere) — so triggers must include all-branch pushes.
+
+This needs two gates, because GitHub forbids the `env` context in a job-level
+`if`:
+1. **trigger + job gate (in `ci.yml`):** `on: push: branches: ['**'], tags: ['*']`
+   + `pull_request`, and each job carries
+   `if: event=='pull_request' || ref_type=='tag' || ref_name=='main' || repository != <upstream>`
+   so a bare upstream branch push is inert.
+2. **build vs deploy split (in the docs workflow):** the **build** job builds +
+   assembles unconditionally (so PRs verify + upload their artifact); only the
+   **deploy** job (gated `if: github.event_name == 'push'`) enters the `github-pages`
+   environment and runs `deploy-pages`. The split matters because the environment's
+   deployment-branch protection is evaluated when a job *enters* it — a single job
+   carrying the environment would block the PR builds. Keeping all Pages concerns in
+   the caller is why the action stops at "assemble" (resolved decision #5).
 
 ```yaml
 env:
@@ -213,6 +236,8 @@ env:
 
 jobs:
   build:
+    # gate at the job/trigger level so a bare upstream branch push is inert:
+    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
     runs-on: ubuntu-latest
     permissions:
       contents: read     # checkout + read release assets
@@ -226,24 +251,19 @@ jobs:
       - run: cd docs && myst build --html
         env:
           BASE_URL: /<repo>/${{ steps.ver.outputs.version }}
-      - id: site
-        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
+      - id: site                            # always assembles; guard fails a 90-day PR here
         uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
-          # guard the default branch on the canonical repo only; forks may hold
-          # just their own branch
           guard-default-branch: ${{ github.repository == env.UPSTREAM }}
-      - if: ${{ steps.site.outcome == 'success' }}
+      - if: ${{ github.event_name == 'push' }}   # only publish-bound runs need it
         uses: actions/upload-pages-artifact
         with: { path: ${{ steps.site.outputs.dir }} }
 
   deploy:
     needs: build
-    # NB: env context is unavailable in a job-level `if`, so the upstream slug is
-    # inlined here (it can be templated by copier).
-    if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != '<org>/<repo>' }}
+    if: ${{ github.event_name == 'push' }}       # tag/main → upstream; fork branch → fork
     runs-on: ubuntu-latest
     environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
     permissions:
@@ -255,14 +275,13 @@ jobs:
         uses: actions/deploy-pages
 ```
 
-`current-version` runs unconditionally (the PR build still needs the right
-`BASE_URL`). `assemble` + publish are gated off for *base-repo* PRs by the `if:`
-— the build itself still runs on PRs to catch breakages; nothing is published and
-no `docs` artifact is uploaded (PR builds are not previews). The `github.repository
-!= UPSTREAM` arm lets a **fork's own push** publish to the fork's Pages (see
-External-PR previews). `deploy-pages` publishes the uploaded tree as the *entire*
-site (no merge), so a stale branch preview that is no longer gathered is correctly
-dropped.
+`current-version` runs unconditionally within the build job (the PR build still
+needs the right `BASE_URL`). `deploy-pages` publishes the uploaded tree as the
+*entire* site (no merge), so a stale branch preview that is no longer gathered is
+correctly dropped. **Operator note:** the `github-pages` environment's deployment-
+branch policy must allow the refs that deploy — at least the default branch and
+tags on the canonical repo, and (for fork previews) the contributor's branches on
+their fork.
 
 ## Reused vs. new logic
 
@@ -445,12 +464,14 @@ It composes with this design with **no action changes** — only caller-workflow
 gating:
 
 - It is driven by `push` in the fork, not the base repo's `pull_request` run
-  (which still only build-checks, publishing nothing). Base-repo PR behaviour is
-  unchanged.
-- The only adjustment: the publish gate must not be hardcoded `main`-only. Gate
-  publish as `ref_type == 'tag' || ref_name == 'main' || github.repository != <upstream>`.
-  On the fork, `repository != upstream` ⇒ its branch pushes deploy to the fork's
-  Pages; on upstream, feature-branch pushes still never publish.
+  (which builds + assembles + uploads the branch's `docs` artifact to verify, but
+  is read-only so it publishes nothing). So all-branch push triggers are required
+  for the fork's push to fire.
+- The gates that make it work (see "What stays in the caller workflow"): deploy is
+  `if: github.event_name == 'push'`, and the job runs for `repository != upstream`.
+  On the fork, a branch push is a `push` event in a non-upstream repo ⇒ it deploys
+  to the fork's Pages; on upstream, a bare branch push is skipped entirely and PRs
+  don't deploy.
 - `BASE_URL=/<repo>/<version>` is identical on a fork (same repo name) ⇒ builds
   unchanged. On the fork, `gh release download` finds no releases (forks don't
   copy them) ⇒ `assemble` gathers only the fork's current branch — a

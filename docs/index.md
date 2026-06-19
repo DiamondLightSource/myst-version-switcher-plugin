@@ -93,14 +93,21 @@ flagged `preferred` (rendered with a ★):
 ```
 
 Set your repo's **Pages source to "GitHub Actions"** (Settings → Pages), then wire
-a build + deploy job pair:
+a build + deploy job pair. Trigger on all-branch pushes + tags + PRs; the job `if:`
+keeps a bare push to a non-default branch on the canonical repo inert, while a
+fork's branch push still builds + previews to its own Pages:
 
 ```yaml
+on:
+  push: { branches: ['**'], tags: ['*'] }
+  pull_request:
+
 env:
   UPSTREAM: ORG/REPO    # pushes to a fork publish the contributor's own preview
 
 jobs:
   build:
+    if: ${{ github.event_name == 'pull_request' || github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
     runs-on: ubuntu-latest
     permissions: { contents: read, actions: read }
     steps:
@@ -112,20 +119,19 @@ jobs:
       - run: cd docs && myst build --html
         env:
           BASE_URL: /REPO/${{ steps.ver.outputs.version }}   # versioned sub-path
-      - id: site
-        if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM }}
+      - id: site                          # always assembles; verifies on PRs
         uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
           guard-default-branch: ${{ github.repository == env.UPSTREAM }}
-      - if: ${{ steps.site.outcome == 'success' }}
+      - if: ${{ github.event_name == 'push' }}
         uses: actions/upload-pages-artifact@v3
         with: { path: ${{ steps.site.outputs.dir }} }
 
   deploy:
     needs: build
-    if: ${{ github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != 'ORG/REPO' }}
+    if: ${{ github.event_name == 'push' }}   # tag/main → your Pages; fork branch → fork's Pages
     runs-on: ubuntu-latest
     environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
     permissions: { pages: write, id-token: write }
@@ -138,7 +144,10 @@ jobs:
 Released versions live as `docs.zip` assets — `assemble` packs the build into a
 `docs.zip` (bare `html/` root) and uploads it as the `docs` artifact, so your
 release step can attach that same file to the tag's GitHub Release verbatim and
-`assemble` can later reconstruct it. Base-repo PRs only build-check; a fork's own push
-publishes a preview to the fork's Pages. The first deploy (no releases) produces a
-single-entry `switcher.json` and a redirect to the current version rather than
-failing.
+`assemble` can later reconstruct it. Every PR builds the full site (and uploads its
+branch's `docs` artifact) but publishes nothing; pushes to main/tags publish; a
+fork's own push previews to the fork's Pages. The first deploy (no releases)
+produces a single-entry `switcher.json` and a redirect to the current version
+rather than failing. (The `github-pages` environment's deployment-branch policy
+must allow the refs that deploy — default branch + tags, and fork branches for
+previews.)

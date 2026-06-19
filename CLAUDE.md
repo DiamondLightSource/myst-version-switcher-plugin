@@ -75,7 +75,7 @@ stable inventory URL for cross-project `objects.inv`. `switcher.json` has no
 
 ## CI structure
 
-- `ci.yml` — orchestrator; triggers on `push: main`, tags, and PRs
+- `ci.yml` — orchestrator; triggers on push (all branches) + tags + PRs, with a per-job `if` that skips bare upstream non-default-branch pushes (so they don't double-run with the PR)
 - `_lint.yml` — biome
 - `_test.yml` — `npm test`
 - `_docs.yml` — build + deploy to Pages (see below)
@@ -85,10 +85,14 @@ stable inventory URL for cross-project `objects.inv`. `switcher.json` has no
 Split into a **build** job (checkout `fetch-depth: 0` → `current-version` →
 `myst build` with `BASE_URL` → `assemble` → `upload-pages-artifact`) and a
 **deploy** job (`deploy-pages`, carrying the `github-pages` environment +
-`pages`/`id-token` perms + `concurrency`). Only deploy enters the environment so
-PR build-checks aren't gated by its deployment-branch protection. Publish is gated
-on `tag || main || fork` — a fork's own push deploys to the fork's Pages (see
-DESIGN "External-PR previews"); base-repo PRs only build-check.
+`pages`/`id-token` perms + `concurrency`). The build job always assembles (so PRs
+verify the site + upload their branch's `docs` artifact); only **deploy** runs
+(`if: github.event_name == 'push'`) and only it enters the environment, so PR
+builds aren't gated by its deployment-branch protection. Which events reach the
+docs job is gated in `ci.yml` (`event=='pull_request' || tag || main || repository
+!= UPSTREAM`) so a bare upstream branch push is inert. Net: PRs build+verify (no
+publish); main/tag pushes → upstream Pages; a fork's own push → the fork's Pages
+(see DESIGN "External-PR previews").
 
 `assemble` packs the build into a `docs.zip` (bare `html/` root) and uploads it
 verbatim as the `docs` artifact; `_release.yml` attaches that same file as the
