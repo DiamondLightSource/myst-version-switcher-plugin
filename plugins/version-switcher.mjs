@@ -374,8 +374,18 @@ export async function render({ model, el }) {
 	}
 
 	try {
-		const resolved = new URL(jsonUrl, window.location.href).href;
-		const res = await fetch(resolved, { credentials: "omit" });
+		// switcher.json changes every deploy (a new version, a closed PR), and
+		// GitHub Pages serves it with Cache-Control: max-age=600, so a plain fetch
+		// can show a list that's up to ~10 min stale. Bust both caches: a unique
+		// query string forces a CDN-edge miss (→ origin), and `no-store` stops the
+		// browser serving its own cached copy. switcher.json is tiny, so always
+		// fetching fresh is cheap and keeps the dropdown current.
+		const resolved = new URL(jsonUrl, window.location.href);
+		resolved.searchParams.set("_", Date.now().toString());
+		const res = await fetch(resolved.href, {
+			credentials: "omit",
+			cache: "no-store",
+		});
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 		const raw = await res.json();
 
