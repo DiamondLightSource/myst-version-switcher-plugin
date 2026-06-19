@@ -2,7 +2,7 @@
 #
 # One-time gh-pages → durable-source migration, run LOCALLY by an operator.
 #
-# Why local, not CI (see DESIGN.md "Migration"):
+# Why local, not CI (see docs/how-to/migrate-from-gh-pages.md):
 #   - flipping the Pages source needs repo-admin, which a CI GITHUB_TOKEN lacks;
 #   - the destructive steps want a human watching with their own `gh auth`;
 #   - it leaves no workflow_dispatch stub behind in each consumer repo.

@@ -1,45 +1,52 @@
 on:
   workflow_call:
+    outputs:
+      version-name:
+        description: The version name this build was served at (pr-<n> | main | <tag>).
+        value: ${{ jobs.build.outputs.version-name }}
 
 # Build the docs at the versioned BASE_URL and upload this build's `docs` artifact
 # (docs.zip, bare html/ root). This is the UNPRIVILEGED half: it runs for every
 # event — PRs (including forks), pushes to main, and tags — but never publishes.
-# publish.yml (triggered by CI completing) reconstructs the whole site from these
-# artifacts + release assets and deploys it to Pages. See DESIGN.md.
+# _publish.yml (called by ci.yml after this build, on internal events) reconstructs
+# the whole site from these artifacts + release assets and deploys it to Pages,
+# injecting THIS build's artifact for the current version name. See docs explanation.
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version-name: ${{ steps.ver.outputs.version-name }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: npm ci
 
-      # Version token = the site sub-dir this build is served at, and the BASE_URL
-      # it must be built with. pr-<n> for PRs (clean by construction); otherwise the
-      # ref name — `main`, or a tag without `/` (the `tags: ['*']` trigger never
-      # matches `/`). No sanitisation: every token is filesystem/URL-safe already.
-      - name: Compute version token
+      # Version name = the site sub-dir this build is served at, and the BASE_URL it
+      # must be built with. pr-<n> for PRs (clean by construction); otherwise the ref
+      # name — `main`, or a tag without `/` (the `tags: ['*']` trigger never matches
+      # `/`). No sanitisation: every version name is filesystem/URL-safe already.
+      - name: Compute version name
         id: ver
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = pull_request ]; then
-            token="pr-${{ github.event.pull_request.number }}"
+            name="pr-${{ github.event.pull_request.number }}"
           else
-            token="${{ github.ref_name }}"
+            name="${{ github.ref_name }}"
           fi
-          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "version-name=$name" >> "$GITHUB_OUTPUT"
 
       # BASE_URL must match the versioned sub-path the build is served at, or its
       # root-absolute assets 404. assemble files this build's artifact at the same
-      # token (site/main, site/<tag>, site/pr-<n>), so the two cannot drift.
+      # version name (site/main, site/<tag>, site/pr-<n>), so the two cannot drift.
       - name: Build docs
         env:
-          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.token }}
+          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version-name }}
         run: npm run docs
 
       # Pack the build as docs.zip with a bare html/ root — the durable contract
-      # both publish.yml's gather and _release.yml's asset rely on.
+      # both _publish.yml's gather and _release.yml's asset rely on.
       - name: Pack docs.zip (bare html/ root)
         run: |
           set -euo pipefail
@@ -52,3 +59,17 @@ jobs:
           name: docs
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
+
+      # Fork PRs build + verify here but do not auto-publish (ci.yml's publish job
+      # excludes them — the security boundary). Surface that on the PR with a link to
+      # the manual preview opt-in, rather than silently publishing nothing.
+      - name: Explain the fork-preview opt-in
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::warning title=Docs preview not published::This is a fork PR, so the \
+          versioned docs site is NOT auto-published (fork builds run with a read-only \
+          token). A maintainer can publish a preview by running the Publish workflow \
+          for PR #${{ github.event.pull_request.number }}: \
+          https://github.com/${{ github.repository }}/actions/workflows/_publish.yml"

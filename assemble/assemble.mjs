@@ -22,7 +22,7 @@ import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-/** The `stable/` alias directory name (a fixed convention; see DESIGN). */
+/** The `stable/` alias directory name (a fixed convention; see docs/ explanation). */
 export const STABLE_ALIAS = "stable";
 
 /** Run a git command and return its non-empty stdout lines. */

@@ -8,9 +8,38 @@ project:
     - ../plugins/version-switcher.mjs
   toc:
     - file: index.md
+    - file: tutorials.md
+      children:
+        - file: tutorials/adding-to-a-fresh-repo.md
+    - file: how-to.md
+      children:
+        - file: how-to/migrate-from-gh-pages.md
+        - file: how-to/contribute.md
+    - file: explanations.md
+      children:
+        - file: explanations/architecture.md
+    - file: reference.md
+      children:
+        - file: reference/directive.md
+        - file: reference/action.md
+        - url: https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases
+          title: Release Notes
 site:
   template: book-theme
-  options:
-    logo: images/dls-logo.svg
   parts:
     navbar_end: navbar_end.md
+  nav:
+    - title: Tutorial
+      url: /tutorials
+    - title: How-to Guides
+      url: /how-to
+    - title: Explanation
+      url: /explanations
+    - title: Reference
+      url: /reference
+  options:
+    # Output page URLs by folder, e.g. /reference/directive rather than the
+    # default flattened /directive.
+    folders: true
+    logo: images/dls-logo.svg
+    github_url: https://github.com/DiamondLightSource/myst-version-switcher-plugin
