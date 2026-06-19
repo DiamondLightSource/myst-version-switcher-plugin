@@ -14,6 +14,12 @@
 #                         absent from the site; any other value disables the guard
 #   GH_TOKEN              token for gh (release assets, runs, statuses)
 #   SITE                  output dir (default: $RUNNER_TEMP/site, else ./_site)
+#   ARTIFACT_VERSION_NAME version name (pr-<n> | main | <tag>) to stage directly from
+#                         ARTIFACT_ZIP instead of gathering — used when publishing
+#                         inside the build's own run (the run isn't a completed
+#                         success yet). The matching gather is skipped. The action
+#                         downloads the artifact; this script unzips + stages it.
+#   ARTIFACT_ZIP          docs.zip (bare html/ root) to stage at ARTIFACT_VERSION_NAME
 #
 # Requires node + gh on PATH. assemble.mjs sits next to this script.
 set -euo pipefail
@@ -22,6 +28,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${REPO:?REPO is required (org/repo)}"
 GUARD_DEFAULT_BRANCH="${GUARD_DEFAULT_BRANCH:-true}"
+ARTIFACT_VERSION_NAME="${ARTIFACT_VERSION_NAME:-}"
+ARTIFACT_ZIP="${ARTIFACT_ZIP:-}"
 if [ -n "${SITE:-}" ]; then :
 elif [ -n "${RUNNER_TEMP:-}" ]; then SITE="$RUNNER_TEMP/site"
 else SITE="$PWD/_site"
@@ -55,14 +63,29 @@ download_run() {  # $1=runId  $2=out dir  $3=label
   fi
 }
 
+# --- current build: unzip + stage the docs.zip the action downloaded (if any) ---
+# Published inside the build's own run, so it isn't a completed success the gather
+# can discover (and a main/tag push would otherwise re-gather the PREVIOUS build).
+# Each gather below skips ARTIFACT_VERSION_NAME so nothing clobbers this fresh build.
+if [ -n "$ARTIFACT_VERSION_NAME" ]; then
+  if [ -f "$ARTIFACT_ZIP" ]; then
+    extract "$ARTIFACT_ZIP" "$ARTIFACT_VERSION_NAME" "current build '$ARTIFACT_VERSION_NAME'"
+  else
+    echo "::error::ARTIFACT_VERSION_NAME=$ARTIFACT_VERSION_NAME but ARTIFACT_ZIP=$ARTIFACT_ZIP is not a file"
+    exit 1
+  fi
+fi
+
 # --- main: latest successful push build on the default branch ---
-main_run=$(gh run list --repo "$REPO" --workflow ci.yml --branch "$default" \
+# Skip if it was staged as the current build (else we'd fetch a STALE earlier run).
+main_run=""
+[ "$default" = "$ARTIFACT_VERSION_NAME" ] || main_run=$(gh run list --repo "$REPO" --workflow ci.yml --branch "$default" \
   --event push --status success --limit 1 --json databaseId -q '.[0].databaseId // empty')
 if [ -n "$main_run" ]; then
   if download_run "$main_run" "$TMP/dl-$default" "branch $default"; then
     extract "$TMP/dl-$default/docs.zip" "$default" "branch $default"
   fi
-else
+elif [ "$default" != "$ARTIFACT_VERSION_NAME" ]; then
   echo "::warning::no successful CI build found for default branch $default"
 fi
 
@@ -72,6 +95,7 @@ tags=$(gh api --paginate "repos/$REPO/releases" \
 for tag in $tags; do
   case "$tag" in */*) continue ;; esac          # never built/published; skip
   [ "$tag" = "$default" ] && continue
+  [ "$tag" = "$ARTIFACT_VERSION_NAME" ] && continue  # staged fresh from this run's build
   if gh release download "$tag" --repo "$REPO" -p docs.zip -O "$TMP/rel-$tag.zip"; then
     extract "$TMP/rel-$tag.zip" "$tag" "release $tag"
   else
@@ -85,6 +109,7 @@ prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
   -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
 while IFS=$'\t' read -r num sha cross; do
   [ -z "$num" ] && continue
+  [ "pr-$num" = "$ARTIFACT_VERSION_NAME" ] && continue  # staged fresh from this run's build
   if [ "$cross" = "true" ]; then
     approved=$(gh api "repos/$REPO/commits/$sha/statuses" \
       -q 'any(.[]; .context=="preview-approved" and .state=="success")')

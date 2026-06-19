@@ -1,0 +1,96 @@
+name: Publish
+
+# Reconstruct the WHOLE versioned docs site from durable sources (main's build,
+# release docs.zip assets, open-PR build artifacts) and deploy it directly to
+# GitHub Pages — no gh-pages branch. This is the PRIVILEGED half, kept in its own
+# file so it can only run two ways, both trusted:
+#
+#   workflow_call   — invoked by ci.yml AFTER a successful build, for INTERNAL
+#                     events only (internal PRs, pushes to main/tags). ci.yml never
+#                     calls it for a fork PR, so untrusted fork code never reaches a
+#                     write token. The current build isn't a *completed* CI run yet,
+#                     so ci.yml passes its `version-name`; assemble downloads this
+#                     run's `docs` artifact and stages it directly (skipping the
+#                     re-gather of that version) — otherwise a main/tag push would
+#                     publish the PREVIOUS build.
+#   workflow_dispatch — a maintainer's opt-in to preview an EXTERNAL fork PR: pins
+#                     its current head commit as approved, then assembles (no current
+#                     build to inject — assemble gathers the fork from durable
+#                     sources via the approved SHA's successful run).
+#
+# Both entry points run in the trusted upstream context. See the architecture
+# explanation in docs/.
+on:
+  workflow_call:
+    inputs:
+      version-name:
+        description: Version name (pr-<n> | main | <tag>) of the in-run build to inject.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: External fork PR number to approve (pins its head SHA) and preview.
+        required: false
+
+permissions:
+  contents: read     # checkout + read release assets
+  actions: read      # gh run download (this run's + cross-run docs artifacts)
+  pages: write       # deploy to Pages
+  id-token: write    # deploy-pages OIDC
+  statuses: write    # set the preview-approved status on a fork PR head SHA
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # The canonical-repo guard lives in the caller (ci.yml's publish job), not here,
+    # so this reusable workflow stays generic. Both entry points are trusted: ci.yml
+    # only calls it for internal events on the canonical repo, and workflow_dispatch
+    # needs write access (a fork dispatching it deploys to the fork's own Pages).
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # tags, for version ordering + prerelease detection
+
+      # workflow_dispatch (fork opt-in): pin THIS commit as approved. assemble gathers
+      # an external PR only when its head SHA carries this status, so a later push
+      # (new SHA) silently drops the preview until a maintainer re-approves.
+      - name: Approve fork PR head SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          gh api --method POST "repos/$REPO/statuses/$sha" \
+            -f state=success -f context=preview-approved \
+            -f description="Fork docs preview approved"
+
+      # On the nested call, `artifact-version-name` tells assemble to download this
+      # run's `docs` artifact and stage it as that version (it isn't a completed
+      # success yet, so the gather can't find it — or would find a stale prior build).
+      # Empty on workflow_dispatch → assemble does a pure durable gather.
+      - name: Assemble versioned site
+        id: site
+        uses: ./assemble
+        with:
+          repo: ${{ github.repository }}
+          artifact-version-name: ${{ inputs.version-name }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.site.outputs.dir }}
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

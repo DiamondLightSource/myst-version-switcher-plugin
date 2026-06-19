@@ -28,7 +28,7 @@ const PLUGIN_PATH = new URL(import.meta.url).pathname;
 
 /**
  * The `stable/` alias segment (a fixed convention shared with the `assemble`
- * action; see DESIGN). The published site serves `stable/` as a copy of the
+ * action; see docs/ explanation). The published site serves `stable/` as a copy of the
  * newest release, so a page may be viewed under `<repo>/stable/…` even though no
  * switcher entry has that pathname — the widget maps it back to the concrete
  * release.

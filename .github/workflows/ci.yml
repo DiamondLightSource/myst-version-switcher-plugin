@@ -1,10 +1,14 @@
 name: CI
 
-# Verify + build only. Runs on every PR (including forks), pushes to main, and
-# tags — lint, test, build the docs, and on tags publish the release assets. It
-# uploads each build's `docs` artifact but NEVER deploys to Pages; publish.yml
-# (triggered by this workflow completing) owns the deploy. Keeping CI unprivileged
-# is what lets fork PRs build safely. See DESIGN.md.
+# Verify + build, then publish on INTERNAL events. Runs on every PR (including
+# forks), pushes to main, and tags — lint, test, build the docs, and on tags
+# publish the release assets. It uploads each build's `docs` artifact.
+#
+# Publishing is nested here (the `publish` job → _publish.yml) so its status is
+# visible on the PR / commit, but ONLY for internal events: a fork PR's build runs
+# with a read-only token and must never deploy, so the `publish` job is skipped for
+# it (the `_docs` reusable workflow points a maintainer at the manual opt-in
+# instead). See the architecture explanation in docs/.
 on:
   pull_request:
   push:
@@ -27,3 +31,23 @@ jobs:
     uses: ./.github/workflows/_release.yml
     permissions:
       contents: write    # create the GitHub Release + attach assets
+
+  # Internal events only: an internal PR, or a push to main/tag, has a same-repo
+  # build we can trust + deploy. _publish.yml reconstructs the whole site and
+  # injects this build's `docs` artifact for `docs.version-name`. Fork PRs (head
+  # repo ≠ this repo) are excluded — _docs.yml's build job warns them instead.
+  publish:
+    needs: [lint, test, docs]
+    if: >-
+      github.repository == 'DiamondLightSource/myst-version-switcher-plugin' &&
+      ( github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository )
+    uses: ./.github/workflows/_publish.yml
+    with:
+      version-name: ${{ needs.docs.outputs.version-name }}
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+      statuses: write

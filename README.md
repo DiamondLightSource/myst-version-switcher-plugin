@@ -1,43 +1,35 @@
 # myst-version-switcher-plugin
 
 A pydata-style documentation **version switcher** for [MyST](https://mystmd.org),
-delivered as a single `anywidget` plugin plus a CI action (`assemble`) that
-reconstructs the whole versioned docs site every deploy and publishes it to GitHub
-Pages.
+delivered as a single `anywidget` plugin **plus** an `assemble` CI action that
+reconstructs the whole versioned docs site from durable sources every deploy and
+publishes it directly to GitHub Pages.
 
-**[Full documentation and usage guide →](https://diamondlightsource.github.io/myst-version-switcher-plugin/)**
+The two halves are versioned together under one `vX.Y.Z` tag but consumed
+differently — the plugin as a release asset, the action from the repo tree:
 
-The two halves are versioned together under a single `vX.Y.Z` tag but consumed
-differently:
+What            | Where
+:---:           | :---:
+Plugin (widget) | `plugins/version-switcher.mjs` → a release-asset URL in `myst.yml` `plugins`
+Site action     | `assemble/` → `uses: …/assemble@<tag>` in your CI workflow
+Source          | <https://github.com/DiamondLightSource/myst-version-switcher-plugin>
+Documentation   | <https://diamondlightsource.github.io/myst-version-switcher-plugin>
+Releases        | <https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases>
 
-| half | file | how consumers use it |
-|------|------|----------------------|
-| Plugin (widget) | `plugins/version-switcher.mjs` | release-asset URL in `myst.yml` `plugins` |
-| Site action | `assemble/` | `uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>` in the publish workflow |
+The single `.mjs` is both the build-time MyST plugin and the browser runtime — MyST
+localises it into your site, so there is no second asset to host. The `assemble`
+action rebuilds the *complete* site every deploy (main's build, each release's
+`docs.zip`, every open PR's artifact), so deletions self-heal and there is no
+`gh-pages` branch to drift.
 
-## Developing
+<!-- README only content. Anything below this line won't be included in index.md -->
 
-```bash
-npm test                    # run the test suite
-npm run docs                # build docs (same command CI uses)
-npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
-```
+See <https://diamondlightsource.github.io/myst-version-switcher-plugin> for the full
+documentation: a [tutorial](https://diamondlightsource.github.io/myst-version-switcher-plugin/tutorials/adding-to-a-fresh-repo)
+for adding it to a fresh repo, how-to guides, the architecture explanation, and the
+directive + action reference.
 
-`docs/myst.yml` loads the plugin from the local `plugins/` path (not a release
-URL), so edits are reflected on rebuild. `<select>` popups don't open in the
-VS Code Simple Browser — open the forwarded port in a real browser and
-hard-reload (MyST caches the localised esm).
-
-## Releasing
-
-```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
-```
-
-CI runs tests and the docs build, `_release.yml` publishes a GitHub Release with
-`version-switcher.mjs` (and the tag's `docs.zip`) as assets, and `publish.yml`
-reconstructs + deploys the site. The `assemble` action is consumed from the repo
-tree at the same tag, so one tag versions both halves.
+Contributing: see [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
 ## License
 
