@@ -19,14 +19,14 @@ inputs:
     description: org/repo slug, for version URLs and gh lookups.
     required: false
     default: ${{ github.repository }}
-  required-branches:
+  guard-default-branch:
     description: >-
-      Comma-separated branches that MUST end up in the site, else the deploy
-      hard-fails. Every branch with a recent successful ci.yml run is gathered
-      regardless; this only guards that the load-bearing ones didn't vanish.
-      Empty → the repo's default branch.
+      When 'true' (default), hard-fail the assemble if the repo's default branch
+      is NOT in the site — guarding the canonical site against publishing a hole
+      when the default branch's preview has expired. Set 'false' for throwaway
+      previews (e.g. forks) that legitimately contain only their own branch.
     required: false
-    default: ""
+    default: "true"
   token:
     description: Token for gh (release assets + cross-run artifacts).
     required: false
@@ -145,11 +145,13 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         REPO: ${{ inputs.repo }}
-        REQUIRED_IN: ${{ inputs.required-branches }}
+        GUARD_DEFAULT_BRANCH: ${{ inputs.guard-default-branch }}
       run: |
         set -euo pipefail
-        required="$REQUIRED_IN"
-        if [ -z "$required" ]; then
+        # When guarding, require the repo's default branch to be present; else the
+        # required set is empty (throwaway previews may hold only their own branch).
+        required=""
+        if [ "$GUARD_DEFAULT_BRANCH" = "true" ]; then
           required=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
         fi
         stable_src=$(node "$GITHUB_ACTION_PATH/../lib/assemble.mjs" generate \

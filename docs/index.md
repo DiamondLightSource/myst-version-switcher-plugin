@@ -118,7 +118,7 @@ jobs:
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
-          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
+          guard-default-branch: ${{ github.repository == env.UPSTREAM }}
       - if: ${{ steps.site.outcome == 'success' }}
         uses: actions/upload-pages-artifact@v3
         with: { path: ${{ steps.site.outputs.dir }} }

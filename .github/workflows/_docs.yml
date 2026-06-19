@@ -48,9 +48,9 @@ jobs:
         run: npm run docs
 
       # Gather every version + this build, write switcher.json + redirect, upload
-      # this build's `docs` artifact, and emit the assembled site dir. On a fork,
-      # required-branches is the current ref (so its own preview always satisfies
-      # the guard); upstream guards `main`.
+      # this build's `docs` artifact, and emit the assembled site dir. Guard the
+      # default branch only on the canonical repo; a fork's throwaway preview may
+      # legitimately hold only its own branch.
       - name: Assemble versioned site
         id: site
         if: github.ref_type == 'tag' || github.ref_name == 'main' || github.repository != env.UPSTREAM
@@ -58,7 +58,7 @@ jobs:
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
-          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
+          guard-default-branch: ${{ github.repository == env.UPSTREAM }}
 
       - name: Upload Pages artifact
         if: steps.site.outcome == 'success'

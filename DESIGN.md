@@ -106,7 +106,7 @@ means no bash-vs-JS drift and no parity test to maintain.
 | `html-dir` | yes | — | path to the freshly built docs (e.g. `docs/_build/html`) |
 | `ref-name` | yes | — | the **unsanitised** ref (`${{ github.ref_name }}`); sanitised internally |
 | `repo` | no | `${{ github.repository }}` | `org/repo`, for version URLs |
-| `required-branches` | no | default branch | branches that **must** end up in the site, else the deploy hard-fails (satisfied by being the current ref or having a recent successful CI `docs` artifact). Every branch with recent CI is gathered regardless — this only guards the load-bearing ones |
+| `guard-default-branch` | no | `true` | when true, hard-fail if the repo's **default branch** is not in the site (guards the canonical site against publishing a hole when its preview expired). Every branch with recent CI is gathered regardless — this only guards the load-bearing one. Set false for throwaway previews (forks) that hold only their own branch |
 | `token` | no | `${{ github.token }}` | `gh` access: release assets + cross-run artifacts |
 
 ### `assemble` outputs
@@ -189,11 +189,11 @@ order is irrelevant (a directory is a directory); all ordering and prerelease
 logic lives in `generate`.
 
 Branch previews are gathered for **every** branch with a recent successful
-`ci.yml` run (latest run per branch); there is no opt-in list. `required-branches`
-defaults to the default branch, so `main`'s preview can never silently vanish —
-if a required branch is neither the current ref nor gathered, the deploy
-hard-fails. A deleted branch's preview persists until its runs age out of the
-recent list (~90 days, GitHub's run/artifact retention); that staleness window is
+`ci.yml` run (latest run per branch); there is no opt-in list. With
+`guard-default-branch: true` (the canonical-repo default) the deploy hard-fails if
+the default branch isn't in the site, so `main`'s preview can never silently
+vanish. A deleted branch's preview persists until its runs age out of the recent
+list (~90 days, GitHub's run/artifact retention); that staleness window is
 accepted in exchange for not maintaining a live-branch list.
 
 ## What stays in the caller workflow
@@ -232,8 +232,9 @@ jobs:
         with:
           html-dir: docs/_build/html
           ref-name: ${{ github.ref_name }}
-          # forks guard only their own ref; upstream guards main
-          required-branches: ${{ github.repository == env.UPSTREAM && 'main' || github.ref_name }}
+          # guard the default branch on the canonical repo only; forks may hold
+          # just their own branch
+          guard-default-branch: ${{ github.repository == env.UPSTREAM }}
       - if: ${{ steps.site.outcome == 'success' }}
         uses: actions/upload-pages-artifact
         with: { path: ${{ steps.site.outputs.dir }} }
@@ -281,7 +282,7 @@ them:
   *every* ref→dir: the current ref, branch previews, **and** gathered release tags
   (git allows `/` in tags; the raw tag is kept for `gh`, the dir is sanitised — and
   `generate` sanitises the tag list before ordering so identities match the dirs).
-- **Add** `missingRequired(required, versions)` — the required branches whose
+- **Add** `missingRequired(required, versions)` — the required branch(es) whose
   sanitised name is absent from the discovered site dirs. Pure, tested with
   fixtures. Called *inside* `generate` (which already discovers the dirs), so
   there is no separate plan/check step and no `present` bookkeeping in bash; the
@@ -464,13 +465,16 @@ all.
 
 ## Edge cases
 
-- **First deploy:** no releases, `required-branches=main`, current=`main` → site
-  has only `main/`; switcher is single-entry; redirect → `main`. Graceful.
+- **First deploy:** no releases, current ref = `main` → site has only `main/`
+  (which satisfies `guard-default-branch`); switcher is single-entry; redirect →
+  `main`. Graceful.
 - **Release without `docs.zip`** (cut before this scheme): `gh release download`
   fails for that asset → skip that version. No hard failure.
-- **Required branch missing:** a `required-branches` entry that is neither the
-  current ref nor has a recent successful CI artifact → **hard-fail the deploy**
-  rather than publish a site missing a version declared required.
+- **Default branch missing** (`guard-default-branch: true`): the default branch is
+  neither the current ref nor has a recent successful CI artifact → **hard-fail
+  the deploy** rather than publish a site missing it (e.g. the first PR after the
+  default branch's artifact expired — it still builds + uploads its own docs, then
+  fails at the guard before anything is published).
 - **Optional / expired branch artifact:** skip silently; that preview is absent
   until the branch rebuilds.
 - **Prereleases:** still excluded from `preferred`/redirect (the `a`/`b`/`rc`
