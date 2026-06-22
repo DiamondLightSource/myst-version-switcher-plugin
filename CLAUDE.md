@@ -12,7 +12,7 @@ plugins/version-switcher.mjs                   # MyST directive + anywidget runt
 assemble/action.yml                            # thin wrapper → runs assemble.sh
 assemble/assemble.sh                           # reconstruct the whole site from durable sources (gh/unzip plumbing); runnable standalone for local testing
 assemble/assemble.mjs                          # dependency-free Node kernel behind assemble.sh (the `generate` subcommand)
-scripts/migrate.sh                             # one-shot operator gh-pages → durable-source migration (bash)
+scripts/migrate.sh                             # operator gh-pages → durable-source migration (bash); two-phase: reversible cutover, then guarded --delete-gh-pages
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/ci.yml                       # build + verify + publish-on-internal: _lint / _test / _docs / _release, then nests _publish for internal events

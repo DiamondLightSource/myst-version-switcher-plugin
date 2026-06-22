@@ -145,6 +145,24 @@ jobs:
         with: { path: ${{ steps.site.outputs.dir }} }
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      # deploy-pages reports success once the deployment RECORD flips active — even if
+      # the Pages backend silently fails to update the SERVED origin (e.g. a gh-pages→
+      # Actions cutover can wedge the origin while every deploy reports OK). Confirm the
+      # live switcher.json byte-matches the one we just assembled, so a stale origin is
+      # a red check instead of silently-served old docs.
+      - env: { PAGE_URL: '${{ steps.deployment.outputs.page_url }}', SITE_DIR: '${{ steps.site.outputs.dir }}' }
+        run: |
+          set -euo pipefail
+          want=$(cat "$SITE_DIR/switcher.json")
+          url="${PAGE_URL%/}/switcher.json"
+          deadline=$(( $(date +%s) + 60 ))
+          while :; do
+            got=$(curl -fsS "$url?cb=$(date +%s%N)" || true)   # cache-bust → hit the origin
+            [ -n "$got" ] && [ "$got" = "$want" ] && { echo "origin matches"; exit 0; }
+            [ "$(date +%s)" -ge "$deadline" ] && { echo "::error::live switcher.json still stale after 60s — Pages origin likely wedged"; exit 1; }
+            sleep 1
+          done
 ```
 
 ## 5. Allow the deploying refs in the `github-pages` environment

@@ -22,7 +22,11 @@ one artifact as the *entire* site, which is a whole-site-replace.
 Releases are permanent, so old versions never vanish. Branch and PR previews come
 from CI artifacts and silently drop if the artifact expires and nothing rebuilds —
 acceptable for *optional* dev/preview docs. A required branch (the default branch)
-is guarded: `assemble` hard-fails rather than publish a site missing it.
+is guarded: `assemble` hard-fails rather than publish a site missing it. This
+asymmetry — releases durable, the default branch only ever an ephemeral artifact —
+also drives the gh-pages migration: keep `gh-pages` until the default branch is
+itself publishing `docs.zip`, because until then it is the only durable copy of that
+branch's docs (see [migrate-from-gh-pages](../how-to/migrate-from-gh-pages.md)).
 
 ### Why this replaced the `gh-pages` + `keep_files` model
 
