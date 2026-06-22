@@ -130,5 +130,5 @@ jobs:
               echo "--- live ($url) ---"; printf '%s\n' "$got"
               exit 1
             fi
-            sleep 5
+            sleep 1
           done
