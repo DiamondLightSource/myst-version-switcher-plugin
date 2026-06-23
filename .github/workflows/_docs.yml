@@ -1,16 +1,50 @@
+name: Docs
+
 on:
   workflow_call:
+    inputs:
+      build-command:
+        description: Command that builds the HTML site into html-dir at $BASE_URL.
+        required: false
+        default: make docs
+        type: string
+      html-dir:
+        description: Directory the build writes the site to (packed as docs.zip's html/).
+        required: false
+        default: docs/_build/html
+        type: string
+      preview-workflow:
+        description: Consumer's dispatchable publish workflow file, for the fork-preview hint.
+        required: false
+        default: _publish.yml
+        type: string
     outputs:
       version-name:
-        description: The version name this build was served at (pr-<n> | main | <tag>).
+        description: The version name this build was served at (pr-<n> | <default-branch> | <tag>).
         value: ${{ jobs.build.outputs.version-name }}
 
-# Build the docs at the versioned BASE_URL and upload this build's `docs` artifact
-# (docs.zip, bare html/ root). This is the UNPRIVILEGED half: it runs for every
-# event — PRs (including forks), pushes to main, and tags — but never publishes.
-# _publish.yml (called by ci.yml after this build, on internal events) reconstructs
-# the whole site from these artifacts + release assets and deploys it to Pages,
-# injecting THIS build's artifact for the current version name. See docs explanation.
+# REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
+# the docs at the versioned BASE_URL and uploads this build's `docs` artifact
+# (docs.zip, bare html/ root). It runs for every event — PRs (including forks),
+# pushes to the default branch, and tags — but NEVER publishes. _publish.yml (the
+# privileged half) deploys, called separately by the consumer's ci.yml on internal
+# events, injecting THIS build's artifact for the current version name.
+#
+# This workflow OWNS the build/publish contract so it cannot drift: the version
+# name, the BASE_URL, the docs.zip bare-html/ root, and the `docs` artifact name all
+# live here. The consumer supplies only HOW to turn sources into HTML, via
+# `build-command`.
+#
+# Environment given to build-command: Node/npx (preinstalled on the runner) and uv
+# (always installed; honours a committed .python-version). So build-command can be
+# `make docs`, `npx … myst build`, `tox -e docs`, `uv run …`, etc. Fold any
+# project-specific setup (cp CONFIG, npm ci, apt deps) behind that one command.
+#
+# contents:read at the workflow level keeps this (untrusted-input) build incapable
+# of holding a write token — the elevated permissions live only in _publish.yml.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,13 +53,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install dependencies
-        run: npm ci
+      # uv is installed unconditionally (Node/npx is already on the runner) so every
+      # docs build has the same baseline env regardless of build-command. With no
+      # python-version input it only puts uv on PATH, honouring a committed
+      # .python-version if the project has one — a no-op for npx-only repos.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
-      # must be built with. pr-<n> for PRs (clean by construction); otherwise the ref
-      # name — `main`, or a tag without `/` (the `tags: ['*']` trigger never matches
-      # `/`). No sanitisation: every version name is filesystem/URL-safe already.
+      # must be built with. pr-<n> for PRs; otherwise the ref name (default branch or
+      # a tag without `/`). No sanitisation: every version name is URL/path-safe.
       - name: Compute version name
         id: ver
         run: |
@@ -39,18 +76,30 @@ jobs:
 
       # BASE_URL must match the versioned sub-path the build is served at, or its
       # root-absolute assets 404. assemble files this build's artifact at the same
-      # version name (site/main, site/<tag>, site/pr-<n>), so the two cannot drift.
+      # version name (site/<default-branch>, site/<tag>, site/pr-<n>), so the two
+      # cannot drift. build-command comes through an env var (not interpolated into
+      # the script) and is run with `eval` so compound commands work.
       - name: Build docs
         env:
           BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version-name }}
-        run: npm run docs
-
-      # Pack the build as docs.zip with a bare html/ root — the durable contract
-      # both _publish.yml's gather and _release.yml's asset rely on.
-      - name: Pack docs.zip (bare html/ root)
+          BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
           set -euo pipefail
-          ( cd docs/_build && zip -rq "$RUNNER_TEMP/docs.zip" html )
+          eval "$BUILD_COMMAND"
+
+      # Pack the site as docs.zip with a bare html/ root — the durable contract both
+      # _publish.yml's gather and _release.yml's asset rely on. Stage into html/
+      # first so any html-dir name yields the same root.
+      - name: Pack docs.zip (bare html/ root)
+        env:
+          HTML_DIR: ${{ inputs.html-dir }}
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/pack"
+          rm -rf "$staging"
+          mkdir -p "$staging/html"
+          cp -a "$HTML_DIR/." "$staging/html/"
+          ( cd "$staging" && zip -rq "$RUNNER_TEMP/docs.zip" html )
 
       # compression-level 0: docs.zip is already compressed.
       - name: Upload docs artifact
@@ -60,16 +109,18 @@ jobs:
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
 
-      # Fork PRs build + verify here but do not auto-publish (ci.yml's publish job
-      # excludes them — the security boundary). Surface that on the PR with a link to
-      # the manual preview opt-in, rather than silently publishing nothing.
+      # Fork PRs build + verify here but do not auto-publish (the consumer's publish
+      # job excludes them — the security boundary). Surface that on the PR with a link
+      # to the manual preview opt-in, rather than silently publishing nothing.
       - name: Explain the fork-preview opt-in
         if: >-
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name != github.repository
+        env:
+          PREVIEW_WORKFLOW: ${{ inputs.preview-workflow }}
         run: |
           echo "::warning title=Docs preview not published::This is a fork PR, so the \
           versioned docs site is NOT auto-published (fork builds run with a read-only \
-          token). A maintainer can publish a preview by running the Publish workflow \
-          for PR #${{ github.event.pull_request.number }}: \
-          https://github.com/${{ github.repository }}/actions/workflows/_publish.yml"
+          token). A maintainer can publish a preview by running the $PREVIEW_WORKFLOW \
+          workflow for PR #${{ github.event.pull_request.number }}: \
+          https://github.com/${{ github.repository }}/actions/workflows/$PREVIEW_WORKFLOW"

@@ -124,9 +124,15 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
 Sub-workflows of `ci.yml`:
 - `_lint.yml` — biome
 - `_test.yml` — `npm test`
-- `_docs.yml` — build only: compute the version name (`pr-<n>` / `main` / tag) →
-  `myst build` with `BASE_URL` → pack `docs.zip` (bare `html/`) → upload the `docs`
-  artifact. No deploy.
+- `_docs.yml` — **reusable build, parameterised for cross-repo reuse.** Compute the
+  version name (`pr-<n>` / default-branch / tag) → run `build-command` (input,
+  default `make docs`) with `BASE_URL` set → pack `docs.zip` (bare `html/`, staged so
+  any `html-dir` works) → upload the `docs` artifact → warn on fork PRs. No deploy;
+  `contents: read` only. Installs uv unconditionally and relies on the runner's
+  preinstalled Node, so `build-command` can be `make docs` / `npx … myst build` /
+  `tox -e docs` regardless of project. This repo passes `npm ci && npm run docs`. It
+  OWNS the build↔publish contract (version name, BASE_URL, docs.zip `html/` root,
+  `docs` artifact name) so consumers only choose a command.
 - `_release.yml` — attaches `version-switcher.mjs` + the tag's `docs.zip` (the
   `docs` artifact, verbatim — no repack) as Release assets (tag-only).
 

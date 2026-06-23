@@ -24,6 +24,10 @@ jobs:
 
   docs:
     uses: ./.github/workflows/_docs.yml
+    with:
+      # This repo is a Node project: install deps then build with myst. _docs.yml
+      # installs uv too, but it's unused here (the unconditional-uv baseline).
+      build-command: npm ci && npm run docs
 
   release:
     needs: [lint, test, docs]

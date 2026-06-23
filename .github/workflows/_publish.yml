@@ -79,6 +79,15 @@ jobs:
       # run's `docs` artifact and stage it as that version (it isn't a completed
       # success yet, so the gather can't find it — or would find a stale prior build).
       # Empty on workflow_dispatch → assemble does a pure durable gather.
+      #
+      # CROSS-REPO CAVEAT: `uses: ./assemble` resolves against the CALLER's checkout,
+      # not this repo. That is correct while this repo calls its own _publish.yml
+      # (dogfooding). When another repo consumes this workflow via
+      # `uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/_publish.yml@<ref>`,
+      # change this to the full slug at the SAME ref, e.g.
+      # `uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<ref>`,
+      # so assemble is found in THIS repo regardless of caller. (At release time the
+      # ref is the version tag, so the workflow and the action it pins move together.)
       - name: Assemble versioned site
         id: site
         uses: ./assemble
