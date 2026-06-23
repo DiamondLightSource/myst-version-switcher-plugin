@@ -1,0 +1,176 @@
+name: Publish
+
+# Reconstruct the WHOLE versioned docs site from durable sources (the consumer's
+# default-branch build, release docs.zip assets, open-PR build artifacts) and
+# deploy it directly to GitHub Pages — no gh-pages branch. This is the PRIVILEGED
+# half (pages/id-token/statuses write), kept in its own reusable workflow so it can
+# only run two trusted ways:
+#
+#   workflow_call   — invoked by the consumer's ci.yml AFTER a successful build, for
+#                     INTERNAL events only (internal PRs, pushes to the default
+#                     branch/tags). The caller never calls it for a fork PR, so
+#                     untrusted fork code never reaches a write token. The current
+#                     build isn't a *completed* CI run yet, so the caller passes its
+#                     `version-name`; this run downloads the same-run `docs` artifact
+#                     and stages it directly (otherwise a default-branch/tag push
+#                     would publish the PREVIOUS build).
+#   workflow_dispatch — a maintainer's opt-in to preview an EXTERNAL fork PR.
+#
+# The assemble logic is THIS repo's assemble/assemble.sh (+ assemble.mjs); we run it
+# directly rather than wrap it in a composite action. To version-match the scripts
+# to this workflow, we check out the reusable workflow's OWN repo at its OWN commit
+# via the `job` context: unlike github.workflow_* (which resolve to the CALLER's
+# entry workflow), `job.workflow_repository` + `job.workflow_sha` resolve to the file
+# that defines THIS job — i.e. the reusable workflow at the ref a consumer pinned
+# `publish.yml@<ref>` to. So the scripts always match the workflow version, with no
+# hardcoded repo and no manual release-time bump, in both the dogfood and cross-repo
+# cases. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's repo is checked
+# out at the root (with tags) to supply their version list; the scripts come from
+# .mvs.
+on:
+  workflow_call:
+    inputs:
+      version-name:
+        description: Version name (pr-<n> | <default-branch> | <tag>) of the in-run build to inject.
+        required: true
+        type: string
+      guard-default-branch:
+        description: >-
+          'true' (default) → hard-fail if the consumer's default branch is absent
+          from the assembled site (its build artifact expired). Set 'false' while a
+          repo's default branch is not yet publishing docs.zip (e.g. mid-migration).
+        required: false
+        default: "true"
+        type: string
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: External fork PR number to approve (pins its head SHA) and preview.
+        required: false
+
+permissions:
+  contents: read     # checkout + read release assets
+  actions: read      # gh run download (this run's + cross-run docs artifacts)
+  pages: write       # deploy to Pages
+  id-token: write    # deploy-pages OIDC
+  statuses: write    # set the preview-approved status on a fork PR head SHA
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # The canonical-repo guard lives in the caller (its publish job's `if`), not
+    # here, so this reusable workflow stays generic. Both entry points are trusted:
+    # the caller only calls it for internal events, and workflow_dispatch needs write
+    # access (a fork dispatching it deploys to the fork's own Pages).
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
+      # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # THIS reusable workflow's repo + commit (the `job` context resolves to the
+      # reusable file, not the caller), so the assemble scripts match the ref the
+      # consumer pinned publish.yml@<ref> to — automatically, no version bump.
+      # Sparse: only assemble/ is needed.
+      - name: Fetch assemble scripts
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .mvs
+          sparse-checkout: assemble
+
+      # workflow_dispatch (fork opt-in): pin THIS commit as approved. assemble gathers
+      # an external PR only when its head SHA carries this status, so a later push
+      # (new SHA) silently drops the preview until a maintainer re-approves.
+      - name: Approve fork PR head SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          gh api --method POST "repos/$REPO/statuses/$sha" \
+            -f state=success -f context=preview-approved \
+            -f description="Fork docs preview approved"
+
+      # When publishing within the build's own run (workflow_call), download this
+      # run's `docs` artifact so assemble can stage it directly as version-name —
+      # the run isn't a completed success yet, so the gather can't find it (or would
+      # find a stale prior build). Skipped on workflow_dispatch (version-name empty).
+      - name: Download this run's docs artifact
+        if: inputs.version-name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: ${{ runner.temp }}/assemble-current
+
+      # Run the assemble script directly (cwd = the consumer's checkout, so its
+      # `git tag` sees the consumer's tags). The script self-locates assemble.mjs and
+      # writes `dir=<site>` to $GITHUB_OUTPUT.
+      - name: Assemble versioned site
+        id: site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          GUARD_DEFAULT_BRANCH: ${{ inputs.guard-default-branch }}
+          ARTIFACT_VERSION_NAME: ${{ inputs.version-name }}
+          ARTIFACT_ZIP: ${{ inputs.version-name != '' && format('{0}/assemble-current/docs.zip', runner.temp) || '' }}
+        run: bash "$GITHUB_WORKSPACE/.mvs/assemble/assemble.sh"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.site.outputs.dir }}
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # deploy-pages reports success once the deployment RECORD flips active — even
+      # if the Pages backend silently fails to update the SERVED origin (a wedged
+      # site can serve a stale artifact indefinitely; see the 2026-06 incident where
+      # a gh-pages→Actions cutover froze the origin while every deploy reported OK).
+      # Confirm the live switcher.json byte-matches the one we just assembled, polling
+      # for up to 60s to let the origin/CDN propagate. A mismatch fails the run, so a
+      # stale origin surfaces as a red check instead of silently serving old docs.
+      - name: Verify the deployed origin matches what we assembled
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          SITE_DIR: ${{ steps.site.outputs.dir }}
+        run: |
+          set -euo pipefail
+          [ -n "$PAGE_URL" ] || { echo "::error::deploy-pages did not report a page_url"; exit 1; }
+          local_json="$SITE_DIR/switcher.json"
+          [ -f "$local_json" ] || { echo "::error::no switcher.json at $local_json"; exit 1; }
+          # Command substitution strips trailing newlines from both sides, so the
+          # comparison is robust to a curl/file trailing-newline difference.
+          want=$(cat "$local_json")
+          url="${PAGE_URL%/}/switcher.json"
+          deadline=$(( $(date +%s) + 60 ))
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            got=$(curl -fsS "$url?cb=$(date +%s%N)" || true)   # cache-bust → hit the origin
+            if [ -n "$got" ] && [ "$got" = "$want" ]; then
+              echo "origin matches the assembled switcher.json (attempt $attempt)"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::live switcher.json still does not match the assembled one after 60s — Pages origin likely stale/wedged"
+              echo "--- assembled ($local_json) ---"; printf '%s\n' "$want"
+              echo "--- live ($url) ---"; printf '%s\n' "$got"
+              exit 1
+            fi
+            sleep 1
+          done

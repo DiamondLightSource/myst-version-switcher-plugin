@@ -16,7 +16,7 @@ on:
       preview-workflow:
         description: Consumer's dispatchable publish workflow file, for the fork-preview hint.
         required: false
-        default: _publish.yml
+        default: publish.yml
         type: string
     outputs:
       version-name:
@@ -26,7 +26,7 @@ on:
 # REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
 # the docs at the versioned BASE_URL and uploads this build's `docs` artifact
 # (docs.zip, bare html/ root). It runs for every event — PRs (including forks),
-# pushes to the default branch, and tags — but NEVER publishes. _publish.yml (the
+# pushes to the default branch, and tags — but NEVER publishes. publish.yml (the
 # privileged half) deploys, called separately by the consumer's ci.yml on internal
 # events, injecting THIS build's artifact for the current version name.
 #
@@ -41,7 +41,7 @@ on:
 # project-specific setup (cp CONFIG, npm ci, apt deps) behind that one command.
 #
 # contents:read at the workflow level keeps this (untrusted-input) build incapable
-# of holding a write token — the elevated permissions live only in _publish.yml.
+# of holding a write token — the elevated permissions live only in publish.yml.
 permissions:
   contents: read
 
@@ -88,7 +88,7 @@ jobs:
           eval "$BUILD_COMMAND"
 
       # Pack the site as docs.zip with a bare html/ root — the durable contract both
-      # _publish.yml's gather and _release.yml's asset rely on. Stage into html/
+      # publish.yml's gather and _release.yml's asset rely on. Stage into html/
       # first so any html-dir name yields the same root.
       - name: Pack docs.zip (bare html/ root)
         env:
