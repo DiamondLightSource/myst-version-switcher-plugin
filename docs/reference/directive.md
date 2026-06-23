@@ -36,7 +36,7 @@ Standard pydata format — an array of `{ version, url }`, with the preferred
 ```
 
 The `assemble` action generates this file for you (see the
-[action reference](./action.md)); you only point `json-url` at it.
+[workflow reference](./workflows.md)); you only point `json-url` at it.
 
 ## Behaviour
 

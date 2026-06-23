@@ -1,9 +1,9 @@
 # Explanation: architecture
 
 This explains *why* the versioned site is built the way it is — the design
-reasoning behind the `assemble` action and the build/publish workflow split. For
+reasoning behind the `assemble` scripts and the build/publish workflow split. For
 the *what* (inputs, options, copy-paste snippets), see the
-[reference](../reference/action.md) and [tutorial](../tutorials/adding-to-a-fresh-repo.md).
+[reference](../reference/workflows.md) and [tutorial](../tutorials/adding-to-a-fresh-repo.md).
 
 ## The core idea: reconstruct the whole site every deploy
 
@@ -14,7 +14,7 @@ one artifact as the *entire* site, which is a whole-site-replace.
 
 | version kind | source | durability |
 |---|---|---|
-| current build | the build injected into the action this run | n/a (just built) |
+| current build | the build staged into the publish run via `version-name` | n/a (just built) |
 | released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
 | branch previews (e.g. `main`) | the latest successful CI run's `docs` **artifact** | ephemeral (fine — branches move) |
 | open PRs (`pr-<n>`) | each PR's build artifact, keyed by head SHA | ephemeral (drops on merge/close) |
@@ -77,20 +77,20 @@ The architecture makes that boundary structural by splitting build from publish:
 
 - **CI (unprivileged)** runs `myst build` and uploads the `docs` artifact for
   *every* event, forks included. It never holds a write token.
-- **`_publish` (privileged)** runs `assemble` + the Pages deploy. It runs only in the
-  trusted upstream context.
+- **`publish.yml` (privileged)** runs `assemble` + the Pages deploy. It runs only in
+  the trusted upstream context.
 
 So a fork's build can never reach a write token; only trusted code deploys.
 
 ### Why publish is *nested* in CI (for internal events)
 
 The deploy is surfaced as a **job inside the CI run** (`ci.yml`'s `publish` job →
-`_publish.yml` via `workflow_call`) so its status and URL are visible on the PR /
+`publish.yml` via `workflow_call`) so its status and URL are visible on the PR /
 commit — rather than running invisibly after the fact. But this is gated to
 **internal events only**: the `publish` job's `if` excludes fork PRs
 (`head.repo.full_name != github.repository`). A fork PR's build instead emits a
 warning (a step in the build job) that the preview was not published, linking the
-manual opt-in. The privileged `_publish` is therefore reachable two ways, both
+manual opt-in. The privileged `publish.yml` is therefore reachable two ways, both
 trusted: `workflow_call` (nested, internal) and `workflow_dispatch` (the maintainer
 fork opt-in).
 
@@ -106,15 +106,16 @@ Because publish now runs *inside* the build's own CI run, that run isn't a
 *completed* successful run yet — so `assemble`'s normal gather can't discover it. For
 a `main` or tag push it would be worse than missing: the gather would find the
 **previous** successful run and publish a build behind by one commit. So `ci.yml`
-passes the build's version name to `_publish`, which hands it to `assemble` as
-`artifact-version-name`; the action downloads this run's `docs` artifact and
+passes the build's version name to `publish.yml`, which hands it to `assemble` as
+`ARTIFACT_VERSION_NAME`; `publish.yml` downloads this run's `docs` artifact and
 `assemble` unzips + stages it directly, **skipping the re-gather of that version**.
 Everything else still comes from durable sources. The fork opt-in path passes no current build — there the fork is
 gathered from durable sources via its approved head SHA's successful run.
 
 ## The bash / JS split inside `assemble`
 
-`assemble` is a composite action (`action.yml`) over two implementation files:
+`assemble` is two implementation files, run directly by `publish.yml` (which
+sparse-checks-them-out at `job.workflow_sha`):
 
 - **`assemble.sh`** does the IO plumbing — `gh` downloads, `unzip`, `mv`, the
   `stable/` symlink — where shelling out is concise. It is also runnable standalone,
@@ -137,7 +138,7 @@ The risk with a fork PR is not the build (it never holds a write token) but
 phishing/defacement under a trusted URL, and free arbitrary-content hosting. So a
 fork preview is **never automatic** and is **pinned to a specific commit**:
 
-- A maintainer who has reviewed the PR runs `_publish.yml` via `workflow_dispatch`
+- A maintainer who has reviewed the PR runs `publish.yml` via `workflow_dispatch`
   with the PR number. That privileged run (only write-access users can dispatch it)
   sets a `preview-approved` **commit status** on the PR's *current head SHA*, then
   assembles.
@@ -210,13 +211,13 @@ full analysis and an implementation sketch are tracked as future work in
 
 ## Key resolved decisions
 
-- **One thin action wrapper, `assemble/`, over the `assemble.mjs` kernel.** The build
-  half needs no action — it computes the clean token inline and uploads the `docs`
-  artifact.
+- **No action wrapper — `publish.yml` runs `assemble/` directly** (self-checked-out
+  at `job.workflow_sha`, so the scripts match the workflow's own ref). The build half
+  (`docs.yml`) computes the clean token inline and uploads the `docs` artifact.
 - **Direct Pages publish, no `gh-pages` branch** (`upload-pages-artifact` +
   `deploy-pages`), requiring the repo's Pages source set to "GitHub Actions".
 - **JS core + bash glue.** Pure functions (and their node tests) live in
   `assemble.mjs`; bash does the `gh`/`unzip`/`mv` IO. Python was a contender (the
   team is Python-heavy) but loses on a second toolchain in a JS-only repo.
 - **`_release.yml` attaches `docs.zip`** (it downloads the run's `docs` artifact and
-  uploads it verbatim), so the action only ever *reads* release assets.
+  uploads it verbatim), so `assemble` only ever *reads* release assets.

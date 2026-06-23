@@ -2,13 +2,14 @@
 #
 # assemble — reconstruct the whole versioned docs site from durable sources into
 # $SITE, write switcher.json + a root redirect + the stable/ alias, and print the
-# site dir. The action/action.yml is a thin wrapper around this; it is also
-# runnable standalone so the `gh` plumbing can be exercised locally:
+# site dir. The reusable publish.yml workflow runs this directly (it checks out
+# this repo's assemble/ at the workflow's own ref); it is also runnable standalone
+# so the `gh` plumbing can be exercised locally:
 #
 #   REPO=DiamondLightSource/myst-version-switcher-plugin GH_TOKEN=$(gh auth token) \
 #     assemble/assemble.sh
 #
-# Driven by env (the action passes these; set them yourself to run locally):
+# Driven by env (publish.yml passes these; set them yourself to run locally):
 #   REPO                  org/repo for gh lookups + version URLs        (required)
 #   GUARD_DEFAULT_BRANCH  'true' (default) → hard-fail if the default branch is
 #                         absent from the site; any other value disables the guard
@@ -63,7 +64,7 @@ download_run() {  # $1=runId  $2=out dir  $3=label
   fi
 }
 
-# --- current build: unzip + stage the docs.zip the action downloaded (if any) ---
+# --- current build: unzip + stage the docs.zip publish.yml downloaded (if any) ---
 # Published inside the build's own run, so it isn't a completed success the gather
 # can discover (and a main/tag push would otherwise re-gather the PREVIOUS build).
 # Each gather below skips ARTIFACT_VERSION_NAME so nothing clobbers this fresh build.

@@ -4,10 +4,10 @@ name: CI
 # forks), pushes to main, and tags — lint, test, build the docs, and on tags
 # publish the release assets. It uploads each build's `docs` artifact.
 #
-# Publishing is nested here (the `publish` job → _publish.yml) so its status is
+# Publishing is nested here (the `publish` job → publish.yml) so its status is
 # visible on the PR / commit, but ONLY for internal events: a fork PR's build runs
 # with a read-only token and must never deploy, so the `publish` job is skipped for
-# it (the `_docs` reusable workflow points a maintainer at the manual opt-in
+# it (the `docs` reusable workflow points a maintainer at the manual opt-in
 # instead). See the architecture explanation in docs/.
 on:
   pull_request:
@@ -23,9 +23,9 @@ jobs:
     uses: ./.github/workflows/_test.yml
 
   docs:
-    uses: ./.github/workflows/_docs.yml
+    uses: ./.github/workflows/docs.yml
     with:
-      # This repo is a Node project: install deps then build with myst. _docs.yml
+      # This repo is a Node project: install deps then build with myst. docs.yml
       # installs uv too, but it's unused here (the unconditional-uv baseline).
       build-command: npm ci && npm run docs
 
@@ -37,16 +37,16 @@ jobs:
       contents: write    # create the GitHub Release + attach assets
 
   # Internal events only: an internal PR, or a push to main/tag, has a same-repo
-  # build we can trust + deploy. _publish.yml reconstructs the whole site and
+  # build we can trust + deploy. publish.yml reconstructs the whole site and
   # injects this build's `docs` artifact for `docs.version-name`. Fork PRs (head
-  # repo ≠ this repo) are excluded — _docs.yml's build job warns them instead.
+  # repo ≠ this repo) are excluded — docs.yml's build job warns them instead.
   publish:
     needs: [lint, test, docs]
     if: >-
       github.repository == 'DiamondLightSource/myst-version-switcher-plugin' &&
       ( github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository )
-    uses: ./.github/workflows/_publish.yml
+    uses: ./.github/workflows/publish.yml
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:

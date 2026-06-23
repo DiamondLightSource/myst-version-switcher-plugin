@@ -1,5 +1,5 @@
 /**
- * Tests for assemble/assemble.mjs — the kernel behind the assemble action.
+ * Tests for assemble/assemble.mjs — the kernel behind the assemble scripts.
  *
  * Covers the pure functions carried over from make-switcher (ordering,
  * prerelease/preferred, switcher shape + serialisation) plus the new pieces:
