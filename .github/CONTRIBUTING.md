@@ -18,10 +18,10 @@ so edits are reflected on rebuild.
 **Browser caveat:** `<select>` popups don't open in the VS Code Simple Browser. Open
 the forwarded port in a real browser and hard-reload (MyST caches the localised esm).
 
-## Running the assemble action locally
+## Running assemble locally
 
-`assemble/assemble.sh` is runnable standalone so the `gh` plumbing can be exercised
-outside CI:
+`assemble/assemble.sh` (run directly by `publish.yml`) is also runnable standalone so
+the `gh` plumbing can be exercised outside CI:
 
 ```bash
 REPO=DiamondLightSource/myst-version-switcher-plugin GH_TOKEN=$(gh auth token) \
@@ -40,6 +40,6 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 CI runs lint + tests + the docs build; `_release.yml` creates a GitHub Release with
 `version-switcher.mjs` and the tag's `docs.zip` as assets; and the nested
-`_publish.yml` reconstructs + deploys the site including the new tag. The plugin URL
-and the `assemble` action both resolve to the same tag, so one tag versions both
-halves.
+`publish.yml` reconstructs + deploys the site including the new tag. The plugin URL
+and the `uses:` refs for the reusable workflows all resolve to the same tag, so one
+tag versions both halves.

@@ -36,30 +36,22 @@ for all options):
 :::
 ```
 
-The `json-url` points at a `switcher.json` that does not exist yet — the `assemble`
-action will generate it on your first deploy.
+The `json-url` points at a `switcher.json` that does not exist yet — `publish.yml`
+will generate it on your first deploy.
 
 ## 2. Set the Pages source to "GitHub Actions"
 
 In **Settings → Pages**, set **Source** to **GitHub Actions** (not "Deploy from a
 branch"). `deploy-pages` refuses to publish otherwise.
 
-## 3. Add the CI workflows (a generic build + a thin entry)
+## 3. Add a `ci.yml` that calls the shared workflows
 
-The **build half is generic** — compute the version name, build at the versioned
-`BASE_URL`, pack `docs.zip`, upload the `docs` artifact, and (on a fork PR) warn that
-the preview won't auto-publish. This project's own reusable build workflow is below
-verbatim; reuse it as-is, adapting the install/build steps (`npm ci` / `npm run docs`)
-if you don't drive MyST through npm:
-
-:::{literalinclude} ../../.github/workflows/_docs.yml
-:language: yaml
-:caption: .github/workflows/_docs.yml (a reusable `workflow_call` build)
-:::
-
-Then a thin **`ci.yml`** runs that build for every event and nests the publish
-workflow — but only for internal events on your repo (the canonical-repo + non-fork
-guard). Fork PRs build to verify, but never deploy:
+You don't copy any workflows into your repo — you **call** this project's two reusable
+workflows by full path, pinned to `<tag>`. `docs.yml` builds and uploads the `docs`
+artifact for every event (including fork PRs); `publish.yml` reconstructs the whole
+versioned site and deploys it, nested as a job that runs **only for internal events**
+on your repo (the canonical-repo + non-fork guard). Fork PRs build to verify but never
+reach a write token.
 
 ```yaml
 # .github/workflows/ci.yml
@@ -70,9 +62,13 @@ on:
 
 jobs:
   docs:
-    uses: ./.github/workflows/_docs.yml
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
+    with:
+      # Whatever turns your sources into docs/_build/html at $BASE_URL.
+      # uv and Node are preinstalled, so this can be make / tox / npx / npm.
+      build-command: myst build --html      # e.g. make docs · tox -e docs · npm ci && npm run docs
 
-  # (optional) a tag-only release job attaching docs.zip + version-switcher.mjs.
+  # (optional) a tag-only release job attaching docs.zip + version-switcher.mjs — step 7.
 
   publish:
     needs: [docs]
@@ -80,7 +76,7 @@ jobs:
       github.repository == 'ORG/REPO' &&
       ( github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository )
-    uses: ./.github/workflows/_publish.yml
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:
@@ -91,88 +87,29 @@ jobs:
       statuses: write
 ```
 
-## 4. Add the publish workflow (assemble + deploy)
+That's the whole integration. `build-command` is the only thing most repos customise:
+`docs.yml` owns the versioning contract (the `BASE_URL`, the `docs.zip` bare-`html/`
+root, the `docs` artifact name), and `publish.yml` runs the site reconstruction
+internally — it checks out this project's `assemble` scripts at the same `<tag>` via
+`job.workflow_sha`, so there is no action or script for you to wire.
 
-This is the privileged half. It is reusable (`workflow_call`, nested by `ci.yml` for
-internal events) and also directly dispatchable (`workflow_dispatch`, the fork-PR
-opt-in). On the nested path it injects the just-built artifact so a `main`/tag push
-publishes *this* build, not the previous one.
+:::{note}
+**Fork-PR preview opt-in is a known limitation in the reusable model.** A reusable
+workflow can't be triggered by `workflow_dispatch` from your repo, and `workflow_call`
+doesn't expose `publish.yml`'s `pr` approval input, so the manual "publish a fork PR's
+preview" path isn't available cross-repo yet. Internal PRs publish automatically; fork
+PRs build and verify but you can't one-click a preview. Tracked for a follow-up (a
+`pr` `workflow_call` input on `publish.yml`).
+:::
 
-```yaml
-# .github/workflows/_publish.yml
-name: Publish
-on:
-  workflow_call:
-    inputs:
-      version-name: { required: true, type: string }
-  workflow_dispatch:
-    inputs:
-      pr: { required: false }          # external fork PR number to approve + preview
-permissions:
-  contents: read
-  actions: read
-  pages: write
-  id-token: write
-  statuses: write
-concurrency: { group: pages, cancel-in-progress: false }
-
-jobs:
-  publish:
-    # The canonical-repo guard lives in ci.yml's publish job, not here.
-    runs-on: ubuntu-latest
-    environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
-    steps:
-      - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }       # tags, for ordering + prerelease detection
-
-      # Dispatch path: pin the fork PR's current head SHA as approved.
-      - if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
-        env: { GH_TOKEN: '${{ github.token }}', REPO: '${{ github.repository }}', PR: '${{ inputs.pr }}' }
-        run: |
-          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
-          gh api --method POST "repos/$REPO/statuses/$sha" \
-            -f state=success -f context=preview-approved -f description="Fork docs preview approved"
-
-      # On the nested call, assemble downloads THIS run's `docs` artifact and stages
-      # it as `artifact-version-name` (it isn't a completed success yet). Empty on
-      # dispatch → a pure durable gather.
-      - id: site
-        uses: DiamondLightSource/myst-version-switcher-plugin/assemble@<tag>
-        with:
-          repo: ${{ github.repository }}
-          artifact-version-name: ${{ inputs.version-name }}
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: ${{ steps.site.outputs.dir }} }
-      - id: deployment
-        uses: actions/deploy-pages@v4
-
-      # deploy-pages reports success once the deployment RECORD flips active — even if
-      # the Pages backend silently fails to update the SERVED origin (e.g. a gh-pages→
-      # Actions cutover can wedge the origin while every deploy reports OK). Confirm the
-      # live switcher.json byte-matches the one we just assembled, so a stale origin is
-      # a red check instead of silently-served old docs.
-      - env: { PAGE_URL: '${{ steps.deployment.outputs.page_url }}', SITE_DIR: '${{ steps.site.outputs.dir }}' }
-        run: |
-          set -euo pipefail
-          want=$(cat "$SITE_DIR/switcher.json")
-          url="${PAGE_URL%/}/switcher.json"
-          deadline=$(( $(date +%s) + 60 ))
-          while :; do
-            got=$(curl -fsS "$url?cb=$(date +%s%N)" || true)   # cache-bust → hit the origin
-            [ -n "$got" ] && [ "$got" = "$want" ] && { echo "origin matches"; exit 0; }
-            [ "$(date +%s)" -ge "$deadline" ] && { echo "::error::live switcher.json still stale after 60s — Pages origin likely wedged"; exit 1; }
-            sleep 1
-          done
-```
-
-## 5. Allow the deploying refs in the `github-pages` environment
+## 4. Allow the deploying refs in the `github-pages` environment
 
 Because internal PRs and tags now deploy from **their own ref** (the publish job
 runs inside their CI run), the `github-pages` environment's deployment policy must
 allow those refs. In **Settings → Environments → github-pages**, it is recommended
 to set **Deployment branches and tags** to **No restriction**.
 
-## 6. First deploy
+## 5. First deploy
 
 Push to `main`. CI builds `main`, the `publish` job assembles a single-entry
 `switcher.json` and an `index.html` redirecting to `main/`, and deploys. Visit
@@ -180,7 +117,7 @@ Push to `main`. CI builds `main`, the `publish` job assembles a single-entry
 showing one entry. (The single-entry first deploy is graceful by design; no release
 is required.)
 
-## 7. Cut your first release
+## 6. Cut your first release
 
 Tag a release and attach the built docs as a `docs.zip` asset (bare `html/` root) —
 the easiest way is a tag-only job in `ci.yml` that downloads the `docs` artifact and
@@ -200,7 +137,7 @@ stable URL for cross-project `objects.inv` references.
 
 - The [architecture explanation](../explanations/architecture.md) — why it works
   this way.
-- The [`assemble` action reference](../reference/action.md) — inputs, outputs, the
-  `docs.zip` contract.
+- The [workflow reference](../reference/workflows.md) — the `docs.yml`/`publish.yml`
+  inputs and the `docs.zip` contract.
 - Migrating an existing site? See
   [how-to: migrate from `gh-pages`](../how-to/migrate-from-gh-pages.md).

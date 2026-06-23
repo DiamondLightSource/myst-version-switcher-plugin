@@ -21,7 +21,7 @@ project:
     - file: reference.md
       children:
         - file: reference/directive.md
-        - file: reference/action.md
+        - file: reference/workflows.md
         - url: https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases
           title: Release Notes
 site:

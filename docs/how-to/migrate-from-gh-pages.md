@@ -81,7 +81,7 @@ It executes, in order, then **stops with `gh-pages` intact**:
    refuses to publish unless the source is already "GitHub Actions", so this must
    precede the deploy.
 3. **Trigger a deploy.** Pass `--deploy-workflow <file>` to dispatch one (your
-   `_publish.yml` `workflow_dispatch` works: the default branch is *gathered* from its
+   `publish.yml` `workflow_dispatch` works: the default branch is *gathered* from its
    latest CI artifact, so a pure dispatch still reconstructs `main` + the backfilled
    releases), or push to the default branch / re-run its CI when prompted.
 4. **Verify.** The script fetches `switcher.json` and checks every listed version URL
