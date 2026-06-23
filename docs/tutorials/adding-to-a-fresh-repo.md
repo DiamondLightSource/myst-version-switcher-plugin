@@ -93,14 +93,37 @@ root, the `docs` artifact name), and `publish.yml` runs the site reconstruction
 internally — it checks out this project's `assemble` scripts at the same `<tag>` via
 `job.workflow_sha`, so there is no action or script for you to wire.
 
-:::{note}
-**Fork-PR preview opt-in is a known limitation in the reusable model.** A reusable
-workflow can't be triggered by `workflow_dispatch` from your repo, and `workflow_call`
-doesn't expose `publish.yml`'s `pr` approval input, so the manual "publish a fork PR's
-preview" path isn't available cross-repo yet. Internal PRs publish automatically; fork
-PRs build and verify but you can't one-click a preview. Tracked for a follow-up (a
-`pr` `workflow_call` input on `publish.yml`).
-:::
+### (optional) Fork-PR preview opt-in
+
+Internal PRs publish automatically; fork PRs build and verify but never auto-deploy.
+To let a maintainer manually publish a fork PR's preview, add a small
+`workflow_dispatch` wrapper — a reusable workflow can't be dispatched cross-repo, so
+the wrapper lives in your repo and passes the PR number through `workflow_call`:
+
+```yaml
+# .github/workflows/preview-fork.yml
+name: Preview fork PR
+on:
+  workflow_dispatch:
+    inputs:
+      pr: { description: Fork PR number to approve + preview, required: true }
+jobs:
+  preview:
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
+    with:
+      version-name: ""          # no in-run build to inject → pure durable gather
+      pr: ${{ inputs.pr }}      # pins the fork's head SHA as preview-approved, then assembles
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+      statuses: write
+```
+
+Run it from the Actions tab with the PR number. It approves that fork PR's current
+head commit and deploys a preview; a later push to the PR (new SHA) drops the preview
+until you re-run it.
 
 ## 4. Allow the deploying refs in the `github-pages` environment
 

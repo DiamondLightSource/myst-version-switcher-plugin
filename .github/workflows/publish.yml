@@ -13,8 +13,11 @@ name: Publish
 #                     build isn't a *completed* CI run yet, so the caller passes its
 #                     `version-name`; this run downloads the same-run `docs` artifact
 #                     and stages it directly (otherwise a default-branch/tag push
-#                     would publish the PREVIOUS build).
-#   workflow_dispatch — a maintainer's opt-in to preview an EXTERNAL fork PR.
+#                     would publish the PREVIOUS build). A consumer's manual fork-PR
+#                     preview also comes through here — a workflow_dispatch wrapper in
+#                     their repo calls this with `pr: <n>` (and version-name: "").
+#   workflow_dispatch — this repo's own maintainer opt-in to preview an EXTERNAL fork
+#                     PR (the local, non-cross-repo path).
 #
 # The assemble logic is THIS repo's assemble/assemble.sh (+ assemble.mjs); we run it
 # directly rather than wrap it in a composite action. To version-match the scripts
@@ -41,6 +44,14 @@ on:
           repo's default branch is not yet publishing docs.zip (e.g. mid-migration).
         required: false
         default: "true"
+        type: string
+      pr:
+        description: >-
+          External fork PR number to approve (pins its head SHA) and preview. Set this
+          (with version-name: "") from a consumer's workflow_dispatch wrapper, since a
+          reusable workflow can't be workflow_dispatch'd cross-repo directly.
+        required: false
+        default: ""
         type: string
   workflow_dispatch:
     inputs:
@@ -88,11 +99,13 @@ jobs:
           path: .mvs
           sparse-checkout: assemble
 
-      # workflow_dispatch (fork opt-in): pin THIS commit as approved. assemble gathers
-      # an external PR only when its head SHA carries this status, so a later push
-      # (new SHA) silently drops the preview until a maintainer re-approves.
+      # Fork opt-in: pin the PR's head commit as approved. assemble gathers an external
+      # PR only when its head SHA carries this status, so a later push (new SHA) silently
+      # drops the preview until re-approved. Gated on `pr` alone (not event_name) so it
+      # works both from this repo's own workflow_dispatch and from a consumer's dispatch
+      # wrapper that passes `pr` through workflow_call.
       - name: Approve fork PR head SHA
-        if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
+        if: inputs.pr != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
