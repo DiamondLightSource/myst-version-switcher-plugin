@@ -63,7 +63,7 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 | version kind | source | durability |
 |---|---|---|
 | current build | this run's `docs` artifact, staged via `version-name` | n/a (just built) |
-| default branch (e.g. `main`) | latest successful CI **push** run's `docs` artifact | ephemeral — self-heals on the next branch CI |
+| default branch (e.g. `main`) | latest CI **push** artifact, else the durable `_sources/<branch>.zip` in the live site | durable — re-persisted into the site each deploy |
 | released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
 | open PRs (`pr-<n>`) | each PR's build artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |
 

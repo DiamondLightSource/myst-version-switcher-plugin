@@ -25,6 +25,13 @@ import { parseArgs } from "node:util";
 /** The `stable/` alias directory name (a fixed convention; see docs/ explanation). */
 export const STABLE_ALIAS = "stable";
 
+/**
+ * The in-site durable store directory (`_sources/<default>.zip`) that assemble.sh
+ * writes the default branch's docs.zip into each deploy. It is published with the
+ * site but is NOT a version, so version discovery skips it.
+ */
+export const SOURCES_DIR = "_sources";
+
 /** Run a git command and return its non-empty stdout lines. */
 function gitLines(args) {
 	const out = execFileSync("git", args, { encoding: "utf8" });
@@ -40,7 +47,10 @@ export function discoverVersions(siteDir) {
 		return [];
 	}
 	return entries
-		.filter((d) => d.isDirectory() && d.name !== STABLE_ALIAS)
+		.filter(
+			(d) =>
+				d.isDirectory() && d.name !== STABLE_ALIAS && d.name !== SOURCES_DIR,
+		)
 		.map((d) => d.name);
 }
 

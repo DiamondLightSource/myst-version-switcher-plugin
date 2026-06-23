@@ -14,7 +14,7 @@ durability** — and the safety of the migration hinges entirely on that differe
 | version | source under the new model | durable? |
 |---|---|---|
 | released tags | a `docs.zip` asset on each **GitHub Release** | **yes, permanent** — but only once attached |
-| default branch (`main`) | the **latest CI run's `docs` artifact** | **no** — ephemeral; exists only after the new pipeline runs on the default branch |
+| default branch (`main`) | a CI artifact, persisted each deploy into the site at `_sources/<branch>.zip` | **yes** — once the branch itself builds `docs.zip` under the new pipeline |
 | open PRs (`pr-<n>`) | each PR's build artifact | no — drops on merge/close |
 
 Two consequences drive the whole procedure:
@@ -22,16 +22,17 @@ Two consequences drive the whole procedure:
 1. **Your old releases are not durable yet.** Their docs exist only as directories on
    `gh-pages`; the matching Releases have no `docs.zip`. So migration includes a
    one-time **backfill** of `docs.zip` onto those Releases — not just a config flip.
-2. **The default branch is *never* durably stored.** `/main/` is served from an
-   ephemeral CI artifact that only exists once the new pipeline has run on the default
-   branch. **`gh-pages` is therefore the only recoverable copy of the default branch's
-   docs until the default branch is itself building and publishing `docs.zip` under
-   the new CI.** Delete `gh-pages` before that and you create an unrecoverable
-   `/main/` hole — and trip `assemble`'s default-branch guard on every later deploy.
+2. **The default branch becomes durable only once it builds docs.zip itself.** From its
+   first build under the new pipeline, `assemble` persists the branch's `docs.zip` into
+   the published site (`_sources/<branch>.zip`) every deploy and restores it from there
+   when the CI artifact expires. *Before* that first build there is no in-site copy, so
+   `gh-pages` is the only recoverable copy of `/main/`. Delete `gh-pages` before the
+   default branch is building `docs.zip` and you create an unrecoverable `/main/` hole —
+   and trip `assemble`'s default-branch guard on every later deploy.
 
-> **The load-bearing rule:** *keep `gh-pages` until your default branch is publishing
-> `docs.zip`.* Deleting it is a **separate, gated step** (`--delete-gh-pages`), never
-> part of the cutover.
+> **The load-bearing rule:** *keep `gh-pages` until your default branch is building
+> `docs.zip` itself* (from then on `_sources/<branch>.zip` carries it durably). Deleting
+> it is a **separate, gated step** (`--delete-gh-pages`), never part of the cutover.
 
 ## Before you start
 

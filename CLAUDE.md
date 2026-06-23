@@ -38,6 +38,18 @@ public action.
 See [`docs/explanation/architecture.md`](docs/explanation/architecture.md) for the
 full rationale. In short:
 
+### The default branch is self-durable in the site (`_sources/`)
+Releases are durable (Release `docs.zip` assets) and PRs are ephemeral by design, but
+the **default branch** had no permanent source — gathered from its latest CI artifact,
+which expires, after which it drops out and the guard hard-fails. So each deploy
+persists the default branch's `docs.zip` (the one it arrived as — current build,
+gathered run, or the fallback — copied verbatim) into the published site at
+`_sources/<branch>.zip` (excluded from version discovery), and a deploy whose fresh
+artifact is gone restores the branch from that durable in-site copy (fetched from
+`PAGES_URL`, default `https://<owner>.github.io/<repo>`). It only kicks in once the
+default branch builds docs under the new pipeline — it does not rescue pre-migration
+gh-pages content (a gh-pages migration just keeps the old `/main/` until then).
+
 ### Reconstruct from durable sources, publish the whole tree
 Every deploy rebuilds the **complete** site from authoritative inputs — `main`'s
 latest build, each release's `docs.zip` asset, every open PR's build artifact — and
