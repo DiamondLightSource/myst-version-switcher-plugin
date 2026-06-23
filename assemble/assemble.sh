@@ -9,11 +9,21 @@
 #   REPO=DiamondLightSource/myst-version-switcher-plugin GH_TOKEN=$(gh auth token) \
 #     assemble/assemble.sh
 #
+# The default branch is the one version with no permanent source (releases have
+# their docs.zip Release asset; PRs are ephemeral by design) — it is gathered from
+# the latest CI run's `docs` artifact, which EXPIRES. So each deploy also persists
+# the default branch's docs.zip into the published site at `_sources/<branch>.zip`,
+# and falls back to that durable in-site copy when the fresh artifact is gone. This
+# keeps the default branch from silently dropping out, and lets a migration retire an
+# external `gh-pages` overlay after one deploy captures the branch durably.
+#
 # Driven by env (publish.yml passes these; set them yourself to run locally):
 #   REPO                  org/repo for gh lookups + version URLs        (required)
 #   GUARD_DEFAULT_BRANCH  'true' (default) → hard-fail if the default branch is
 #                         absent from the site; any other value disables the guard
 #   GH_TOKEN              token for gh (release assets, runs, statuses)
+#   PAGES_URL             base URL of the live Pages site, for the durable default-
+#                         branch fallback (default: https://<owner>.github.io/<repo>)
 #   SITE                  output dir (default: $RUNNER_TEMP/site, else ./_site)
 #   ARTIFACT_VERSION_NAME version name (pr-<n> | main | <tag>) to stage directly from
 #                         ARTIFACT_ZIP instead of gathering — used when publishing
@@ -22,7 +32,7 @@
 #                         downloads the artifact; this script unzips + stages it.
 #   ARTIFACT_ZIP          docs.zip (bare html/ root) to stage at ARTIFACT_VERSION_NAME
 #
-# Requires node + gh on PATH. assemble.mjs sits next to this script.
+# Requires node + gh + zip + curl on PATH. assemble.mjs sits next to this script.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +46,13 @@ elif [ -n "${RUNNER_TEMP:-}" ]; then SITE="$RUNNER_TEMP/site"
 else SITE="$PWD/_site"
 fi
 TMP="${RUNNER_TEMP:-$(mktemp -d)}"
+
+# Live Pages URL, for the durable default-branch fallback. Default to the standard
+# project-pages URL derived from REPO (owner lowercased for the github.io subdomain);
+# override PAGES_URL for user/org pages or a custom domain.
+_owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]'); _name=${REPO#*/}
+PAGES_URL="${PAGES_URL:-https://$_owner.github.io/$_name}"
+SOURCES_DIR="_sources"   # durable in-site store: $SITE/_sources/<default>.zip
 
 default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
 mkdir -p "$SITE"
@@ -77,17 +94,23 @@ if [ -n "$ARTIFACT_VERSION_NAME" ]; then
   fi
 fi
 
-# --- main: latest successful push build on the default branch ---
-# Skip if it was staged as the current build (else we'd fetch a STALE earlier run).
-main_run=""
-[ "$default" = "$ARTIFACT_VERSION_NAME" ] || main_run=$(gh run list --repo "$REPO" --workflow ci.yml --branch "$default" \
-  --event push --status success --limit 1 --json databaseId -q '.[0].databaseId // empty')
-if [ -n "$main_run" ]; then
-  if download_run "$main_run" "$TMP/dl-$default" "branch $default"; then
+# --- default branch: latest successful push build, else the durable in-site copy ---
+# Skip the fetch if the default branch is itself this run's current build (already
+# staged above) — re-fetching would get a STALE earlier run. Otherwise prefer the
+# fresh CI artifact; if it is gone (expired, or never built), restore from the
+# docs.zip a previous deploy persisted in the live site, so an artifact expiry can't
+# silently drop the default branch.
+if [ "$default" != "$ARTIFACT_VERSION_NAME" ]; then
+  main_run=$(gh run list --repo "$REPO" --workflow ci.yml --branch "$default" \
+    --event push --status success --limit 1 --json databaseId -q '.[0].databaseId // empty')
+  if [ -n "$main_run" ] && download_run "$main_run" "$TMP/dl-$default" "branch $default"; then
     extract "$TMP/dl-$default/docs.zip" "$default" "branch $default"
+  elif curl -fsSL "$PAGES_URL/$SOURCES_DIR/$default.zip" -o "$TMP/durable-$default.zip" 2>/dev/null; then
+    extract "$TMP/durable-$default.zip" "$default" "branch $default (durable in-site copy)"
+    echo "::notice::default branch '$default' restored from the durable in-site copy ($PAGES_URL/$SOURCES_DIR/$default.zip)"
+  else
+    echo "::warning::default branch '$default': no fresh CI build and no durable in-site copy"
   fi
-elif [ "$default" != "$ARTIFACT_VERSION_NAME" ]; then
-  echo "::warning::no successful CI build found for default branch $default"
 fi
 
 # --- releases: tags whose release has a docs.zip (one paginated call) ---
@@ -125,6 +148,20 @@ while IFS=$'\t' read -r num sha cross; do
     extract "$TMP/dl-pr-$num/docs.zip" "pr-$num" "PR #$num"
   fi
 done <<< "$prs"
+
+# --- persist the default branch durably in the site ($SITE/_sources/<default>.zip) ---
+# Whatever produced $SITE/<default> this deploy (this run's build, a gathered CI
+# artifact, the durable fallback above, or an external pre-stage such as a migration
+# overlay), re-pack it with a bare html/ root so the NEXT deploy can restore it even
+# once the CI artifact expires. The _sources/ dir is published with the site and is
+# excluded from version discovery (see assemble.mjs).
+if [ -d "$SITE/$default" ]; then
+  mkdir -p "$SITE/$SOURCES_DIR"
+  persist="$TMP/persist-$default"; rm -rf "$persist"; mkdir -p "$persist/html"
+  cp -a "$SITE/$default/." "$persist/html/"
+  ( cd "$persist" && zip -rq "$SITE/$SOURCES_DIR/$default.zip" html )
+  rm -rf "$persist"
+fi
 
 # --- generate switcher.json + redirect + stable-alias source ---
 # `generate` discovers the gathered dirs, orders them, writes switcher.json +

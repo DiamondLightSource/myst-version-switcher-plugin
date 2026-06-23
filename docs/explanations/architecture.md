@@ -16,17 +16,19 @@ one artifact as the *entire* site, which is a whole-site-replace.
 |---|---|---|
 | current build | the build staged into the publish run via `version-name` | n/a (just built) |
 | released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
-| branch previews (e.g. `main`) | the latest successful CI run's `docs` **artifact** | ephemeral (fine — branches move) |
+| default branch (e.g. `main`) | the latest CI **push** artifact, else the durable `_sources/<branch>.zip` persisted in the live site | durable (re-persisted each deploy) |
 | open PRs (`pr-<n>`) | each PR's build artifact, keyed by head SHA | ephemeral (drops on merge/close) |
 
-Releases are permanent, so old versions never vanish. Branch and PR previews come
-from CI artifacts and silently drop if the artifact expires and nothing rebuilds —
-acceptable for *optional* dev/preview docs. A required branch (the default branch)
-is guarded: `assemble` hard-fails rather than publish a site missing it. This
-asymmetry — releases durable, the default branch only ever an ephemeral artifact —
-also drives the gh-pages migration: keep `gh-pages` until the default branch is
-itself publishing `docs.zip`, because until then it is the only durable copy of that
-branch's docs (see [migrate-from-gh-pages](../how-to/migrate-from-gh-pages.md)).
+Releases are permanent, so old versions never vanish. PR previews come from CI
+artifacts and silently drop if the artifact expires and nothing rebuilds — fine for
+*optional* preview docs. The **default branch** used to be the one fragile required
+version (artifact-only, yet guarded — `assemble` hard-fails rather than publish a
+site missing it). It is now self-durable: each deploy persists its `docs.zip` into
+the published site at `_sources/<branch>.zip`, and a deploy whose fresh artifact has
+expired restores the branch from that in-site copy. That removes the artifact-expiry
+hole **and** retires the gh-pages migration overlay: once one deploy captures the
+branch durably, the external `gh-pages` copy is no longer the only durable source
+(see [migrate-from-gh-pages](../how-to/migrate-from-gh-pages.md)).
 
 ### Why this replaced the `gh-pages` + `keep_files` model
 

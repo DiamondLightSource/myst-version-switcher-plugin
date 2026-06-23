@@ -76,8 +76,11 @@ for (const d of ["main", "2.1", "2.0"]) mkdirSync(join(site, d));
 writeFileSync(join(site, "switcher.json"), "[]"); // file, ignored
 writeFileSync(join(site, "index.html"), "x"); // file, ignored
 symlinkSync("2.1", join(site, "stable")); // the alias, excluded
+mkdirSync(join(site, "_sources")); // durable default-branch store, excluded
 assert.deepEqual(discoverVersions(site).sort(), ["2.0", "2.1", "main"]);
-ok("discoverVersions returns dirs only, excluding files and the stable alias");
+ok(
+	"discoverVersions returns dirs only, excluding files, the stable alias, and _sources",
+);
 
 assert.deepEqual(discoverVersions(join(site, "does-not-exist")), []);
 ok("discoverVersions returns [] for a missing dir");
