@@ -46,9 +46,13 @@ persists the default branch's `docs.zip` (the one it arrived as — current buil
 gathered run, or the fallback — copied verbatim) into the published site at
 `_sources/<branch>.zip` (excluded from version discovery), and a deploy whose fresh
 artifact is gone restores the branch from that durable in-site copy (fetched from
-`PAGES_URL`, default `https://<owner>.github.io/<repo>`). It only kicks in once the
-default branch builds docs under the new pipeline — it does not rescue pre-migration
-gh-pages content (a gh-pages migration just keeps the old `/main/` until then).
+`PAGES_URL`, default `https://<owner>.github.io/<repo>`). Before the branch ever builds
+docs (mid gh-pages migration) a final rung reads a **published seed release**
+(`pages-default-seed`, created by `scripts/migrate.sh` from the old gh-pages `<default>/`
+tree) and persists it to `_sources` on that deploy — so a repo can cut over to the
+reusable workflow in one PR, before `docs→main`. Drafts can't be used: a `contents:read`
+deploy token can't read them (verified), so the seed is a published release on a
+sentinel tag, deleted at finalize once `_sources/<default>.zip` is live.
 
 ### Reconstruct from durable sources, publish the whole tree
 Every deploy rebuilds the **complete** site from authoritative inputs — `main`'s

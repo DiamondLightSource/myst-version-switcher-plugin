@@ -14,7 +14,9 @@
 # the latest CI run's `docs` artifact, which EXPIRES. So each deploy also persists
 # the default branch's docs.zip into the published site at `_sources/<branch>.zip`,
 # and falls back to that durable in-site copy when the fresh artifact is gone, so the
-# default branch can't silently drop out once it has built docs at least once.
+# default branch can't silently drop out once it has built docs at least once. Before
+# that first build a migration can publish a one-time seed release ($SEED_TAG) that is
+# read as a last resort and persisted to _sources on that deploy.
 #
 # Driven by env (publish.yml passes these; set them yourself to run locally):
 #   REPO                  org/repo for gh lookups + version URLs        (required)
@@ -23,6 +25,8 @@
 #   GH_TOKEN              token for gh (release assets, runs, statuses)
 #   PAGES_URL             base URL of the live Pages site, for the durable default-
 #                         branch fallback (default: https://<owner>.github.io/<repo>)
+#   SEED_TAG              published seed release tag for the default branch's docs.zip,
+#                         read once during a migration (default: pages-default-seed)
 #   SITE                  output dir (default: $RUNNER_TEMP/site, else ./_site)
 #   ARTIFACT_VERSION_NAME version name (pr-<n> | main | <tag>) to stage directly from
 #                         ARTIFACT_ZIP instead of gathering — used when publishing
@@ -52,6 +56,12 @@ TMP="${RUNNER_TEMP:-$(mktemp -d)}"
 _owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]'); _name=${REPO#*/}
 PAGES_URL="${PAGES_URL:-https://$_owner.github.io/$_name}"
 SOURCES_DIR="_sources"   # durable in-site store: $SITE/_sources/<default>.zip
+# A migration may publish a one-time seed release holding the default branch's
+# docs.zip (e.g. captured from gh-pages), read once to bootstrap _sources/ before the
+# branch builds docs itself. Published (a contents:read deploy can't read a draft);
+# on this sentinel tag so it never collides with a branch and is excluded as a
+# version below. scripts/migrate.sh creates it and deletes it once _sources is live.
+SEED_TAG="${SEED_TAG:-pages-default-seed}"
 
 default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
 mkdir -p "$SITE"
@@ -96,9 +106,10 @@ fi
 # --- default branch: this run's build, else latest push build, else durable copy ---
 # Track the docs.zip the default branch arrived as in `default_zip`, so the persist
 # step below can store it verbatim. For the current build it is ARTIFACT_ZIP (already
-# staged above). Otherwise prefer the fresh CI artifact; if it
-# is gone (expired, or never built), restore from the docs.zip a previous deploy
-# persisted in the live site, so an artifact expiry can't silently drop the branch.
+# staged above). Otherwise try, in order: the fresh CI artifact; the docs.zip a
+# previous deploy persisted in the live site (so an artifact expiry can't silently
+# drop the branch); and finally a one-time migration seed release. The first that
+# works is staged + persisted to _sources/<default>.zip for next time.
 default_zip=""
 if [ "$default" = "$ARTIFACT_VERSION_NAME" ]; then
   default_zip="$ARTIFACT_ZIP"
@@ -112,8 +123,12 @@ else
     default_zip="$TMP/durable-$default.zip"
     extract "$default_zip" "$default" "branch $default (durable in-site copy)"
     echo "::notice::default branch '$default' restored from the durable in-site copy ($PAGES_URL/$SOURCES_DIR/$default.zip)"
+  elif gh release download "$SEED_TAG" --repo "$REPO" -p docs.zip -O "$TMP/seed-$default.zip" 2>/dev/null; then
+    default_zip="$TMP/seed-$default.zip"
+    extract "$default_zip" "$default" "branch $default (migration seed)"
+    echo "::notice::default branch '$default' staged from the migration seed release '$SEED_TAG' — persisted to _sources this deploy"
   else
-    echo "::warning::default branch '$default': no fresh CI build and no durable in-site copy"
+    echo "::warning::default branch '$default': no fresh CI build, durable in-site copy, or seed release"
   fi
 fi
 
@@ -123,6 +138,7 @@ tags=$(gh api --paginate "repos/$REPO/releases" \
 for tag in $tags; do
   case "$tag" in */*) continue ;; esac          # never built/published; skip
   [ "$tag" = "$default" ] && continue
+  [ "$tag" = "$SEED_TAG" ] && continue          # migration seed → staged as the default branch, not a version
   [ "$tag" = "$ARTIFACT_VERSION_NAME" ] && continue  # staged fresh from this run's build
   if gh release download "$tag" --repo "$REPO" -p docs.zip -O "$TMP/rel-$tag.zip"; then
     extract "$TMP/rel-$tag.zip" "$tag" "release $tag"
