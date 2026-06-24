@@ -10,16 +10,17 @@
 #   - it leaves no workflow_dispatch stub behind in each consumer repo.
 #
 # TWO PHASES, because the new model's sources differ in durability. Releases become
-# permanent once their docs.zip is attached (backfill); the DEFAULT BRANCH is only
-# ever served from an EPHEMERAL CI artifact, which exists only after the new pipeline
-# has run on it. So gh-pages is the only recoverable copy of the default branch's
-# docs until that branch is itself publishing docs.zip — and deleting it is split off
-# behind a guard:
+# permanent once their docs.zip is attached (backfill). The DEFAULT BRANCH has no
+# permanent source until it builds docs.zip itself — so we SEED it: capture the
+# gh-pages <default>/ tree as a published seed release, which the cutover deploy reads
+# and persists to _sources/<default>.zip in the site. After that the in-site copy is
+# the durable source; gh-pages is no longer needed and deleting it is split off behind
+# a guard:
 #
-#   cutover  (default)          backfill → flip Pages → deploy → verify, then STOP
-#                               (gh-pages retained: rollback AND default-branch copy)
-#   finalize (--delete-gh-pages) guard the default branch is publishing docs.zip →
-#                               re-verify → delete gh-pages  (the rollback dies here)
+#   cutover  (default)          backfill → seed → flip Pages → deploy → verify, STOP
+#                               (gh-pages retained as the rollback)
+#   finalize (--delete-gh-pages) guard _sources/<default>.zip is live → re-verify →
+#                               delete gh-pages + the seed release  (rollback dies here)
 #
 # Until the finalize step, gh-pages still EXISTS (just unserved) and is the rollback:
 # flip the Pages source back to "Deploy from a branch" to restore serving instantly.
@@ -29,10 +30,11 @@
 #                                 [--deploy-workflow <file>]
 #   scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes]
 #
-#   --dry-run            print the backfill plan + probe the current site only;
+#   --dry-run            print the backfill + seed plan + probe the current site only;
 #                        upload nothing, skip the flip / deploy.
-#   --delete-gh-pages    finalize: guard that the default branch publishes docs.zip,
-#                        re-verify, then delete gh-pages. The only mode that deletes.
+#   --delete-gh-pages    finalize: guard _sources/<default>.zip is live, re-verify,
+#                        then delete gh-pages + the seed release. The only mode that
+#                        deletes.
 #   --pages-ref <ref>    gh-pages ref to read (default: origin/gh-pages)
 #   --deploy-workflow    `gh workflow run <file>` to trigger the cutover deploy;
 #                        omit to be prompted to trigger a deploy by hand.
@@ -45,6 +47,7 @@ DEPLOY_WORKFLOW=""
 DRY_RUN=false
 DELETE_GH_PAGES=false
 ASSUME_YES=false
+SEED_TAG="pages-default-seed"   # published seed release holding the default branch's docs
 
 usage() {
   echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--deploy-workflow <file>]" >&2
@@ -113,6 +116,47 @@ backfill() {
   done
 }
 
+# --- seed the default branch durably (so we can cut over before it builds docs) ---
+# The default branch has no durable source until it builds docs.zip under the new
+# pipeline, and a contents:read deploy can't read a draft — so capture the gh-pages
+# <default>/ tree as a docs.zip and PUBLISH it on a sentinel tag (not the branch name).
+# assemble reads it once, stages /<default>/, and persists _sources/<default>.zip; from
+# then on the in-site copy carries it and this seed is dormant (deleted at finalize).
+# This lets a repo cut over to the reusable workflow in ONE PR, before docs→default.
+seed_default_branch() {
+  echo
+  echo "-- 1b. Seeding the default branch durably (published release '$SEED_TAG') --"
+  fetch_pages_ref
+  local default tmp
+  default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+  if ! git ls-tree -d --name-only "$PAGES_REF" | grep -qxF "$default"; then
+    echo "   no '$default/' dir on $PAGES_REF — nothing to seed (skipping)"
+    return 0
+  fi
+  echo "   seed $default  (from $default/ on $PAGES_REF → release '$SEED_TAG')"
+  if $DRY_RUN; then return 0; fi
+  tmp=$(mktemp -d)
+  git archive "$PAGES_REF" "$default" | tar -x -C "$tmp"
+  mv "$tmp/$default" "$tmp/html"
+  ( cd "$tmp" && zip -rq docs.zip html )                           # bare html/ root
+  if gh release view "$SEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
+    gh release upload "$SEED_TAG" "$tmp/docs.zip" --repo "$REPO" --clobber
+  else
+    gh release create "$SEED_TAG" "$tmp/docs.zip" --repo "$REPO" --latest=false \
+      --title "Default-branch docs seed (migration)" \
+      --notes "Temporary: seeds /$default/ until the default branch builds docs.zip under the new pipeline. Safe to delete once _sources/$default.zip is live in the site."
+  fi
+  rm -rf "$tmp"
+}
+
+# Delete the seed release + its tag (the durable _sources copy supersedes it).
+delete_seed_release() {
+  if gh release view "$SEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
+    echo "-- Deleting the migration seed release '$SEED_TAG' (superseded by _sources) --"
+    $DRY_RUN || gh release delete "$SEED_TAG" --repo "$REPO" --cleanup-tag --yes
+  fi
+}
+
 # --- verify helper (auto-probe) ---------------------------------------------
 # Cache-bust every request: probing a path before the deploy has propagated lets
 # the CDN cache a 404 for the path's TTL, which would fail a later honest probe.
@@ -137,30 +181,25 @@ verify() {
 }
 
 # --- guard for the irreversible delete --------------------------------------
-# gh-pages is the ONLY recoverable copy of the default branch's docs until the
-# default branch is publishing docs.zip under the new CI. Refuse to delete until a
-# successful ci.yml push run on the default branch carries a LIVE docs artifact.
-guard_default_publishing() {
-  local default run has
+# gh-pages is the only recoverable copy of the default branch's docs until the SITE
+# itself holds a durable copy at _sources/<default>.zip — written each deploy once the
+# branch has been gathered (from its own build, or from the migration seed). Probe the
+# live site directly: if that copy is served, the default branch survives a gh-pages
+# delete (and a later artifact expiry), so it is safe to remove.
+guard_default_durable() {
+  local default url code
   default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
-  echo "-- guard: is the default branch ($default) publishing docs.zip? --"
-  run=$(gh run list --repo "$REPO" --workflow ci.yml --branch "$default" \
-          --event push --status success --limit 1 --json databaseId -q '.[0].databaseId // empty')
-  if [ -z "$run" ]; then
-    echo "::error::REFUSING to delete gh-pages: the default branch '$default' has no" >&2
-    echo "  successful ci.yml push run — it is not building/publishing docs.zip under the" >&2
-    echo "  new pipeline yet. Merge the migration into '$default', let CI run, then retry." >&2
+  url="$BASE/_sources/$default.zip"
+  echo "-- guard: is the default branch ($default) durable in the site (_sources)? --"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$url?cb=$(date +%s%N)")
+  if [ "$code" != "200" ]; then
+    echo "::error::REFUSING to delete gh-pages: $url is not live ($code)." >&2
+    echo "  The deployed site has no durable copy of '$default' yet, so gh-pages is still" >&2
+    echo "  the only recoverable copy. Run a deploy (seed, or the default branch's own CI)" >&2
+    echo "  so assemble persists _sources/$default.zip, then retry." >&2
     exit 1
   fi
-  has=$(gh api "repos/$REPO/actions/runs/$run/artifacts" \
-          -q 'any(.artifacts[]; .name=="docs" and (.expired | not))' 2>/dev/null || echo false)
-  if [ "$has" != "true" ]; then
-    echo "::error::REFUSING to delete gh-pages: the latest successful ci.yml run on" >&2
-    echo "  '$default' (run $run) has no live 'docs' artifact — gh-pages is still the only" >&2
-    echo "  durable copy of $default's docs. Re-run the default-branch CI, then retry." >&2
-    exit 1
-  fi
-  echo "   ok: $default is publishing docs.zip (run $run has a live docs artifact)"
+  echo "   ok: $url is live — '$default' is durable independently of gh-pages"
 }
 
 echo "== migrate: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN, delete=$DELETE_GH_PAGES) =="
@@ -170,7 +209,7 @@ echo "== migrate: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN, delete=$DELETE_
 # ============================================================================
 if $DELETE_GH_PAGES; then
   echo
-  guard_default_publishing
+  guard_default_durable
   echo
   echo "-- Re-verifying the live site before deleting gh-pages --"
   if ! verify; then
@@ -181,7 +220,7 @@ if $DELETE_GH_PAGES; then
   fi
   if ! $ASSUME_YES; then
     echo
-    read -r -p "Probes passed and the default branch is publishing docs.zip. Type the repo name ($REPO) to delete gh-pages: " confirm
+    read -r -p "Probes passed and the default branch is durable in the site. Type the repo name ($REPO) to delete gh-pages: " confirm
     if [ "$confirm" != "$REPO" ]; then
       echo "Not confirmed — leaving gh-pages in place (rollback still available)."
       exit 0
@@ -190,21 +229,23 @@ if $DELETE_GH_PAGES; then
   echo
   echo "-- Deleting gh-pages (rollback gone after this) --"
   git push origin --delete "${PAGES_REF#origin/}"
+  delete_seed_release          # the in-site _sources copy now carries the default branch
   echo "Done. Site is served from GitHub Actions; gh-pages removed."
   exit 0
 fi
 
 # ============================================================================
-# Cutover: backfill → flip → deploy → verify, then STOP (gh-pages retained).
+# Cutover: backfill → seed → flip → deploy → verify, then STOP (gh-pages retained).
 # ============================================================================
 backfill
+seed_default_branch
 
 if $DRY_RUN; then
   echo
   echo "-- (dry-run) probing current site --"
   verify || echo "(dry-run probe failed — expected if the site isn't deployed yet)"
   echo
-  echo "Dry run complete: backfill plan shown (nothing uploaded); flip/deploy skipped."
+  echo "Dry run complete: backfill + seed plan shown (nothing uploaded); flip/deploy skipped."
   exit 0
 fi
 
@@ -239,8 +280,10 @@ fi
 
 echo
 echo "Cutover complete. The site is served from GitHub Actions; gh-pages is RETAINED"
-echo "as the rollback AND the only durable copy of the default branch's docs."
+echo "as the rollback. This deploy should have persisted the default branch durably to"
+echo "_sources/<default>.zip (from the seed); once that is live, gh-pages is no longer"
+echo "the only copy."
 echo
-echo "Once the default branch is publishing docs.zip under the new CI (a green ci.yml"
-echo "push run), finalize the migration and remove the rollback with:"
+echo "Finalize (deletes gh-pages AND the seed release) once _sources/<default>.zip is"
+echo "live in the site — the finalize guard checks exactly that:"
 echo "    scripts/migrate.sh $REPO --delete-gh-pages"

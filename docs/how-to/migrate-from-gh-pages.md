@@ -14,7 +14,7 @@ durability** — and the safety of the migration hinges entirely on that differe
 | version | source under the new model | durable? |
 |---|---|---|
 | released tags | a `docs.zip` asset on each **GitHub Release** | **yes, permanent** — but only once attached |
-| default branch (`main`) | the **latest CI run's `docs` artifact** | **no** — ephemeral; exists only after the new pipeline runs on the default branch |
+| default branch (`main`) | persisted each deploy into the site at `_sources/<branch>.zip` | **yes** — once one deploy has captured it (seeded at cutover) |
 | open PRs (`pr-<n>`) | each PR's build artifact | no — drops on merge/close |
 
 Two consequences drive the whole procedure:
@@ -22,16 +22,20 @@ Two consequences drive the whole procedure:
 1. **Your old releases are not durable yet.** Their docs exist only as directories on
    `gh-pages`; the matching Releases have no `docs.zip`. So migration includes a
    one-time **backfill** of `docs.zip` onto those Releases — not just a config flip.
-2. **The default branch is *never* durably stored.** `/main/` is served from an
-   ephemeral CI artifact that only exists once the new pipeline has run on the default
-   branch. **`gh-pages` is therefore the only recoverable copy of the default branch's
-   docs until the default branch is itself building and publishing `docs.zip` under
-   the new CI.** Delete `gh-pages` before that and you create an unrecoverable
-   `/main/` hole — and trip `assemble`'s default-branch guard on every later deploy.
+2. **The default branch has no permanent source until a deploy captures it.** Each
+   deploy persists the branch's `docs.zip` into the published site
+   (`_sources/<branch>.zip`) and restores it from there when the CI artifact expires —
+   but before the *first* such capture there is nothing in the site, and `gh-pages` is
+   the only recoverable copy of `/main/`. So the cutover **seeds** it: it captures the
+   gh-pages `<default>/` tree as a published seed release, which the first deploy reads
+   and persists to `_sources/<branch>.zip`. After that the in-site copy carries `/main/`
+   — *before* the default branch ever builds docs itself — which is what lets a repo cut
+   over to the reusable workflow in **one PR**, ahead of `docs→main`.
 
-> **The load-bearing rule:** *keep `gh-pages` until your default branch is publishing
-> `docs.zip`.* Deleting it is a **separate, gated step** (`--delete-gh-pages`), never
-> part of the cutover.
+> **The load-bearing rule:** *keep `gh-pages` until `_sources/<default>.zip` is live in
+> the deployed site* (the cutover seed gets you there on the first deploy; the
+> `--delete-gh-pages` guard probes exactly this). Deleting `gh-pages` is a **separate,
+> gated step**, never part of the cutover — and it removes the seed release too.
 
 ## Before you start
 
@@ -88,24 +92,26 @@ It executes, in order, then **stops with `gh-pages` intact**:
    returns `200`. Probes are cache-busted, so a too-early probe can't pin a cached
    `404` at the CDN.
 
-It does **not** delete `gh-pages`. You are now live on the new model, with `gh-pages`
-retained as both the rollback **and** the only durable copy of the default branch's
-docs.
+It does **not** delete `gh-pages`. You are now live on the new model. The cutover
+deploy should have **seeded** the default branch — captured its gh-pages content as a
+seed release that this deploy persisted to `_sources/<default>.zip` — so `/main/` is
+now served from the in-site copy. `gh-pages` is retained only as the rollback.
 
-## Step 3 — finalize (irreversible), once the default branch publishes `docs.zip`
+## Step 3 — finalize (irreversible), once `_sources/<default>.zip` is live
 
-When the default branch is reliably building + publishing `docs.zip` under the new CI
-(it has had a green `ci.yml` run on a push), delete `gh-pages`:
+When the deployed site serves `_sources/<default>.zip` (the cutover seed gets you there;
+or, later, the default branch building `docs.zip` itself keeps it fresh), delete
+`gh-pages`:
 
 ```bash
 scripts/migrate.sh ORG/REPO --delete-gh-pages
 ```
 
-This **guards** the deletion: it refuses unless the default branch has a successful
-`ci.yml` push run carrying a live (non-expired) `docs` artifact — i.e. the default
-branch really is publishing `docs.zip`, so the new model can reconstruct it without
-`gh-pages`. It then re-verifies the live site and asks you to type the repo name
-before deleting. After this, the `gh-pages` rollback is gone.
+This **guards** the deletion: it refuses unless `https://ORG.github.io/REPO/_sources/<default>.zip`
+returns `200` — i.e. the deployed site holds a durable copy of the default branch, so
+the new model can reconstruct `/main/` without `gh-pages`. It then re-verifies the live
+site, asks you to type the repo name, deletes `gh-pages`, **and deletes the seed
+release** (the in-site `_sources` copy supersedes it). After this, the rollback is gone.
 
 ## Rollback
 
