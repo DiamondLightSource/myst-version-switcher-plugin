@@ -42,7 +42,6 @@ site:
     # default flattened /directive.
     folders: true
     logo: images/dls-logo.svg
-    logo_text: myst-version-switcher-plugin
     # Pin the favicon to the bundled DLS logo so `myst build` never fetches the
     # default favicon from mystmd.org (a flaky remote fetch that intermittently
     # fails the build).
