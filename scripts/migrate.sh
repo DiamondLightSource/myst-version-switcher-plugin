@@ -17,8 +17,8 @@
 # the durable source; gh-pages is no longer needed and deleting it is split off behind
 # a guard:
 #
-#   cutover  (default)          backfill → seed → flip Pages → deploy → verify, STOP
-#                               (gh-pages retained as the rollback)
+#   cutover  (default)          backfill → seed → flip Pages + open env policy →
+#                               deploy → verify, STOP (gh-pages retained as the rollback)
 #   finalize (--delete-gh-pages) guard _sources/<default>.zip is live → re-verify →
 #                               delete gh-pages + the seed release  (rollback dies here)
 #
@@ -255,6 +255,17 @@ echo "-- 2. Flipping Pages source → GitHub Actions --"
 echo "   (gh-pages still exists after this and is the rollback: set the source"
 echo "    back to 'Deploy from a branch' to restore serving with no data lost.)"
 gh api --method PUT "repos/$REPO/pages" -f build_type=workflow
+
+# --- Allow deploys from any ref in the github-pages environment -------------
+# Under the nested-publish model, internal PRs and tags deploy from THEIR OWN ref
+# (publish runs inside their CI run), so the github-pages environment's
+# deployment-branch policy must allow those refs or deploy-pages is rejected by the
+# environment. Set it to "no restriction" (deployment_branch_policy: null) so any
+# branch/tag can deploy. Idempotent; PUT creates the environment if absent.
+echo
+echo "-- 2b. Allowing github-pages deploys from any branch/tag --"
+echo '{"deployment_branch_policy":null}' \
+  | gh api --method PUT "repos/$REPO/environments/github-pages" --input - >/dev/null
 
 # --- Trigger a deploy -------------------------------------------------------
 echo

@@ -41,15 +41,32 @@ Two consequences drive the whole procedure:
 
 - `gh` authenticated with **repo-admin** on the target repo (flipping the Pages
   source needs admin; a CI token can't — which is why this is a local script).
-- Land the new pipeline + `myst.yml` changes from the
-  [tutorial](../tutorials/adding-to-a-fresh-repo.md) as **one PR, and merge it into
-  your default branch.** Merging is safe: `gh-pages` keeps serving until you flip the
-  Pages source, so the only effect is that the default branch's CI now produces a
-  `docs.zip` artifact — which is exactly the precondition the deletion later checks
-  for.
+- Prepare the new pipeline + `myst.yml` changes from the
+  [tutorial](../tutorials/adding-to-a-fresh-repo.md) as **one PR**, but **don't merge it
+  (or let its `publish` deploy) until the cutover has seeded the default branch** — the
+  cutover (Step 2) seeds first, then uses that PR's CI as the first Actions deploy, and
+  you merge afterwards. See the ordering note below.
 - Run the script from **inside a clone of the target repo**: it reads the repo's tags
   and `gh-pages` tree from the working directory (it fetches `origin/gh-pages` for
   you). Running it from anywhere else will find no tags/branches.
+
+> **Ordering — seed before any publish.** Flipping the Pages source to GitHub Actions
+> is **non-destructive**: the last `gh-pages` deployment keeps serving until the first
+> Actions deploy supersedes it ([confirmed
+> here](https://github.com/orgs/community/discussions/158055)), so there is no downtime
+> and no "blank site" window. The one rule that matters is **seed the default branch
+> before any v0.7.0 `publish` runs** — a `publish` reassembles and *replaces the whole
+> site*, so if it runs before a durable `main` exists it drops `/<default>/`. The
+> cutover does exactly that (seed first, deploy second), which is why you run it
+> **before merging the pipeline PR**, and let that PR's CI be the first deploy.
+>
+> This matters most if your repo **already serves Pages from GitHub Actions** (you are
+> upgrading an earlier Actions deploy, not a classic `gh-pages` branch): there an
+> internal PR's `publish` deploys live the moment it runs, so an un-seeded publish would
+> drop `/<default>/` immediately. Seeding first — with `guard-default-branch` at its
+> default `true` — makes every publish safe. (On a classic `gh-pages` repo a too-early
+> publish instead just fails closed, since `deploy-pages` won't publish until the flip;
+> seeding first keeps it green regardless.)
 
 ## Step 1 — always dry-run
 
@@ -81,14 +98,20 @@ It executes, in order, then **stops with `gh-pages` intact**:
    `gh-pages` directory and whose Release lacks a `docs.zip`, zip that directory as a
    bare `html/` root and attach it as `docs.zip`. Tags containing `/` are skipped.
    This is first: the reconstructed site is built from these assets.
-2. **Flip the Pages source → GitHub Actions** (`gh api PUT …/pages`). `deploy-pages`
-   refuses to publish unless the source is already "GitHub Actions", so this must
-   precede the deploy.
-3. **Trigger a deploy.** Pass `--deploy-workflow <file>` to dispatch one (your
-   `publish.yml` `workflow_dispatch` works: the default branch is *gathered* from its
-   latest CI artifact, so a pure dispatch still reconstructs `main` + the backfilled
-   releases), or push to the default branch / re-run its CI when prompted.
-4. **Verify.** The script fetches `switcher.json` and checks every listed version URL
+2. **Seed the default branch.** Capture the gh-pages `<default>/` tree as a published
+   `pages-default-seed` release, so the default branch is durable *before* any publish
+   runs (the whole point of the ordering note above).
+3. **Flip the Pages source → GitHub Actions** and **open the `github-pages`
+   environment's deployment-branch policy** (to "no restriction", so deploys from
+   PR/tag refs — which run under the nested-publish model — aren't rejected). Both are
+   done for you. The flip is non-destructive: the last `gh-pages` deployment keeps
+   serving until the first Actions deploy; `deploy-pages` only publishes once the source
+   is "GitHub Actions", so this precedes the deploy.
+4. **Trigger the first Actions deploy.** Pass `--deploy-workflow <file>` to dispatch
+   one, or — the recommended path — when prompted, open/merge the pipeline PR (or push
+   the default branch) so its CI's `publish` runs. It gathers the default branch from
+   the seed and persists `_sources/<default>.zip`.
+5. **Verify.** The script fetches `switcher.json` and checks every listed version URL
    returns `200`. Probes are cache-busted, so a too-early probe can't pin a cached
    `404` at the CDN.
 
@@ -113,6 +136,17 @@ the new model can reconstruct `/main/` without `gh-pages`. It then re-verifies t
 site, asks you to type the repo name, deletes `gh-pages`, **and deletes the seed
 release** (the in-site `_sources` copy supersedes it). After this, the rollback is gone.
 
+> **Caveat — old pages that reference `gh-pages` at runtime.** Docs built under the old
+> model sometimes embed a hardcoded version switcher that reads `gh-pages` live — via
+> the GitHub *contents API* (`…/contents?ref=gh-pages`) or by loading assets from a
+> `gh-pages` URL. Those pages are reconstructed verbatim from their `docs.zip`, so the
+> references remain. After deletion, a switcher that only *queries the API* degrades
+> harmlessly: the request `404`s, its populate script throws an uncaught promise
+> (console-only), and the version list simply empties — the page itself is intact.
+> Anything that *loads assets* (CSS/JS/images) from `gh-pages`, though, will break.
+> `grep` your old release pages for `gh-pages` before finalizing and accept (the
+> switcher emptying is usually fine) or fix what you find.
+
 ## Rollback
 
 Between the cutover (step 2) and the deletion (step 3), `gh-pages` is no longer
@@ -126,7 +160,7 @@ step.
 | flag | effect |
 |---|---|
 | `--dry-run` | Print the backfill plan + probe the current site only; upload nothing; skip flip/deploy. |
-| `--delete-gh-pages` | **The only mode that deletes.** Guard that the default branch publishes `docs.zip`, re-verify, then delete `gh-pages`. |
+| `--delete-gh-pages` | **The only mode that deletes.** Guard that `_sources/<default>.zip` is live (`200`), re-verify, then delete `gh-pages` **and the seed release**. |
 | `--pages-ref <ref>` | `gh-pages` ref to read (default `origin/gh-pages`). |
 | `--deploy-workflow <file>` | `gh workflow run <file>` to trigger the cutover deploy; omit to be prompted to deploy by hand. |
 | `--yes` | Skip the typed confirmation before deleting `gh-pages` (with `--delete-gh-pages`; use with care). |
