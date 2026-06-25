@@ -9,48 +9,49 @@
 #   - the destructive step wants a human watching with their own `gh auth`;
 #   - it leaves no workflow_dispatch stub behind in each consumer repo.
 #
-# TWO PHASES, because the new model's sources differ in durability. Releases become
-# permanent once their docs.zip is attached (backfill). The DEFAULT BRANCH has no
-# permanent source until it builds docs.zip itself — so we SEED it: capture the
-# gh-pages <default>/ tree as a published seed release, which the cutover deploy reads
-# and persists to _sources/<default>.zip in the site. After that the in-site copy is
-# the durable source; gh-pages is no longer needed and deleting it is split off behind
-# a guard:
+# TWO RUNS, with your pipeline PR doing the deploy in between, because the new model's
+# sources differ in durability. Releases become permanent once their docs.zip is
+# attached (backfill). The DEFAULT BRANCH has no permanent source until it builds
+# docs.zip itself — so we SEED it: capture the gh-pages <default>/ tree as a published
+# seed release, which the first publish reads and persists to _sources/<default>.zip in
+# the site. After that the in-site copy is the durable source; gh-pages is no longer
+# needed and deleting it is split off behind a guard:
 #
-#   cutover  (default)          backfill → seed → flip Pages + open env policy →
-#                               deploy → verify, STOP (gh-pages retained as the rollback)
-#   finalize (--delete-gh-pages) guard _sources/<default>.zip is live → re-verify →
-#                               delete gh-pages + the seed release  (rollback dies here)
+#   1. prepare (default)        backfill releases → seed default branch → flip Pages
+#                               source to Actions + open the env policy, then STOP.
+#                               Uploads + flips only; no deploy. (Flipping is
+#                               non-destructive: the last gh-pages deployment keeps
+#                               serving until the first Actions deploy supersedes it.)
+#   2. (you) open + merge your pipeline PR — its CI does the first publish, which reads
+#      the seed and persists _sources/<default>.zip.
+#   3. finalize (--delete-gh-pages)  guard _sources/<default>.zip is live → verify the
+#                               live site → delete gh-pages + the seed release.
 #
-# Until the finalize step, gh-pages still EXISTS (just unserved) and is the rollback:
-# flip the Pages source back to "Deploy from a branch" to restore serving instantly.
+# Between runs 1 and 3, gh-pages still EXISTS (just unserved) and is the rollback: flip
+# the Pages source back to "Deploy from a branch" to restore serving instantly.
 #
 # Usage:
 #   scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>]
-#                                 [--deploy-workflow <file>]
 #   scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes]
 #
 #   --dry-run            print the backfill + seed plan + probe the current site only;
-#                        upload nothing, skip the flip / deploy.
-#   --delete-gh-pages    finalize: guard _sources/<default>.zip is live, re-verify,
-#                        then delete gh-pages + the seed release. The only mode that
-#                        deletes.
+#                        upload nothing, skip the flip.
+#   --delete-gh-pages    finalize: guard _sources/<default>.zip is live, verify the live
+#                        site, then delete gh-pages + the seed release. The only mode
+#                        that deletes.
 #   --pages-ref <ref>    gh-pages ref to read (default: origin/gh-pages)
-#   --deploy-workflow    `gh workflow run <file>` to trigger the cutover deploy;
-#                        omit to be prompted to trigger a deploy by hand.
 #   --yes                skip the typed confirmation before deleting gh-pages.
 set -euo pipefail
 
 REPO=""
 PAGES_REF="origin/gh-pages"
-DEPLOY_WORKFLOW=""
 DRY_RUN=false
 DELETE_GH_PAGES=false
 ASSUME_YES=false
 SEED_TAG="pages-default-seed"   # published seed release holding the default branch's docs
 
 usage() {
-  echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--deploy-workflow <file>]" >&2
+  echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>]" >&2
   echo "       scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes]" >&2
 }
 
@@ -60,7 +61,6 @@ while [ $# -gt 0 ]; do
     --delete-gh-pages) DELETE_GH_PAGES=true; shift ;;
     --yes) ASSUME_YES=true; shift ;;
     --pages-ref) PAGES_REF="$2"; shift 2 ;;
-    --deploy-workflow) DEPLOY_WORKFLOW="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) if [ -z "$REPO" ]; then REPO="$1"; else echo "unexpected arg: $1" >&2; exit 2; fi; shift ;;
@@ -195,8 +195,8 @@ guard_default_durable() {
   if [ "$code" != "200" ]; then
     echo "::error::REFUSING to delete gh-pages: $url is not live ($code)." >&2
     echo "  The deployed site has no durable copy of '$default' yet, so gh-pages is still" >&2
-    echo "  the only recoverable copy. Run a deploy (seed, or the default branch's own CI)" >&2
-    echo "  so assemble persists _sources/$default.zip, then retry." >&2
+    echo "  the only recoverable copy. Open/merge the pipeline PR so its publish persists" >&2
+    echo "  _sources/$default.zip into the site, then retry." >&2
     exit 1
   fi
   echo "   ok: $url is live — '$default' is durable independently of gh-pages"
@@ -205,13 +205,13 @@ guard_default_durable() {
 echo "== migrate: $REPO (pages-ref=$PAGES_REF, dry-run=$DRY_RUN, delete=$DELETE_GH_PAGES) =="
 
 # ============================================================================
-# Finalize: --delete-gh-pages. Guard → re-verify → delete. Nothing else.
+# Finalize: --delete-gh-pages. Guard → verify → delete. Nothing else.
 # ============================================================================
 if $DELETE_GH_PAGES; then
   echo
   guard_default_durable
   echo
-  echo "-- Re-verifying the live site before deleting gh-pages --"
+  echo "-- Verifying the live site before deleting gh-pages --"
   if ! verify; then
     echo
     echo "Verification FAILED — NOT deleting gh-pages. Flip the Pages source back to" >&2
@@ -235,7 +235,8 @@ if $DELETE_GH_PAGES; then
 fi
 
 # ============================================================================
-# Cutover: backfill → seed → flip → deploy → verify, then STOP (gh-pages retained).
+# Prepare: backfill → seed → flip + open env policy, then STOP (gh-pages retained).
+# The first deploy is your pipeline PR's own publish; verification is the 2nd run.
 # ============================================================================
 backfill
 seed_default_branch
@@ -245,7 +246,7 @@ if $DRY_RUN; then
   echo "-- (dry-run) probing current site --"
   verify || echo "(dry-run probe failed — expected if the site isn't deployed yet)"
   echo
-  echo "Dry run complete: backfill + seed plan shown (nothing uploaded); flip/deploy skipped."
+  echo "Dry run complete: backfill + seed plan shown (nothing uploaded); flip skipped."
   exit 0
 fi
 
@@ -267,34 +268,14 @@ echo "-- 2b. Allowing github-pages deploys from any branch/tag --"
 echo '{"deployment_branch_policy":null}' \
   | gh api --method PUT "repos/$REPO/environments/github-pages" --input - >/dev/null
 
-# --- Trigger a deploy -------------------------------------------------------
 echo
-echo "-- 3. Triggering a deploy --"
-if [ -n "$DEPLOY_WORKFLOW" ]; then
-  gh workflow run "$DEPLOY_WORKFLOW" --repo "$REPO"
-  echo "   dispatched $DEPLOY_WORKFLOW; wait for it to finish before continuing."
-else
-  echo "   No --deploy-workflow given. Trigger a deploy now (push to the default"
-  echo "   branch / re-run the latest CI), wait for it to finish, then continue."
-fi
-read -r -p "   Press Enter once the deploy has completed… " _
-
-# --- Verify -----------------------------------------------------------------
+echo "Prepared. Releases are backfilled, the default branch is seeded ('$SEED_TAG'),"
+echo "and Pages is served from GitHub Actions (gh-pages RETAINED as the rollback —"
+echo "flip the source back to 'Deploy from a branch' to restore it instantly)."
 echo
-echo "-- 4. Verifying the reconstructed site --"
-if ! verify; then
-  echo
-  echo "Verification FAILED. gh-pages is intact — flip the Pages source back to" >&2
-  echo "'Deploy from a branch / gh-pages' to roll back." >&2
-  exit 1
-fi
-
-echo
-echo "Cutover complete. The site is served from GitHub Actions; gh-pages is RETAINED"
-echo "as the rollback. This deploy should have persisted the default branch durably to"
-echo "_sources/<default>.zip (from the seed); once that is live, gh-pages is no longer"
-echo "the only copy."
-echo
-echo "Finalize (deletes gh-pages AND the seed release) once _sources/<default>.zip is"
-echo "live in the site — the finalize guard checks exactly that:"
-echo "    scripts/migrate.sh $REPO --delete-gh-pages"
+echo "Next:"
+echo "  1. Open + merge your pipeline PR. Its CI runs the first publish, which reads"
+echo "     the seed and persists _sources/<default>.zip into the deployed site."
+echo "  2. Once that publish has deployed, finalize (verify + delete gh-pages and the"
+echo "     seed). The guard checks _sources/<default>.zip is live first:"
+echo "         scripts/migrate.sh $REPO --delete-gh-pages"
