@@ -44,14 +44,22 @@ will generate it on your first deploy.
 In **Settings → Pages**, set **Source** to **GitHub Actions** (not "Deploy from a
 branch"). `deploy-pages` refuses to publish otherwise.
 
-## 3. Add a `ci.yml` that calls the shared workflows
+## 3. Add the `ci.yml` (build · release · publish)
 
-You don't copy any workflows into your repo — you **call** this project's two reusable
-workflows by full path, pinned to `<tag>`. `docs.yml` builds and uploads the `docs`
-artifact for every event (including fork PRs); `publish.yml` reconstructs the whole
-versioned site and deploys it, nested as a job that runs **only for internal events**
-on your repo (the canonical-repo + non-fork guard). Fork PRs build to verify but never
-reach a write token.
+This is the one workflow file you add. You don't copy the build/publish logic into your
+repo — you **call** this project's two reusable workflows by full path, pinned to
+`<tag>`. Three jobs:
+
+- **`docs`** — `docs.yml` builds your site at the versioned `BASE_URL` and uploads the
+  `docs` artifact, for every event (fork PRs included).
+- **`release`** — a small tag-only job that attaches the built `docs.zip` to the GitHub
+  Release. **Required:** that asset is a tag's *only* durable source (tags get no
+  `_sources/` copy, unlike the default branch), so without it a release drops on the
+  next deploy.
+- **`publish`** — `publish.yml` reconstructs the whole versioned site and deploys it,
+  nested so its status shows on the PR/commit, but it runs **only for internal events**
+  (the canonical-repo + non-fork guard). Fork PRs build to verify but never reach a
+  write token.
 
 ```yaml
 # .github/workflows/ci.yml
@@ -68,7 +76,14 @@ jobs:
       # uv and Node are preinstalled, so this can be make / tox / npx / npm.
       build-command: myst build --html      # e.g. make docs · tox -e docs · npm ci && npm run docs
 
-  # a tag-only release job attaching docs.zip — REQUIRED once you cut releases (step 6).
+  release:
+    needs: [docs]
+    if: github.ref_type == 'tag'            # tag pushes only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                       # create the Release + attach assets
+    steps:
+      # ↓ paste the two steps from the literalinclude below ↓
 
   publish:
     needs: [docs]
@@ -85,6 +100,17 @@ jobs:
       pages: write
       id-token: write
       statuses: write
+```
+
+The `release` job's `steps:` are exactly what this repo's own `_release.yml` runs (minus
+its plugin-specific `version-switcher.mjs` handling) — drop these in under `steps:`
+above (`download-artifact` pulls the `docs` artifact; `action-gh-release`'s `files: "*"`
+attaches everything in the working directory, here just that `docs.zip`):
+
+```{literalinclude} ../../.github/workflows/_release.yml
+:language: yaml
+:start-after: docs-literalinclude:release-steps:start
+:end-before: docs-literalinclude:release-steps:end
 ```
 
 That's the whole integration. `build-command` is the only thing most repos customise:
@@ -132,34 +158,31 @@ runs inside their CI run), the `github-pages` environment's deployment policy mu
 allow those refs. In **Settings → Environments → github-pages**, it is recommended
 to set **Deployment branches and tags** to **No restriction**.
 
-## 5. First deploy
+## 5. Push your branch and open a PR
 
-Push to `main`. CI builds `main`, the `publish` job assembles a single-entry
-`switcher.json` and an `index.html` redirecting to `main/`, and deploys. Visit
-`https://ORG.github.io/REPO/` — the redirect lands you on `main/` with the switcher
-showing one entry. (The single-entry first deploy is graceful by design; no release
-is required.)
+Steps 2 and 4 are repo settings (done once in the UI); steps 1 and 3 are file changes —
+commit them on a branch and open a PR. On the PR you'll see:
 
-## 6. Add the release job (required for versioned releases)
+- **`docs / build`** go green — it builds your docs at the versioned `BASE_URL` and
+  uploads the `docs` artifact. This runs for every PR, forks included.
+- **`publish / publish`** runs for an *internal* PR (a branch in your own repo) and
+  deploys a preview of just this PR at `https://ORG.github.io/REPO/pr-<n>/`, linked from
+  the PR's checks/Deployments. A **fork** PR builds but never auto-publishes (its token
+  is read-only) — use the opt-in from step 3 to preview one.
 
-`assemble` reconstructs each released version from a **`docs.zip` asset on its GitHub
-Release** — that asset is the only durable source for a tag (unlike the default branch,
-tags get no `_sources/` copy). Without a job that attaches it, a tag's docs appear only
-on its *own* deploy and **drop on the next** unrelated deploy. So add a tag-only job —
-gated with `if: github.ref_type == 'tag'`, `runs-on: ubuntu-latest`, and
-`permissions: { contents: write }` — whose steps download the build's `docs` artifact
-and attach `docs.zip` to the Release. Those steps are exactly what this repo's
-`_release.yml` runs (minus its plugin-specific `version-switcher.mjs` handling):
+> **First-time exception:** on a brand-new repo the `publish` check is **red on this
+> setup PR** — there's no `main` build yet for the versioned site to anchor on, and the
+> default-branch guard refuses to publish a site missing it. It clears the moment you
+> merge (step 6). Every PR after that previews normally.
 
-```{literalinclude} ../../.github/workflows/_release.yml
-:language: yaml
-:start-after: docs-literalinclude:release-steps:start
-:end-before: docs-literalinclude:release-steps:end
-```
+## 6. Merge to main — your first deploy
 
-`actions/download-artifact` pulls the `docs` artifact `docs.yml` uploaded (the
-`docs.zip`); `action-gh-release`'s `files: "*"` then attaches everything in the working
-directory — here, just that `docs.zip` — to the tag's Release.
+Merging pushes to `main`, which builds `main` and runs `publish`: it assembles a
+single-entry `switcher.json` and an `index.html` redirecting to `main/`, and deploys.
+Visit `https://ORG.github.io/REPO/` — the redirect lands you on `main/` with the
+switcher showing one entry. (The single-entry first deploy is graceful by design; no
+release required.) From here on, every push to `main` redeploys and every internal PR
+gets its own `/pr-<n>/` preview.
 
 ## 7. Cut your first release
 
@@ -167,11 +190,12 @@ directory — here, just that `docs.zip` — to the tag's Release.
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-On the next deploy, `assemble` gathers that release, flags it `preferred` (★),
-creates the `stable/` alias pointing at it, and the root redirect now targets the
-constant `stable/` URL. Your switcher now lists `main` and `1.0.0`, and
-`https://ORG.github.io/REPO/stable/` always resolves to the latest release — a
-stable URL for cross-project `objects.inv` references.
+The tag build runs, the **`release`** job attaches its `docs.zip` to the GitHub Release,
+and the next deploy's `assemble` gathers that release, flags it `preferred` (★), creates
+the `stable/` alias pointing at it, and points the root redirect at the constant
+`stable/` URL. Your switcher now lists `main` and `1.0.0`, and
+`https://ORG.github.io/REPO/stable/` always resolves to the latest release — a stable
+URL for cross-project `objects.inv` references.
 
 ## Where next
 
