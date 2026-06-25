@@ -39,19 +39,8 @@ Two consequences drive the procedure:
    persists to `_sources/<branch>.zip`. After that the in-site copy carries `/<default>/`
    — *before* the default branch ever builds docs itself.
 
-## Why this order
-
-- **Flipping the Pages source to GitHub Actions is non-destructive.** The last
-  `gh-pages` deployment keeps serving until the first Actions deploy supersedes it
-  ([community discussion #158055](https://github.com/orgs/community/discussions/158055)),
-  so run 1 can flip up front with no downtime and no blank window.
-- **Seed the default branch before any publish runs.** A publish reassembles and
-  *replaces the entire site*, so a publish that runs before a durable `<default>` exists
-  would drop `/<default>/`. Run 1 seeds first; only then does the pipeline PR publish.
-  This is what makes the pipeline PR's own publish safe — including on a repo that
-  **already serves Pages from GitHub Actions**, where a publish deploys live the moment
-  it runs (with `guard-default-branch` at its default `true`, an un-seeded publish would
-  otherwise fail rather than silently drop the branch).
+For *why* this ordering is safe — the non-destructive source flip and the
+seed-before-publish rule — see the [architecture explanation](../explanations/architecture.md#migrating-from-gh-pages).
 
 > **The load-bearing rule:** *keep `gh-pages` until `_sources/<default>.zip` is live in
 > the deployed site.* Run 1's seed gets you there on the first publish; the
@@ -63,9 +52,6 @@ Two consequences drive the procedure:
 - `gh` authenticated with **repo-admin** on the target repo (flipping the Pages source
   and setting the environment policy need admin; a CI token can't — which is why this is
   a local script).
-- Prepare the new pipeline + `myst.yml` changes from the
-  [tutorial](../tutorials/adding-to-a-fresh-repo.md) as **one PR** — but **don't merge
-  it until run 1 has seeded the default branch** (you merge it as step 3 below).
 - Run the script from **inside a clone of the target repo**: it reads the repo's tags
   and `gh-pages` tree from the working directory (it fetches `origin/gh-pages` for you).
   Running it from anywhere else will find no tags/branches.
@@ -106,8 +92,11 @@ No deploy is triggered here — that is your pipeline PR's job.
 
 ## Step 3 — publish, via your pipeline PR
 
-Open and merge the pipeline PR. Its CI runs the first **publish**: with the source on
-Actions, the seed present, and the env policy open, it reconstructs the whole site
+Prepare the new pipeline + `myst.yml` changes from the
+[tutorial](../tutorials/adding-to-a-fresh-repo.md) on a branch, and **open the PR only
+after run 1 has seeded the default branch** (so its first publish is safe). Then open
+and merge it: its CI runs the first **publish** — with the source on Actions, the seed
+present, and the env policy open, it reconstructs the whole site
 (default branch from the seed, the backfilled releases, any open PRs) and deploys it,
 **persisting `_sources/<default>.zip`** into the published site. Merging then has the
 default branch build its own docs, so `_sources/<default>.zip` refreshes with real
