@@ -146,17 +146,34 @@ jobs:
         with:
           path: ${{ steps.site.outputs.dir }}
 
+      # deploy-pages stamps the deployment with pages_build_version = GITHUB_SHA
+      # (src/internal/context.js: `buildVersion: process.env.GITHUB_SHA`). The Pages
+      # backend time-windows-dedups on that build version: a deploy reusing a build
+      # version already deployed within the window is acked but DROPPED — the origin
+      # keeps the prior artifact while deploy-pages still reports success. A release
+      # tagged on the merge commit reuses the just-deployed default-branch SHA within
+      # that window, so its (correct) artifact is silently dropped — the "publish
+      # wedged after tag-after-merge" failure, confirmed 2026-06-25 (same SHA across
+      # main/tag/manual deploys; only the tag, ~2.5min behind main, wedged). Override
+      # GITHUB_SHA for this step alone so each run posts a UNIQUE build version — no
+      # collision, immediate serve. context.js reads GITHUB_SHA ONLY for buildVersion,
+      # so nothing else in the action is affected.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        env:
+          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}
 
       # deploy-pages reports success once the deployment RECORD flips active — even
       # if the Pages backend silently fails to update the SERVED origin (a wedged
       # site can serve a stale artifact indefinitely; see the 2026-06 incident where
       # a gh-pages→Actions cutover froze the origin while every deploy reported OK).
-      # Confirm the live switcher.json byte-matches the one we just assembled, polling
-      # for up to 60s to let the origin/CDN propagate. A mismatch fails the run, so a
-      # stale origin surfaces as a red check instead of silently serving old docs.
+      # The unique build version above prevents the tag-after-merge dedup wedge; this
+      # is the backstop that turns any *other* stale-origin failure into a red check
+      # instead of silently serving old docs. Confirm the live switcher.json
+      # byte-matches the one we just assembled, polling up to 60s for the origin/CDN
+      # to propagate; on failure, dump the origin headers (a frozen etag/last-modified
+      # is the wedge signature).
       - name: Verify the deployed origin matches what we assembled
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
@@ -170,30 +187,22 @@ jobs:
           # comparison is robust to a curl/file trailing-newline difference.
           want=$(cat "$local_json")
           url="${PAGE_URL%/}/switcher.json"
-          # DIAGNOSTIC: log the origin's response headers each poll. A frozen origin
-          # keeps the SAME etag/last-modified across the whole window while `age`
-          # climbs (the served artifact never changes), distinguishing a real wedge
-          # from slow CDN propagation. Window stretched 60→180s purely to make that
-          # signature unmistakable on this release; revert once we have the data.
-          hdr() { curl -sI "$url?cb=$(date +%s%N)" \
-            | grep -iE '^(HTTP/|etag|last-modified|age|x-served-by|x-cache|x-github-request-id)' \
-            | tr -d '\r' | paste -sd' ' -; }
-          echo "::group::origin baseline headers (before verify loop)"; hdr; echo "::endgroup::"
-          deadline=$(( $(date +%s) + 180 ))
+          deadline=$(( $(date +%s) + 60 ))
           attempt=0
           while :; do
             attempt=$((attempt + 1))
-            echo "[attempt $attempt @ $(date -u +%H:%M:%S)] $(hdr)"
             got=$(curl -fsS "$url?cb=$(date +%s%N)" || true)   # cache-bust → hit the origin
             if [ -n "$got" ] && [ "$got" = "$want" ]; then
               echo "origin matches the assembled switcher.json (attempt $attempt)"
               exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::live switcher.json still does not match the assembled one after 180s — Pages origin likely stale/wedged"
+              echo "::error::live switcher.json still does not match the assembled one after 60s — Pages origin likely stale/wedged"
+              echo "--- origin headers (frozen etag/last-modified ⇒ wedged) ---"
+              curl -sI "$url?cb=$(date +%s%N)" | grep -iE '^(HTTP/|etag|last-modified|age)' | tr -d '\r'
               echo "--- assembled ($local_json) ---"; printf '%s\n' "$want"
               echo "--- live ($url) ---"; printf '%s\n' "$got"
               exit 1
             fi
-            sleep 3
+            sleep 1
           done
