@@ -169,11 +169,14 @@ jobs:
       # a gh-pages→Actions cutover froze the origin while every deploy reported OK).
       # The caller's tag trampoline (deploy via workflow_dispatch) prevents the
       # tag-after-merge drop; this is the backstop that turns any *other* stale-origin
-      # failure into a red check instead of silently serving old docs. Confirm the
-      # live switcher.json
-      # byte-matches the one we just assembled, polling up to 60s for the origin/CDN
-      # to propagate; on failure, dump the origin headers (a frozen etag/last-modified
-      # is the wedge signature).
+      # failure into a red check instead of silently serving old docs. Confirm the live
+      # switcher.json byte-matches the one we just assembled, polling up to ~6 min — the
+      # window is generous because a release deploys TWICE in quick succession on the
+      # same SHA (the merge-to-default-branch push, then the tag trampoline), and the
+      # second (dispatch) re-serve can take a few minutes to propagate to the origin
+      # behind the first (observed ~4 min on 2026-06-25). The loop exits the instant the
+      # origin matches, so a fast/first-of-SHA deploy isn't slowed. On failure, dump the
+      # origin headers (a frozen etag/last-modified is the wedge signature).
       - name: Verify the deployed origin matches what we assembled
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
@@ -187,7 +190,8 @@ jobs:
           # comparison is robust to a curl/file trailing-newline difference.
           want=$(cat "$local_json")
           url="${PAGE_URL%/}/switcher.json"
-          deadline=$(( $(date +%s) + 60 ))
+          timeout_s=360
+          deadline=$(( $(date +%s) + timeout_s ))
           attempt=0
           while :; do
             attempt=$((attempt + 1))
@@ -197,12 +201,12 @@ jobs:
               exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::live switcher.json still does not match the assembled one after 60s — Pages origin likely stale/wedged"
+              echo "::error::live switcher.json still does not match the assembled one after ${timeout_s}s — Pages origin likely stale/wedged"
               echo "--- origin headers (frozen etag/last-modified ⇒ wedged) ---"
               curl -sI "$url?cb=$(date +%s%N)" | grep -iE '^(HTTP/|etag|last-modified|age)' | tr -d '\r'
               echo "--- assembled ($local_json) ---"; printf '%s\n' "$want"
               echo "--- live ($url) ---"; printf '%s\n' "$got"
               exit 1
             fi
-            sleep 1
+            sleep 5
           done
