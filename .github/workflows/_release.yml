@@ -16,7 +16,13 @@ jobs:
           sparse-checkout: plugins/version-switcher.mjs
       - run: cp .src/plugins/version-switcher.mjs .
 
-      # All other release artifacts from other stages (docs.zip).
+      # The two steps below are the generic release job a consumer needs (download the
+      # built docs.zip, attach it to the Release). They are literalinclude'd into
+      # docs/tutorials/adding-to-a-fresh-repo.md between these markers — keep the markers
+      # when editing. The checkout + cp above is plugin-specific (it stages
+      # version-switcher.mjs) and is deliberately left outside the markers.
+      # docs-literalinclude:release-steps:start
+      # Download every artifact produced earlier in the run (here: docs.zip).
       - name: Download artifacts
         uses: actions/download-artifact@v5
         with:
@@ -28,7 +34,8 @@ jobs:
         uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
         with:
           prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
-          files: "*"
+          files: "*"            # everything staged in the cwd — here, docs.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # docs-literalinclude:release-steps:end

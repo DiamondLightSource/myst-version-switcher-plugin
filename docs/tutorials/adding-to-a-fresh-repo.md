@@ -68,7 +68,7 @@ jobs:
       # uv and Node are preinstalled, so this can be make / tox / npx / npm.
       build-command: myst build --html      # e.g. make docs · tox -e docs · npm ci && npm run docs
 
-  # (optional) a tag-only release job attaching docs.zip + version-switcher.mjs — step 7.
+  # a tag-only release job attaching docs.zip — REQUIRED once you cut releases (step 6).
 
   publish:
     needs: [docs]
@@ -140,11 +140,28 @@ Push to `main`. CI builds `main`, the `publish` job assembles a single-entry
 showing one entry. (The single-entry first deploy is graceful by design; no release
 is required.)
 
-## 6. Cut your first release
+## 6. Add the release job (required for versioned releases)
 
-Tag a release and attach the built docs as a `docs.zip` asset (bare `html/` root) —
-the easiest way is a tag-only job in `ci.yml` that downloads the `docs` artifact and
-uploads it verbatim, alongside `version-switcher.mjs`.
+`assemble` reconstructs each released version from a **`docs.zip` asset on its GitHub
+Release** — that asset is the only durable source for a tag (unlike the default branch,
+tags get no `_sources/` copy). Without a job that attaches it, a tag's docs appear only
+on its *own* deploy and **drop on the next** unrelated deploy. So add a tag-only job —
+gated with `if: github.ref_type == 'tag'`, `runs-on: ubuntu-latest`, and
+`permissions: { contents: write }` — whose steps download the build's `docs` artifact
+and attach `docs.zip` to the Release. Those steps are exactly what this repo's
+`_release.yml` runs (minus its plugin-specific `version-switcher.mjs` handling):
+
+```{literalinclude} ../../.github/workflows/_release.yml
+:language: yaml
+:start-after: docs-literalinclude:release-steps:start
+:end-before: docs-literalinclude:release-steps:end
+```
+
+`actions/download-artifact` pulls the `docs` artifact `docs.yml` uploaded (the
+`docs.zip`); `action-gh-release`'s `files: "*"` then attaches everything in the working
+directory — here, just that `docs.zip` — to the tag's Release.
+
+## 7. Cut your first release
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
