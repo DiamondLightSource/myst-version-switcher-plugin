@@ -16,8 +16,8 @@ scripts/migrate.sh                             # operator gh-pages → durable-s
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
-.github/workflows/publish.yml                  # PUBLIC reusable: run assemble/ (checked out at job.workflow_sha) + deploy to Pages (PRIVILEGED): workflow_call (internal) + workflow_dispatch (fork-PR opt-in)
-.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / _release, then nests publish.yml for internal events
+.github/workflows/publish.yml                  # PUBLIC reusable: run assemble/ (checked out at job.workflow_sha) + deploy to Pages (PRIVILEGED): workflow_call (internal non-tag) + workflow_dispatch (tag trampoline + fork-PR opt-in)
+.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / _release, then nests publish.yml for internal non-tag events (tags trampoline via publish-tag → workflow_dispatch)
 ```
 
 ## Two halves, different lifecycles
@@ -66,15 +66,19 @@ gathered (a merged/closed PR, a deleted release) is correctly dropped — no
 ### Split build (unprivileged) from publish (privileged), but nest publish for visibility
 `ci.yml` builds + uploads the `docs` artifact for every event including fork PRs.
 It then nests the privileged `publish.yml` (`workflow_call`) as a `publish` job —
-but **only for internal events** (an internal PR, or a push to main/tag): the job's
-`if` excludes fork PRs (`head.repo.full_name != github.repository`), whose builds
-run with a read-only token and must never deploy. So publish status is **visible on
-the PR/commit** for internal work, while untrusted fork-PR code still never reaches
-a write token. A fork PR instead gets a warning step in `docs.yml`'s build job that
-links the manual opt-in (`publish.yml`'s `workflow_dispatch`).
+but **only for internal, non-tag events** (an internal PR, or a push to main): the
+job's `if` excludes fork PRs (`head.repo.full_name != github.repository`), whose
+builds run with a read-only token and must never deploy. So publish status is
+**visible on the PR/commit** for internal work, while untrusted fork-PR code still
+never reaches a write token. A fork PR instead gets a warning step in `docs.yml`'s
+build job that links the manual opt-in (`publish.yml`'s `workflow_dispatch`).
+**Tags don't nest** — a tag shares the merge commit's SHA and GitHub Pages drops a
+second same-SHA deploy unless it's a `workflow_dispatch` (deploy-pages#383), so the
+`publish-tag` job re-triggers `publish.yml` via `workflow_dispatch` instead (see
+the Publish flow below).
 
-Because publish now runs **inside the build's own CI run**, the current build isn't
-a *completed* successful run the gather can discover (and for a main/tag push the
+Because the inline publish runs **inside the build's own CI run**, the current build
+isn't a *completed* successful run the gather can discover (and for a main push the
 gather would find the *previous* build). So `ci.yml` passes `publish.yml` the build's
 version name (`needs.docs.outputs.version-name`); `publish.yml` hands it to assemble
 as `ARTIFACT_VERSION_NAME`. `publish.yml` downloads the same-run `docs` artifact and
@@ -147,9 +151,15 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
   head.repo.full_name == github.repository)`); grants `pages`/`id-token`/`statuses`
   perms to the call and passes `version-name: needs.docs.outputs.version-name`. The
   fork-PR warning is a step inside `docs.yml`'s build job (not a separate ci.yml
-  job), keeping the top-level workflow lean.
+  job), keeping the top-level workflow lean. The `publish` job's `if` also excludes
+  **tags** (`ref_type != 'tag'`) — a separate `publish-tag` job (tags only, `needs:
+  [_release]`, `actions: write`) re-triggers `publish.yml` via
+  `gh workflow run publish.yml --ref <default-branch>` (`workflow_dispatch`), because
+  a same-SHA tag deploy is silently dropped by Pages unless it's a dispatch event
+  (deploy-pages#383).
 - `publish.yml` — **assemble + deploy, privileged.** `workflow_call` (the nested
-  internal path) + `workflow_dispatch` (the fork-PR opt-in). Sparse-checks-out this
+  internal non-tag path) + `workflow_dispatch` (the tag trampoline + the fork-PR
+  opt-in). Sparse-checks-out this
   repo's `assemble/` at `job.workflow_sha` (so the scripts match the ref the consumer
   pinned `publish.yml@<ref>` to — see "Self-referencing the assemble scripts" below),
   runs `assemble.sh`, then `upload-pages-artifact` + `deploy-pages`, carrying the
@@ -175,16 +185,25 @@ Sub-workflows of `ci.yml`:
 - `_release.yml` — attaches `version-switcher.mjs` + the tag's `docs.zip` (the
   `docs` artifact, verbatim — no repack) as Release assets (tag-only).
 
-**Publish flow.** Internal PRs, `main`, and tags publish as part of the same CI run
-once lint/test/docs pass (`ci.yml`'s `publish` job → `publish.yml` injects this
-build + `assemble` gathers `main`, releases, and every other open PR → deploy), so
-the deploy is a visible check on the PR/commit. An **external fork PR** builds +
+**Publish flow.** Internal PRs and `main` publish as part of the same CI run once
+lint/test/docs pass (`ci.yml`'s `publish` job → `publish.yml` injects this build +
+`assemble` gathers `main`, releases, and every other open PR → deploy), so the deploy
+is a visible check on the PR/commit. **Tags are the exception:** a release tag shares
+the merge commit's SHA, and GitHub Pages silently drops a second deploy of an
+already-deployed SHA *unless* the event is `workflow_dispatch`
+([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)) —
+so the `publish-tag` job (after `_release`) re-triggers `publish.yml` via
+`gh workflow run` (`workflow_dispatch`), which re-gathers from durable sources (incl.
+the new release) and deploys with the origin actually updating. The dispatched run
+carries the deploy status (not the tag's CI run). An **external fork PR** builds +
 verifies in CI but does **not** auto-publish (its `publish` job is skipped); a
 maintainer runs `publish.yml` with the PR number (`workflow_dispatch` → `pr`),
 which sets a `preview-approved` commit status pinned to that **head SHA** and
 assembles — so a later push to the PR (new SHA) drops the preview until re-approved.
 `assemble` gathers an open PR's artifact via its head SHA; internal PRs always,
-fork PRs only when the SHA carries that status.
+fork PRs only when the SHA carries that status. Consumers can't dispatch `publish.yml`
+cross-repo, so they trampoline via a small `publish-dispatch.yml` wrapper (which also
+serves the fork-preview opt-in) — see the how-to.
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 
@@ -245,23 +264,35 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       build-command: make docs        # or: tox -e docs / npx … myst build / npm ci && npm run docs
-  publish:                            # internal events only (fork PRs excluded by the if)
+  publish:                            # internal, non-tag events (fork PRs + tags excluded by the if)
     needs: [docs]
     if: >-
       github.repository == 'ORG/REPO' &&
+      github.ref_type != 'tag' &&
       ( github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository )
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions: { pages: write, id-token: write, contents: read, actions: read, statuses: write }
+  publish-tag:                        # tags: re-deploy via workflow_dispatch (see how-to)
+    needs: [docs, release]
+    if: github.repository == 'ORG/REPO' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions: { actions: write }
+    steps:
+      - env: { GH_TOKEN: "${{ github.token }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" }
+        run: gh workflow run publish-dispatch.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
 ```
 
 Add a `_release.yml`-style job that attaches each tag's built `docs.zip` (bare
 `html/` root) + the plugin as Release assets so `assemble` can reconstruct released
-versions, and a small `workflow_dispatch` wrapper around `publish.yml` for the
-fork-PR opt-in (reusable workflows can't be dispatched cross-repo). See the full
-how-to + snippets in `docs/`.
+versions, and a small `publish-dispatch.yml` `workflow_dispatch` wrapper around
+`publish.yml` (reusable workflows can't be dispatched cross-repo). The wrapper is the
+**tag trampoline** target (`publish-tag` dispatches it so the deploy runs as a
+`workflow_dispatch` — required for a release's same-SHA deploy to actually go live)
+**and** the fork-PR preview opt-in (pass `pr`). See the full how-to + snippets in
+`docs/`.
 
 ## Upstreaming
 

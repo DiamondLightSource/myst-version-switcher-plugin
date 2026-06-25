@@ -116,23 +116,49 @@ manual opt-in. The privileged `publish.yml` is therefore reachable two ways, bot
 trusted: `workflow_call` (nested, internal) and `workflow_dispatch` (the maintainer
 fork opt-in).
 
-The cost of nesting is an environment-policy change: because internal PRs and tags
-now deploy from **their own ref**, the `github-pages` environment's deployment-branch
-policy must allow those refs. The alternative — triggering publish via
-`workflow_run` after CI completes — keeps deploys on the default branch only, but at
-the price of the deploy being invisible on the PR. This project chose visibility.
+The cost of nesting is an environment-policy change: because internal PRs now deploy
+from **their own ref**, the `github-pages` environment's deployment-branch policy must
+allow those refs. The alternative — triggering publish via `workflow_run` after CI
+completes — keeps deploys on the default branch only, but at the price of the deploy
+being invisible on the PR. This project chose visibility. (Tags are the exception —
+they deploy from the default-branch ref via the trampoline below, not their own ref.)
+
+### Why tags deploy via a `workflow_dispatch` trampoline
+
+A release tag is cut on the merge commit, so it shares the default branch's
+just-deployed SHA. `deploy-pages` stamps every deployment with
+`pages_build_version = GITHUB_SHA` — it has no input to change it, and the value is
+server-validated against the deploy OIDC token's commit claim, so a unique value
+can't be forced (it 404s; see [`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)).
+The Pages backend then silently **drops a second deploy of an already-deployed SHA**
+on a non-`workflow_dispatch` event — it reports success and flips the deployment
+record active, but the origin keeps serving the *first* artifact. So an inline tag
+deploy would "succeed" while the site stayed on the pre-tag build.
+
+The one documented escape hatch: a `workflow_dispatch` deploy of that same SHA
+*forces* a re-serve. So tags don't deploy inline. `ci.yml`'s `publish-tag` job (after
+`release`, so the new `docs.zip` asset exists) re-triggers `publish.yml` as a
+`workflow_dispatch`; that run re-gathers from durable sources (now including the new
+release) and deploys, and because its event is `workflow_dispatch` the origin updates.
+`main` and internal-PR deploys are the *first* of their SHA, so they serve fine inline
+and keep their PR/commit visibility. Consumers do the same by dispatching their own
+`publish-dispatch.yml` wrapper (a reusable workflow can't be dispatched cross-repo).
+The post-deploy origin-verify step in `publish.yml` backstops any residual stale
+origin by failing the run instead of serving stale docs silently.
 
 ### Why the current build is *injected*
 
-Because publish now runs *inside* the build's own CI run, that run isn't a
+Because the inline publish runs *inside* the build's own CI run, that run isn't a
 *completed* successful run yet — so `assemble`'s normal gather can't discover it. For
-a `main` or tag push it would be worse than missing: the gather would find the
-**previous** successful run and publish a build behind by one commit. So `ci.yml`
-passes the build's version name to `publish.yml`, which hands it to `assemble` as
+a `main` push it would be worse than missing: the gather would find the **previous**
+successful run and publish a build behind by one commit. So `ci.yml` passes the
+build's version name to `publish.yml`, which hands it to `assemble` as
 `ARTIFACT_VERSION_NAME`; `publish.yml` downloads this run's `docs` artifact and
 `assemble` unzips + stages it directly, **skipping the re-gather of that version**.
-Everything else still comes from durable sources. The fork opt-in path passes no current build — there the fork is
-gathered from durable sources via its approved head SHA's successful run.
+Everything else still comes from durable sources. The dispatch paths (the tag
+trampoline and the fork opt-in) pass no current build — they gather entirely from
+durable sources, the tag from its just-attached `docs.zip` Release asset and a fork
+from its approved head SHA's successful run.
 
 ## The bash / JS split inside `assemble`
 
