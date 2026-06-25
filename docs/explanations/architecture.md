@@ -53,6 +53,25 @@ whole site makes deletion self-healing: a merged PR or a deleted release simply
 isn't gathered next time, so it disappears — no `keep_files` drift, no branch to
 prune.
 
+### Migrating from gh-pages
+
+Two facts make the [cutover](../how-to/migrate-from-gh-pages.md) safe and fix its
+ordering:
+
+- **Flipping the Pages source from a branch to GitHub Actions is non-destructive.**
+  The last `gh-pages` deployment keeps serving until the first Actions deploy
+  supersedes it ([community
+  discussion #158055](https://github.com/orgs/community/discussions/158055)) — so the
+  source can be flipped up front, with no downtime and no blank window.
+- **A publish replaces the *whole* site, so the default branch must be durable before
+  any publish runs.** A publish that runs before `_sources/<default>.zip` exists would
+  drop `/<default>/`. The migration therefore *seeds* the default branch (a published
+  `pages-default-seed` release captured from the old gh-pages tree) before the first
+  publish — which is the pipeline PR's own CI. This makes that first publish safe even
+  when the repo already serves Pages from Actions (where a publish deploys live
+  immediately); with `guard-default-branch` at its default `true`, an un-seeded publish
+  fails loudly rather than silently dropping the branch.
+
 ## The `docs.zip` and version-token contracts
 
 Two small contracts let the build (in CI) and the reconstruction (in `assemble`)
