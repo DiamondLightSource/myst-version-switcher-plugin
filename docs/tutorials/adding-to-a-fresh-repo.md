@@ -57,9 +57,14 @@ repo — you **call** this project's two reusable workflows by full path, pinned
   `_sources/` copy, unlike the default branch), so without it a release drops on the
   next deploy.
 - **`publish`** — `publish.yml` reconstructs the whole versioned site and deploys it,
-  nested so its status shows on the PR/commit, but it runs **only for internal events**
-  (the canonical-repo + non-fork guard). Fork PRs build to verify but never reach a
-  write token.
+  nested so its status shows on the PR/commit, but it runs **only for internal,
+  non-tag events** (the canonical-repo + non-fork guard). Fork PRs build to verify but
+  never reach a write token.
+- **`publish-tag`** — tags can't deploy inline (a release tag shares the merge commit's
+  SHA, and GitHub Pages silently drops a second same-SHA deploy unless it's a
+  `workflow_dispatch`). So this tag-only job re-triggers the deploy as a dispatch of
+  your `publish-dispatch.yml` wrapper (below), which forces a re-serve. **Required for
+  releases to go live.**
 
 ```yaml
 # .github/workflows/ci.yml
@@ -85,10 +90,11 @@ jobs:
     steps:
       # ↓ paste the two steps from the literalinclude below ↓
 
-  publish:
+  publish:                                  # internal, non-tag events only
     needs: [docs]
     if: >-
       github.repository == 'ORG/REPO' &&
+      github.ref_type != 'tag' &&
       ( github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository )
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
@@ -100,6 +106,18 @@ jobs:
       pages: write
       id-token: write
       statuses: write
+
+  publish-tag:                              # tags: re-deploy via workflow_dispatch
+    needs: [docs, release]
+    if: github.repository == 'ORG/REPO' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write                        # dispatch the wrapper
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run publish-dispatch.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
 ```
 
 The `release` job's `steps:` are exactly what this repo's own `_release.yml` runs (minus
@@ -119,26 +137,35 @@ root, the `docs` artifact name), and `publish.yml` runs the site reconstruction
 internally — it checks out this project's `assemble` scripts at the same `<tag>` via
 `job.workflow_sha`, so there is no action or script for you to wire.
 
-### (optional) Fork-PR preview opt-in
+### The `publish-dispatch.yml` wrapper (required)
 
-Internal PRs publish automatically; fork PRs build and verify but never auto-deploy.
-To let a maintainer manually publish a fork PR's preview, add a small
-`workflow_dispatch` wrapper — a reusable workflow can't be dispatched cross-repo, so
-the wrapper lives in your repo and passes the PR number through `workflow_call`:
+A reusable workflow can't be `workflow_dispatch`'d cross-repo, so you need a tiny
+wrapper in your own repo that calls `publish.yml`. It serves **two** purposes through
+one optional `pr` input:
+
+- **Tag trampoline (no `pr`)** — `publish-tag` above dispatches it on a tag. Deploying
+  as a `workflow_dispatch` event is what makes a same-SHA tag deploy actually go live
+  (an inline tag deploy is silently dropped — see the [architecture
+  explanation](../explanations/architecture.md)). **This is why the wrapper is
+  required, not optional.**
+- **Fork-PR preview (with `pr`)** — internal PRs publish automatically; fork PRs build
+  and verify but never auto-deploy. A maintainer runs this from the Actions tab with a
+  PR number to approve that fork's current head SHA and deploy a preview (a later push
+  to the PR drops it until re-run).
 
 ```yaml
-# .github/workflows/preview-fork.yml
-name: Preview fork PR
+# .github/workflows/publish-dispatch.yml
+name: Publish (dispatch)
 on:
   workflow_dispatch:
     inputs:
-      pr: { description: Fork PR number to approve + preview, required: true }
+      pr: { description: "Fork PR number to approve + preview (leave empty to just re-deploy)", required: false, default: "" }
 jobs:
-  preview:
+  publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
-      version-name: ""          # no in-run build to inject → pure durable gather
-      pr: ${{ inputs.pr }}      # pins the fork's head SHA as preview-approved, then assembles
+      version-name: ""              # no in-run build to inject → pure durable gather
+      pr: ${{ inputs.pr }}          # empty → plain re-deploy; set → pin that fork head SHA as preview-approved
     permissions:
       contents: read
       actions: read
@@ -147,9 +174,8 @@ jobs:
       statuses: write
 ```
 
-Run it from the Actions tab with the PR number. It approves that fork PR's current
-head commit and deploys a preview; a later push to the PR (new SHA) drops the preview
-until you re-run it.
+If you point `docs.yml`'s fork-preview warning at this file, also set
+`preview-workflow: publish-dispatch.yml` on the `docs` job.
 
 ## 4. Allow the deploying refs in the `github-pages` environment
 

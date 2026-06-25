@@ -42,8 +42,15 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 Reconstructs the whole site and deploys it to Pages. Carries the `github-pages`
 environment, `concurrency: pages`, and `pages`/`id-token`/`statuses` write permissions.
 Reachable two ways: `workflow_call` (nested by the consumer's `ci.yml` for internal
-events) and `workflow_dispatch` (the maintainer fork-PR opt-in, for this repo's own
-copy). The canonical-repo guard lives in the **caller**, so the workflow stays generic.
+**non-tag** events) and `workflow_dispatch`. The dispatch path covers both the tag
+trampoline and the fork-PR opt-in — **tags must deploy via `workflow_dispatch`**, since
+GitHub Pages silently drops a second deploy of an already-deployed SHA (a release tag
+shares the merge commit's SHA) unless the event is `workflow_dispatch`
+([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383); see
+the [architecture explanation](../explanations/architecture.md)). Consumers dispatch a
+small `publish-dispatch.yml` wrapper (a reusable workflow can't be dispatched
+cross-repo). The canonical-repo guard lives in the **caller**, so the workflow stays
+generic.
 
 It self-checks-out this repo's `assemble/` scripts at `job.workflow_sha` /
 `job.workflow_repository` (the `job` context resolves to the reusable file, not the
