@@ -49,6 +49,43 @@ this. Deleting `gh-pages` is the **separate, gated final run** — never part of
 and it removes the seed release too.
 :::
 
+## Optional: rehearse on a fork first
+
+To de-risk the real migration, run the whole thing on a fork before touching the
+upstream site. A fork copies the repo's `gh-pages` branch and release tags, so the
+migration has the same inputs — and it deploys to *your* `github.io`, never upstream's.
+
+1. **Fork the repo and enable Actions on the fork** (the **Actions** tab → enable
+   workflows; forks start with Actions disabled). You have admin on your own fork,
+   which is what the Pages-source flip in step 2 needs.
+2. **Run `migrate.sh` against the fork**, from a clone of it — dry-run first, then for
+   real:
+
+   ```bash
+   scripts/migrate.sh FORKORG/REPO --dry-run
+   scripts/migrate.sh FORKORG/REPO
+   ```
+
+3. **Point the publish guard at your fork.** The pipeline's `publish` job is gated
+   `if: github.repository == 'ORG/REPO'` so only the canonical repo deploys — on a fork
+   that is false, so nothing publishes. On your pipeline branch, comment that line out
+   (or set it to `FORKORG/REPO`) so the fork deploys.
+4. **Open and merge the pipeline PR on the fork**, working on the fork's `main`. Its CI
+   runs the first publish and deploys to `https://FORKORG.github.io/REPO/` — open that
+   and check the site and switcher.
+5. **When it works, undo the trial change and go upstream.** Restore the guard to
+   `github.repository == 'ORG/REPO'` (uncomment / set it back) and open the real PR
+   against upstream, then follow the steps below on the upstream repo.
+
+:::{note} What the fork trial does and doesn't cover
+It exercises the full prepare → publish path (backfill, seed, the first deploy that
+persists `_sources/<default>.zip`), and you can even rehearse the destructive finalize
+(`migrate.sh FORKORG/REPO --delete-gh-pages`) without risk — it only touches the fork.
+The `<tag>` pins still resolve to this project's upstream releases, so the reusable
+workflows behave identically. The only path it doesn't auto-cover is a release: push a
+tag to the fork if you also want to rehearse the tag re-dispatch.
+:::
+
 ## Before you start
 
 - `gh` authenticated with **repo-admin** on the target repo (flipping the Pages source
