@@ -8,8 +8,10 @@ version switcher and a versioned GitHub Pages deployment. By the end you will ha
 - a `stable/` alias pointing at your latest release.
 
 It assumes a repo that already builds docs with `myst build --html` from a `docs/`
-directory. Replace `ORG/REPO` throughout, and pin a real `<tag>` from this project's
-[releases](https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases).
+directory. Replace `ORG/REPO` throughout. The snippets below are pinned to the
+latest release (`__LATEST_TAG__`); bump that pin to any version from this project's
+[releases](https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases)
+when you need a different one.
 
 ## 1. Add the plugin to your MyST project
 
@@ -19,7 +21,7 @@ In `docs/myst.yml`, load the plugin from its release asset and route a navbar pa
 # docs/myst.yml
 project:
   plugins:
-    - https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases/download/<tag>/version-switcher.mjs
+    - https://github.com/DiamondLightSource/myst-version-switcher-plugin/releases/download/__LATEST_TAG__/version-switcher.mjs
 site:
   template: book-theme
   parts:
@@ -79,7 +81,7 @@ on:
 
 jobs:
   docs:   # Call the docs building workflow directly
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@__LATEST_TAG__
     with:
       # Whatever turns your sources into docs/_build/html at $BASE_URL.
       # uv and Node are preinstalled, so this can be make / tox / npx / npm.
@@ -88,7 +90,7 @@ jobs:
   release: 
     needs: [docs]
     if: github.ref_type == 'tag'            # tag pushes only
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@<tag>
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@__LATEST_TAG__
     permissions:
       contents: write                       # create the Release + attach assets
 
@@ -109,10 +111,11 @@ jobs:
 ### `publish-dispatch.yml`
 
 `publish.yml` is the engine and owns all the branching; this is a thin **shim** — the
-only thing that calls it, and the one place you pin `@<tag>`. It has to exist as a file
+only thing that calls it, and the one place you pin `@__LATEST_TAG__`. It has to exist as a file
 in your repo (not just be `uses:`'d) because the tag trampoline re-dispatches it as a
 `workflow_dispatch`, and a reusable workflow can't be dispatched cross-repo. Copy it
-verbatim, changing only `<tag>`:
+verbatim; the only thing to keep current is the `publish.yml` pin, already set to
+`__LATEST_TAG__`:
 
 ```yaml
 # .github/workflows/publish-dispatch.yml
@@ -126,7 +129,7 @@ on:
       pr: { description: "Fork PR to approve + preview (empty = re-deploy)", required: false, default: "" }
 jobs:
   publish:
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@__LATEST_TAG__
     with:
       version-name: ${{ inputs.version-name }}    # "" on dispatch → pure durable gather
       pr: ${{ inputs.pr }}                         # set (dispatch) → pin that fork head SHA
