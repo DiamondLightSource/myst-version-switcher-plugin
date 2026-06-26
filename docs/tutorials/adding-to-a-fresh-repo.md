@@ -203,9 +203,24 @@ gets its own `/pr-<n>/` preview.
 
 ## 6. Cut your first release
 
-Use the GitHub UI to make a new release. This will create a tag, which triggers the **`release`** job to attach its `docs.zip` to the GitHub Release. 
-Then `publish` gathers that release, flags it `preferred` (★), creates
-the `stable/` alias pointing at it, and points the root redirect at the constant
+Push a tag:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+The tag build runs and the **`release`** job creates the GitHub Release with that
+build's `docs.zip` attached. This works on any repo, including ones with [immutable
+releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+enabled (it attaches the asset as the release is created, before it's sealed).
+
+> On a repo **without** immutable releases you can instead **publish a release from the
+> GitHub UI** — that also creates the tag, and the `release` job attaches `docs.zip` to
+> the release you published. (This doesn't work under immutable releases: a published
+> immutable release can't receive assets after the fact, so use the tag push above.)
+
+Either way, the next deploy's `publish` gathers that release, flags it `preferred` (★),
+creates the `stable/` alias pointing at it, and points the root redirect at the constant
 `stable/` URL. Your switcher now lists `main` and `1.0.0`, and
 `https://ORG.github.io/REPO/stable/` always resolves to the latest release — a stable
 URL for cross-project `objects.inv` references.
