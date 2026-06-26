@@ -6,6 +6,8 @@ project:
   # makes MyST localize this same file as the anywidget runtime.
   plugins:
     - ../plugins/version-switcher.mjs
+    # Build-only: swaps __LATEST_TAG__ in the tutorial for this repo's latest tag.
+    - ./_ext/inject-latest-tag.mjs
   toc:
     - file: index.md
     - file: tutorials.md

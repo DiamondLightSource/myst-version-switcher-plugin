@@ -10,8 +10,9 @@
 	},
 	"scripts": {
 		"test": "node test/test-url-logic.mjs && node test/test-assemble.mjs",
-		"docs": "cd docs && myst build --html",
-		"docs-dev": "cd docs && myst start"
+		"latest-tag": "git describe --tags --abbrev=0 2>/dev/null || (git fetch --tags --quiet 2>/dev/null && git describe --tags --abbrev=0)",
+		"docs": "LATEST_TAG=\"$(npm run -s latest-tag || true)\" sh -c 'cd docs && myst build --html'",
+		"docs-dev": "LATEST_TAG=\"$(npm run -s latest-tag || true)\" sh -c 'cd docs && myst start'"
 	},
 	"files": [
 		"plugins/version-switcher.mjs",
