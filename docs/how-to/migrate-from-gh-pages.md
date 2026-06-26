@@ -42,7 +42,7 @@ Two consequences drive the procedure:
 For *why* this ordering is safe — the non-destructive source flip and the
 seed-before-publish rule — see the [architecture explanation](../explanations/architecture.md#migrating-from-gh-pages).
 
-> **The load-bearing rule:** *keep `gh-pages` until `_sources/<default>.zip` is live in
+> **The one rule that matters:** *keep `gh-pages` until `_sources/<default>.zip` is live in
 > the deployed site.* Run 1's seed gets you there on the first publish; the
 > `--delete-gh-pages` guard probes exactly this. Deleting `gh-pages` is the **separate,
 > gated final run** — never part of run 1 — and it removes the seed release too.

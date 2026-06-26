@@ -181,7 +181,7 @@ fi
 # --- generate switcher.json + redirect + stable-alias source ---
 # `generate` discovers the gathered dirs, orders them, writes switcher.json +
 # index.html, and prints the stable-alias source dir (or nothing). It also exit-1s
-# (→ set -e) if the --required (default) branch is absent — the load-bearing guard.
+# (→ set -e) if the --required (default) branch is absent — the required-branch guard.
 required=""
 [ "$GUARD_DEFAULT_BRANCH" = "true" ] && required="$default"
 stable_src=$(node "$here/assemble.mjs" generate \
