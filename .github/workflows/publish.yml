@@ -161,7 +161,7 @@ jobs:
       # fine inline. The Verify step below backstops any residual stale-origin case.
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       # deploy-pages reports success once the deployment RECORD flips active — even
       # if the Pages backend silently fails to update the SERVED origin (a wedged
