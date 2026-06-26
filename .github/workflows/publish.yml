@@ -142,7 +142,7 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.mvs/assemble/assemble.sh"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ${{ steps.site.outputs.dir }}
 
