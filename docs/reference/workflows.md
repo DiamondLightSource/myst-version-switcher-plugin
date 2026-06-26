@@ -29,7 +29,7 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 
 | input | required | default | meaning |
 |---|---|---|---|
-| `build-command` | no | `make docs` | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
+| `build-command` | **yes** | — | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
 | `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip`'s `html/`. |
 
 | output | meaning |

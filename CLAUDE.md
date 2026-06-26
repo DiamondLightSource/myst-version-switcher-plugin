@@ -173,8 +173,8 @@ Sub-workflows of `ci.yml`:
 - `_lint.yml` — biome
 - `_test.yml` — `npm test`
 - `docs.yml` — **reusable build, parameterised for cross-repo reuse.** Compute the
-  version name (`pr-<n>` / default-branch / tag) → run `build-command` (input,
-  default `make docs`) with `BASE_URL` set → pack `docs.zip` (bare `html/`, staged so
+  version name (`pr-<n>` / default-branch / tag) → run `build-command` (required
+  input) with `BASE_URL` set → pack `docs.zip` (bare `html/`, staged so
   any `html-dir` works) → upload the `docs` artifact → warn on fork PRs. No deploy;
   `contents: read` only. Installs uv unconditionally and relies on the runner's
   preinstalled Node, so `build-command` can be `make docs` / `npx … myst build` /
