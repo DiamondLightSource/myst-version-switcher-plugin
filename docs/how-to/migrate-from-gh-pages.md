@@ -42,10 +42,12 @@ Two consequences drive the procedure:
 For *why* this ordering is safe — the non-destructive source flip and the
 seed-before-publish rule — see the [architecture explanation](../explanations/architecture.md#migrating-from-gh-pages).
 
-> **The one rule that matters:** *keep `gh-pages` until `_sources/<default>.zip` is live in
-> the deployed site.* Run 1's seed gets you there on the first publish; the
-> `--delete-gh-pages` guard probes exactly this. Deleting `gh-pages` is the **separate,
-> gated final run** — never part of run 1 — and it removes the seed release too.
+:::{important} The one rule that matters
+*Keep `gh-pages` until `_sources/<default>.zip` is live in the deployed site.* Run 1's
+seed gets you there on the first publish; the `--delete-gh-pages` guard probes exactly
+this. Deleting `gh-pages` is the **separate, gated final run** — never part of run 1 —
+and it removes the seed release too.
+:::
 
 ## Before you start
 
@@ -120,16 +122,17 @@ site holds a durable copy of the default branch, so the new model can reconstruc
 repo name, deletes `gh-pages`, **and deletes the seed release** (the in-site `_sources`
 copy supersedes it). After this, the rollback is gone.
 
-> **Caveat — old pages that reference `gh-pages` at runtime.** Docs built under the old
-> model sometimes embed a hardcoded version switcher that reads `gh-pages` live — via
-> the GitHub *contents API* (`…/contents?ref=gh-pages`) or by loading assets from a
-> `gh-pages` URL. Those pages are reconstructed verbatim from their `docs.zip`, so the
-> references remain. After deletion, a switcher that only *queries the API* degrades
-> harmlessly: the request `404`s, its populate script throws an uncaught promise
-> (console-only), and the version list simply empties — the page itself is intact.
-> Anything that *loads assets* (CSS/JS/images) from `gh-pages`, though, will break.
-> `grep` your old release pages for `gh-pages` before finalizing and accept (the
-> switcher emptying is usually fine) or fix what you find.
+:::{warning} Old pages that reference `gh-pages` at runtime
+Docs built under the old model sometimes embed a hardcoded version switcher that reads
+`gh-pages` live — via the GitHub *contents API* (`…/contents?ref=gh-pages`) or by
+loading assets from a `gh-pages` URL. Those pages are reconstructed verbatim from their
+`docs.zip`, so the references remain. After deletion, a switcher that only *queries the
+API* degrades harmlessly: the request `404`s, its populate script throws an uncaught
+promise (console-only), and the version list simply empties — the page itself is intact.
+Anything that *loads assets* (CSS/JS/images) from `gh-pages`, though, will break. `grep`
+your old release pages for `gh-pages` before finalizing and accept (the switcher
+emptying is usually fine) or fix what you find.
+:::
 
 ## Rollback
 

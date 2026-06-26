@@ -156,10 +156,12 @@ see:
   read-only hint — forks never auto-publish); a maintainer dispatches the wrapper with
   the `pr` number to preview one.
 
-> **First-time exception:** on a brand-new repo the `publish` check is **red on this
-> setup PR** — there's no `main` build yet for the versioned site to anchor on, and the
-> default-branch guard refuses to publish a site missing it. It clears the moment you
-> merge (step 6). Every PR after that previews normally.
+:::{note} First-time exception
+On a brand-new repo the `publish` check is **red on this setup PR** — there's no
+`main` build yet for the versioned site to anchor on, and the default-branch guard
+refuses to publish a site missing it. It clears the moment you merge (step 6). Every
+PR after that previews normally.
+:::
 
 ## 5. Merge to main — your first deploy
 
@@ -183,10 +185,12 @@ build's `docs.zip` attached. This works on any repo, including ones with [immuta
 releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
 enabled (it attaches the asset as the release is created, before it's sealed).
 
-> On a repo **without** immutable releases you can instead **publish a release from the
-> GitHub UI** — that also creates the tag, and the `release` job attaches `docs.zip` to
-> the release you published. (This doesn't work under immutable releases: a published
-> immutable release can't receive assets after the fact, so use the tag push above.)
+:::{note} Without immutable releases
+You can instead **publish a release from the GitHub UI** — that also creates the tag,
+and the `release` job attaches `docs.zip` to the release you published. (This doesn't
+work under immutable releases: a published immutable release can't receive assets
+after the fact, so use the tag push above.)
+:::
 
 Either way, the next deploy's `publish` gathers that release, flags it `preferred` (★),
 creates the `stable/` alias pointing at it, and points the root redirect at the constant
