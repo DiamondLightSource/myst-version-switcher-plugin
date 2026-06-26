@@ -10,22 +10,18 @@
  * the browser), this file only ever runs under MyST (Node) at build time, so it
  * is free to touch git. It is loaded from `docs/myst.yml`, not shipped.
  *
- * The tag is taken from `LATEST_TAG` (set by the `docs`/`docs-dev` npm scripts,
- * which also handle fetching tags in a shallow CI checkout); if that is unset we
- * fall back to `git describe` directly (the bare `myst build` case). When no tag
- * can be resolved the sentinel is left in place and a warning is emitted, so a
- * missing tag is loud rather than silently shipping `__LATEST_TAG__` to readers.
+ * The tag is read straight from `git describe` (CI checks out with fetch-depth 0
+ * in docs.yml, so the tags are present). When no tag can be resolved the sentinel
+ * is left in place and a warning is emitted, so a missing tag is loud rather than
+ * silently shipping `__LATEST_TAG__` to readers.
  */
 import { execSync } from "node:child_process";
 
 const SENTINEL = "__LATEST_TAG__";
 
-/** The latest release tag: `LATEST_TAG` env, else `git describe`, else null. */
+/** The latest release tag (`git describe --tags --abbrev=0`), or null. */
 function resolveLatestTag() {
-	const fromEnv = process.env.LATEST_TAG?.trim();
-	if (fromEnv) return fromEnv;
 	try {
-		// No fetch here — the npm scripts own that. This just reads what's local.
 		return execSync("git describe --tags --abbrev=0", {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
@@ -54,7 +50,7 @@ const injectLatestTag = {
 		const tag = resolveLatestTag();
 		if (!tag) {
 			vfile?.message?.(
-				`inject-latest-tag: no tag resolved (set LATEST_TAG or fetch git tags); leaving ${SENTINEL} as-is.`,
+				`inject-latest-tag: no tag resolved from git describe; leaving ${SENTINEL} as-is.`,
 			);
 			return;
 		}
