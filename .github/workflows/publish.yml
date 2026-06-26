@@ -123,7 +123,7 @@ jobs:
       # find a stale prior build). Skipped on workflow_dispatch (version-name empty).
       - name: Download this run's docs artifact
         if: inputs.version-name != ''
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: docs
           path: ${{ runner.temp }}/assemble-current
