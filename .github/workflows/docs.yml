@@ -58,7 +58,7 @@ jobs:
       # python-version input it only puts uv on PATH, honouring a committed
       # .python-version if the project has one — a no-op for npx-only repos.
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v8.2.0
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
       # must be built with. pr-<n> for PRs; otherwise the ref name (default branch or
