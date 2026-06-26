@@ -107,14 +107,19 @@ So a fork's build can never reach a write token; only trusted code deploys.
 ### Why publish is *nested* in CI (for internal events)
 
 The deploy is surfaced as a **job inside the CI run** (`ci.yml`'s `publish` job →
-`publish.yml` via `workflow_call`) so its status and URL are visible on the PR /
-commit — rather than running invisibly after the fact. But this is gated to
-**internal events only**: the `publish` job's `if` excludes fork PRs
+`publish-dispatch.yml` → `publish.yml` via `workflow_call`) so its status and URL are
+visible on the PR / commit — rather than running invisibly after the fact. But this is
+gated to **internal events only**: the `publish` job's `if` excludes fork PRs
 (`head.repo.full_name != github.repository`). A fork PR's build instead emits a
 warning (a step in the build job) that the preview was not published, linking the
-manual opt-in. The privileged `publish.yml` is therefore reachable two ways, both
-trusted: `workflow_call` (nested, internal) and `workflow_dispatch` (the maintainer
-fork opt-in).
+manual opt-in.
+
+`publish.yml` itself is a pure `workflow_call` **engine** with a single caller —
+`publish-dispatch.yml`, the one wrapper that exposes it as both `workflow_call`
+(ci.yml's inline publish) and `workflow_dispatch` (the tag trampoline, the fork-PR
+opt-in, and manual re-deploys). Keeping the dispatch surface in the wrapper means the
+engine has no event-type branching of its own, and this repo dogfoods the exact wrapper
+a consumer adds (theirs just pins `publish.yml@<tag>`).
 
 The cost of nesting is an environment-policy change: because internal PRs now deploy
 from **their own ref**, the `github-pages` environment's deployment-branch policy must

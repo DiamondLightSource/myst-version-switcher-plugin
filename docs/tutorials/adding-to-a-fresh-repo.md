@@ -97,7 +97,7 @@ jobs:
       github.ref_type != 'tag' &&
       ( github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository )
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
+    uses: ./.github/workflows/publish-dispatch.yml   # your wrapper (below); it pins publish.yml@<tag>
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:
@@ -139,33 +139,40 @@ internally — it checks out this project's `assemble` scripts at the same `<tag
 
 ### The `publish-dispatch.yml` wrapper (required)
 
-A reusable workflow can't be `workflow_dispatch`'d cross-repo, so you need a tiny
-wrapper in your own repo that calls `publish.yml`. It serves **two** purposes through
-one optional `pr` input:
+`publish.yml` is a pure `workflow_call` engine, and this wrapper in your repo is the
+**only** thing that calls it — it's also the single place you pin the engine's
+`@<tag>`. It exposes the engine two ways and so covers all three publish paths:
 
-- **Tag trampoline (no `pr`)** — `publish-tag` above dispatches it on a tag. Deploying
-  as a `workflow_dispatch` event is what makes a same-SHA tag deploy actually go live
-  (an inline tag deploy is silently dropped — see the [architecture
-  explanation](../explanations/architecture.md)). **This is why the wrapper is
-  required, not optional.**
-- **Fork-PR preview (with `pr`)** — internal PRs publish automatically; fork PRs build
-  and verify but never auto-deploy. A maintainer runs this from the Actions tab with a
-  PR number to approve that fork's current head SHA and deploy a preview (a later push
-  to the PR drops it until re-run).
+- **Inline publish (`workflow_call`)** — your `publish` job above nests it for internal
+  non-tag events, passing `version-name`, so the deploy is a visible check on the
+  PR/commit.
+- **Tag trampoline (`workflow_dispatch`, no `pr`)** — `publish-tag` above dispatches it
+  on a tag. Deploying as a `workflow_dispatch` event is what makes a same-SHA tag
+  deploy actually go live (an inline tag deploy is silently dropped — see the
+  [architecture explanation](../explanations/architecture.md)). **This is why the
+  wrapper is required, not optional.**
+- **Fork-PR preview (`workflow_dispatch`, with `pr`)** — internal PRs publish
+  automatically; fork PRs build and verify but never auto-deploy. A maintainer runs it
+  from the Actions tab with a PR number to approve that fork's head SHA and deploy a
+  preview (a later push to the PR drops it until re-run).
 
 ```yaml
 # .github/workflows/publish-dispatch.yml
 name: Publish (dispatch)
 on:
-  workflow_dispatch:
+  workflow_call:                    # ci.yml's inline `publish` job
+    inputs:
+      version-name: { required: false, default: "", type: string }
+      pr:           { required: false, default: "", type: string }
+  workflow_dispatch:                # tag trampoline + fork-PR preview + manual re-deploy
     inputs:
       pr: { description: "Fork PR number to approve + preview (leave empty to just re-deploy)", required: false, default: "" }
 jobs:
   publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
-      version-name: ""              # no in-run build to inject → pure durable gather
-      pr: ${{ inputs.pr }}          # empty → plain re-deploy; set → pin that fork head SHA as preview-approved
+      version-name: ${{ inputs.version-name }}   # "" on dispatch → pure durable gather
+      pr: ${{ inputs.pr }}                        # empty → plain re-deploy; set → pin that fork head SHA
     permissions:
       contents: read
       actions: read
@@ -179,10 +186,11 @@ If you point `docs.yml`'s fork-preview warning at this file, also set
 
 ## 4. Allow the deploying refs in the `github-pages` environment
 
-Because internal PRs and tags now deploy from **their own ref** (the publish job
-runs inside their CI run), the `github-pages` environment's deployment policy must
-allow those refs. In **Settings → Environments → github-pages**, it is recommended
-to set **Deployment branches and tags** to **No restriction**.
+Because internal PRs deploy from **their own ref** (the publish job runs inside their
+CI run; tags deploy from the default-branch ref via the trampoline), the
+`github-pages` environment's deployment policy must allow those refs. In **Settings →
+Environments → github-pages**, it is recommended to set **Deployment branches and
+tags** to **No restriction**.
 
 ## 5. Push your branch and open a PR
 

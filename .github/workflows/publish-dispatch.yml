@@ -1,0 +1,60 @@
+name: Publish (dispatch)
+
+# The ONE wrapper around publish.yml (the assemble + deploy engine). publish.yml is a
+# pure `workflow_call` engine; this file is what exposes it, two ways:
+#
+#   workflow_dispatch — the tag trampoline (ci.yml's `publish-tag` does
+#                       `gh workflow run publish-dispatch.yml`), the fork-PR preview
+#                       opt-in (`pr`), and any manual re-deploy. A deploy that runs on
+#                       a `workflow_dispatch` event is what lets a release tag's
+#                       same-SHA deploy actually re-serve, instead of being silently
+#                       dropped by Pages (see publish.yml / the architecture doc).
+#   workflow_call     — ci.yml's `publish` job nests this for internal NON-TAG events
+#                       (an internal PR or a push to the default branch), passing the
+#                       build's `version-name` so the deploy is a visible check on the
+#                       PR/commit. Those are the first deploy of their SHA, so they
+#                       serve fine inline.
+#
+# This repo DOGFOODS the exact wrapper a consumer adds — theirs differs only in the
+# `uses:` target (DiamondLightSource/myst-version-switcher-plugin/.github/workflows/
+# publish.yml@<tag>) and is the single place they pin the engine's <tag>.
+on:
+  workflow_call:
+    inputs:
+      version-name:
+        description: Version name of an in-run build to inject (pr-<n> | <default-branch> | <tag>); "" → pure durable gather.
+        required: false
+        default: ""
+        type: string
+      guard-default-branch:
+        description: "'false' to skip the default-branch-present guard (e.g. mid gh-pages migration)."
+        required: false
+        default: "true"
+        type: string
+      pr:
+        description: External fork PR number to approve + preview.
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: External fork PR number to approve (pins its head SHA) and preview. Leave empty to just re-deploy.
+        required: false
+        default: ""
+
+jobs:
+  publish:
+    # Grant the engine the privileged scopes it needs. On workflow_dispatch these are
+    # the run's token scopes; on workflow_call they're capped by ci.yml's grant.
+    permissions:
+      contents: read     # checkout + read release assets
+      actions: read      # gh run download (this run's + cross-run docs artifacts)
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
+      statuses: write    # set the preview-approved status on a fork PR head SHA
+    uses: ./.github/workflows/publish.yml
+    with:
+      version-name: ${{ inputs.version-name }}
+      guard-default-branch: ${{ inputs.guard-default-branch || 'true' }}
+      pr: ${{ inputs.pr }}
