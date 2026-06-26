@@ -31,7 +31,6 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 |---|---|---|---|
 | `build-command` | no | `make docs` | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
 | `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip`'s `html/`. |
-| `preview-workflow` | no | `publish.yml` | Consumer's dispatchable publish workflow file, named in the fork-preview warning. |
 
 | output | meaning |
 |---|---|
@@ -53,14 +52,17 @@ version bump. The consumer's repo stays checked out at the root so `assemble.mjs
 
 ## `publish-dispatch.yml` — the wrapper (one per repo)
 
-The only thing that calls `publish.yml`, and the single place you pin
-`publish.yml@<tag>`. It exposes the engine two ways:
+The only thing that calls `publish.yml`, the single place you pin `publish.yml@<tag>`,
+and the owner of **all** publish branching — so `ci.yml` needs just one `publish` job
+(called for every event) and `docs.yml` needs no fork hint. Reached via `workflow_call`
+(ci.yml's `publish`) and `workflow_dispatch` (the trampoline's re-dispatch, a fork-PR
+preview, a manual re-deploy), it routes each event to one of three jobs:
 
-- `workflow_call` — `ci.yml`'s `publish` job nests it for internal **non-tag** events
-  (inline deploy, status on the PR/commit), threading `version-name` through.
-- `workflow_dispatch` — the **tag trampoline** (`ci.yml`'s `publish-tag` does
-  `gh workflow run publish-dispatch.yml`), the fork-PR opt-in (`pr`), and manual
-  re-deploys.
+- **`deploy`** — internal PR / default-branch push (inline), or any `workflow_dispatch`.
+  Nests `publish.yml`; the inline path injects the in-run build via `version-name`.
+- **`trampoline`** — a tag push. Waits for the release, then re-dispatches this workflow
+  as `workflow_dispatch` so the deploy re-serves (see below).
+- **`warn`** — a fork PR. Read-only, never deploys; just posts the manual-opt-in hint.
 
 **Tags must deploy via `workflow_dispatch`**: GitHub Pages silently drops a second
 deploy of an already-deployed SHA (a release tag shares the merge commit's SHA) unless

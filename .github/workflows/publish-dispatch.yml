@@ -1,23 +1,29 @@
 name: Publish (dispatch)
 
-# The ONE wrapper around publish.yml (the assemble + deploy engine). publish.yml is a
-# pure `workflow_call` engine; this file is what exposes it, two ways:
+# The ONE wrapper around publish.yml (the assemble + deploy engine) — it owns ALL the
+# publish decisions so a consumer's ci.yml needs a single `publish` job (no separate
+# tag or fork-warning job) and docs.yml needs no fork-preview hint. publish.yml is a
+# pure `workflow_call` engine; this file branches on the originating event into one of
+# three jobs:
 #
-#   workflow_dispatch — the tag trampoline (ci.yml's `publish-tag` does
-#                       `gh workflow run publish-dispatch.yml`), the fork-PR preview
-#                       opt-in (`pr`), and any manual re-deploy. A deploy that runs on
-#                       a `workflow_dispatch` event is what lets a release tag's
-#                       same-SHA deploy actually re-serve, instead of being silently
-#                       dropped by Pages (see publish.yml / the architecture doc).
-#   workflow_call     — ci.yml's `publish` job nests this for internal NON-TAG events
-#                       (an internal PR or a push to the default branch), passing the
-#                       build's `version-name` so the deploy is a visible check on the
-#                       PR/commit. Those are the first deploy of their SHA, so they
-#                       serve fine inline.
+#   deploy     — internal PR / default-branch push (via ci.yml's workflow_call), or any
+#                workflow_dispatch (the trampoline's re-dispatch, a fork-PR preview, a
+#                manual re-deploy). Nests publish.yml; for the inline path it injects the
+#                in-run build via `version-name`, otherwise pure durable gather.
+#   trampoline — a TAG push (via workflow_call). An inline tag deploy would be silently
+#                DROPPED by Pages (it reuses the default branch's just-deployed SHA on a
+#                non-dispatch event — deploy-pages#383), so re-dispatch THIS workflow as
+#                `workflow_dispatch`; that event forces a re-serve. Waits for ci.yml's
+#                parallel release job to attach the tag's docs.zip first (the dispatched
+#                run gathers the tag from that durable asset).
+#   warn       — a FORK PR. Fork builds run with a read-only token and must never deploy,
+#                so just surface the manual-opt-in hint on the PR. (The token is
+#                read-only here regardless — `deploy` is `if`-excluded for forks too, and
+#                the workflow file itself comes from the trusted base, not the fork.)
 #
 # This repo DOGFOODS the exact wrapper a consumer adds — theirs differs only in the
-# `uses:` target (DiamondLightSource/myst-version-switcher-plugin/.github/workflows/
-# publish.yml@<tag>) and is the single place they pin the engine's <tag>.
+# `deploy` job's `uses:` target (DiamondLightSource/myst-version-switcher-plugin/
+# .github/workflows/publish.yml@<tag>), the single place they pin the engine's <tag>.
 on:
   workflow_call:
     inputs:
@@ -44,9 +50,13 @@ on:
         default: ""
 
 jobs:
-  publish:
-    # Grant the engine the privileged scopes it needs. On workflow_dispatch these are
-    # the run's token scopes; on workflow_call they're capped by ci.yml's grant.
+  # Internal inline (PR / default-branch push) or any workflow_dispatch → deploy.
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_type != 'tag') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read     # checkout + read release assets
       actions: read      # gh run download (this run's + cross-run docs artifacts)
@@ -58,3 +68,46 @@ jobs:
       version-name: ${{ inputs.version-name }}
       guard-default-branch: ${{ inputs.guard-default-branch || 'true' }}
       pr: ${{ inputs.pr }}
+
+  # A tag can't deploy inline — re-dispatch this workflow so the deploy runs on a
+  # workflow_dispatch event (which forces Pages to re-serve a same-SHA deploy).
+  trampoline:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read     # gh release view
+      actions: write     # gh workflow run (re-dispatch self)
+    steps:
+      - name: Wait for the release, then re-deploy via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # ci.yml's release job attaches the tag's docs.zip in parallel; the dispatched
+          # run gathers the tag from that asset, so don't dispatch until it exists.
+          for _ in $(seq 1 36); do
+            gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break
+            sleep 5
+          done
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+            || { echo "::error::release $TAG not found after 3 min — did the release job fail?"; exit 1; }
+          gh workflow run publish-dispatch.yml --repo "$REPO" --ref "$DEFAULT_BRANCH"
+
+  # Fork PR: never deploys (read-only token). Surface the manual-opt-in hint on the PR.
+  warn:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Explain the fork-preview opt-in
+        run: |
+          echo "::warning title=Docs preview not published::This is a fork PR, so the \
+          versioned docs site is NOT auto-published (fork builds run with a read-only \
+          token). A maintainer can publish a preview by running the publish-dispatch.yml \
+          workflow for PR #${{ github.event.pull_request.number }}: \
+          https://github.com/${{ github.repository }}/actions/workflows/publish-dispatch.yml"

@@ -13,11 +13,6 @@ on:
         required: false
         default: docs/_build/html
         type: string
-      preview-workflow:
-        description: Consumer's dispatchable publish workflow file, for the fork-preview hint.
-        required: false
-        default: publish.yml
-        type: string
     outputs:
       version-name:
         description: The version name this build was served at (pr-<n> | <default-branch> | <tag>).
@@ -109,18 +104,6 @@ jobs:
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
 
-      # Fork PRs build + verify here but do not auto-publish (the consumer's publish
-      # job excludes them — the security boundary). Surface that on the PR with a link
-      # to the manual preview opt-in, rather than silently publishing nothing.
-      - name: Explain the fork-preview opt-in
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository
-        env:
-          PREVIEW_WORKFLOW: ${{ inputs.preview-workflow }}
-        run: |
-          echo "::warning title=Docs preview not published::This is a fork PR, so the \
-          versioned docs site is NOT auto-published (fork builds run with a read-only \
-          token). A maintainer can publish a preview by running the $PREVIEW_WORKFLOW \
-          workflow for PR #${{ github.event.pull_request.number }}: \
-          https://github.com/${{ github.repository }}/actions/workflows/$PREVIEW_WORKFLOW"
+      # NOTE: the fork-PR "preview not published" hint now lives in publish-dispatch.yml
+      # (its `warn` job), which runs for fork PRs too — so this build job stays purely
+      # about building + uploading the docs artifact.

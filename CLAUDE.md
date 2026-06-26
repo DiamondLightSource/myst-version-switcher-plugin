@@ -18,7 +18,7 @@ docs/                                          # this repo's own docs (dogfoods 
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
 .github/workflows/publish.yml                  # PUBLIC reusable ENGINE: run assemble/ (checked out at job.workflow_sha) + deploy to Pages (PRIVILEGED). workflow_call ONLY; its sole caller is publish-dispatch.yml
 .github/workflows/publish-dispatch.yml         # PUBLIC wrapper around publish.yml: workflow_call (ci.yml's inline publish) + workflow_dispatch (tag trampoline + fork-PR opt-in + manual re-deploy). Dogfoods the wrapper consumers add
-.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / _release, then nests publish-dispatch.yml for internal non-tag events (tags trampoline via publish-tag → gh workflow run publish-dispatch.yml)
+.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / _release, then ONE publish job nesting publish-dispatch.yml for every event (the wrapper branches: deploy / tag-trampoline / fork-warn)
 ```
 
 ## Two halves, different lifecycles
@@ -66,17 +66,15 @@ gathered (a merged/closed PR, a deleted release) is correctly dropped — no
 
 ### Split build (unprivileged) from publish (privileged), but nest publish for visibility
 `ci.yml` builds + uploads the `docs` artifact for every event including fork PRs.
-It then nests the privileged `publish.yml` (`workflow_call`) as a `publish` job —
-but **only for internal, non-tag events** (an internal PR, or a push to main): the
-job's `if` excludes fork PRs (`head.repo.full_name != github.repository`), whose
-builds run with a read-only token and must never deploy. So publish status is
-**visible on the PR/commit** for internal work, while untrusted fork-PR code still
-never reaches a write token. A fork PR instead gets a warning step in `docs.yml`'s
-build job that links the manual opt-in (`publish.yml`'s `workflow_dispatch`).
-**Tags don't nest** — a tag shares the merge commit's SHA and GitHub Pages drops a
-second same-SHA deploy unless it's a `workflow_dispatch` (deploy-pages#383), so the
-`publish-tag` job re-triggers `publish.yml` via `workflow_dispatch` instead (see
-the Publish flow below).
+It then nests a single privileged `publish` job (`uses: publish-dispatch.yml`) for
+**every** event in the canonical repo. `publish-dispatch.yml` branches: an internal
+PR / main push deploys inline (status **visible on the PR/commit**); a fork PR hits a
+read-only **warn** job (untrusted fork-PR code never reaches a write token — the
+`deploy` job is `if`-excluded for forks and the token is read-only anyway); a **tag**
+hits the **trampoline** (a tag shares the merge commit's SHA and Pages drops a second
+same-SHA deploy unless it's a `workflow_dispatch` — deploy-pages#383 — so it
+re-dispatches `publish-dispatch.yml`). One `publish` job, no ref/fork guards in
+`ci.yml`.
 
 Because the inline publish runs **inside the build's own CI run**, the current build
 isn't a *completed* successful run the gather can discover (and for a main push the
@@ -146,25 +144,22 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
 - `ci.yml` — **build + verify, then publish on internal events.** Triggers on
   `pull_request` + push to `main`/tags (no other-branch pushes; `*` excludes
   `/`-tags). Orchestrates `_lint` / `_test` / `_docs` / `_release`, runs for forks,
-  and uploads the `docs` artifact. It then nests the `publish` job
-  (`uses: publish.yml`) — runs only for the **canonical repo on internal** events
-  (the `if` is `repository == '…' && (event != pull_request ||
-  head.repo.full_name == github.repository)`); grants `pages`/`id-token`/`statuses`
-  perms to the call and passes `version-name: needs.docs.outputs.version-name`. The
-  fork-PR warning is a step inside `docs.yml`'s build job (not a separate ci.yml
-  job), keeping the top-level workflow lean. The `publish` job's `if` also excludes
-  **tags** (`ref_type != 'tag'`) — a separate `publish-tag` job (tags only, `needs:
-  [_release]`, `actions: write`) re-triggers the deploy via
-  `gh workflow run publish-dispatch.yml --ref <default-branch>` (`workflow_dispatch`),
-  because a same-SHA tag deploy is silently dropped by Pages unless it's a dispatch
-  event (deploy-pages#383). Both the inline `publish` job and `publish-tag` route
-  through `publish-dispatch.yml`, never `publish.yml` directly.
-- `publish-dispatch.yml` — **the one wrapper around the engine.** `workflow_call`
-  (ci.yml's inline `publish` job) + `workflow_dispatch` (the tag trampoline + fork-PR
-  opt-in + manual re-deploy); both just `uses: publish.yml` and pass `version-name` /
-  `pr` / `guard-default-branch` through, carrying the privileged perms. This repo
-  dogfoods the exact wrapper consumers add (theirs pins `publish.yml@<tag>`; this one
-  uses the local path).
+  and uploads the `docs` artifact. It then nests a single `publish` job
+  (`uses: publish-dispatch.yml`) for **every** event in the canonical repo (the `if`
+  is just `repository == '…'`); grants `pages`/`id-token`/`statuses`/`actions:write`
+  perms to the call and passes `version-name: needs.docs.outputs.version-name`. No
+  ref/fork guards and no separate tag job — `publish-dispatch.yml` does all the
+  branching.
+- `publish-dispatch.yml` — **the one wrapper around the engine**, owning all publish
+  branching. `workflow_call` (ci.yml's `publish` job, every event) + `workflow_dispatch`
+  (the tag trampoline's re-dispatch + fork-PR opt-in + manual re-deploy). Three jobs by
+  originating event: **deploy** (internal PR / default-branch push inline, or any
+  dispatch → `uses: publish.yml`), **trampoline** (a tag — waits for `_release`, then
+  `gh workflow run publish-dispatch.yml` so the deploy is a `workflow_dispatch` that
+  re-serves; a same-SHA tag deploy is otherwise dropped by Pages — deploy-pages#383),
+  and **warn** (a fork PR — read-only, never deploys, posts the manual-opt-in hint;
+  moved here from `docs.yml`'s build job). This repo dogfoods the exact wrapper
+  consumers add (theirs pins `publish.yml@<tag>`; this one uses the local path).
 - `publish.yml` — **assemble + deploy ENGINE, privileged.** `workflow_call` ONLY
   (sole caller: `publish-dispatch.yml`). Sparse-checks-out this repo's `assemble/` at
   `job.workflow_sha` (so the scripts match the ref the consumer pinned
@@ -191,25 +186,23 @@ Sub-workflows of `ci.yml`:
 - `_release.yml` — attaches `version-switcher.mjs` + the tag's `docs.zip` (the
   `docs` artifact, verbatim — no repack) as Release assets (tag-only).
 
-**Publish flow.** Internal PRs and `main` publish as part of the same CI run once
-lint/test/docs pass (`ci.yml`'s `publish` job → `publish.yml` injects this build +
-`assemble` gathers `main`, releases, and every other open PR → deploy), so the deploy
-is a visible check on the PR/commit. **Tags are the exception:** a release tag shares
-the merge commit's SHA, and GitHub Pages silently drops a second deploy of an
-already-deployed SHA *unless* the event is `workflow_dispatch`
+**Publish flow.** The single `publish` job (→ `publish-dispatch.yml`) runs for every
+event and the wrapper branches. Internal PRs and `main` deploy inline as part of the
+same CI run once lint/test/docs pass (`publish.yml` injects this build + `assemble`
+gathers `main`, releases, and every other open PR → deploy), a visible check on the
+PR/commit. **Tags** hit the wrapper's `trampoline`: a release tag shares the merge
+commit's SHA, and GitHub Pages silently drops a second deploy of an already-deployed
+SHA *unless* the event is `workflow_dispatch`
 ([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)) —
-so the `publish-tag` job (after `_release`) re-triggers `publish.yml` via
-`gh workflow run` (`workflow_dispatch`), which re-gathers from durable sources (incl.
-the new release) and deploys with the origin actually updating. The dispatched run
-carries the deploy status (not the tag's CI run). An **external fork PR** builds +
-verifies in CI but does **not** auto-publish (its `publish` job is skipped); a
-maintainer runs `publish.yml` with the PR number (`workflow_dispatch` → `pr`),
-which sets a `preview-approved` commit status pinned to that **head SHA** and
-assembles — so a later push to the PR (new SHA) drops the preview until re-approved.
-`assemble` gathers an open PR's artifact via its head SHA; internal PRs always,
-fork PRs only when the SHA carries that status. Consumers can't dispatch `publish.yml`
-cross-repo, so they trampoline via a small `publish-dispatch.yml` wrapper (which also
-serves the fork-preview opt-in) — see the how-to.
+so it waits for `_release`, then `gh workflow run publish-dispatch.yml`
+(`workflow_dispatch`), which re-gathers from durable sources (incl. the new release)
+and deploys with the origin actually updating (the dispatched run carries the deploy
+status, not the tag's CI run). An **external fork PR** hits the wrapper's `warn` job
+(read-only, no deploy); a maintainer dispatches `publish-dispatch.yml` with the PR
+number (`pr`), which sets a `preview-approved` commit status pinned to that **head
+SHA** and assembles — so a later push to the PR (new SHA) drops the preview until
+re-approved. `assemble` gathers an open PR's artifact via its head SHA; internal PRs
+always, fork PRs only when the SHA carries that status.
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 
@@ -270,36 +263,24 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       build-command: make docs        # or: tox -e docs / npx … myst build / npm ci && npm run docs
-  publish:                            # internal, non-tag events (fork PRs + tags excluded by the if)
+  publish:                            # every event — the wrapper branches
     needs: [docs]
-    if: >-
-      github.repository == 'ORG/REPO' &&
-      github.ref_type != 'tag' &&
-      ( github.event_name != 'pull_request' ||
-        github.event.pull_request.head.repo.full_name == github.repository )
+    if: github.repository == 'ORG/REPO'
     uses: ./.github/workflows/publish-dispatch.yml   # your wrapper; it pins publish.yml@<tag>
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
-    permissions: { pages: write, id-token: write, contents: read, actions: read, statuses: write }
-  publish-tag:                        # tags: re-deploy via workflow_dispatch (see how-to)
-    needs: [docs, release]
-    if: github.repository == 'ORG/REPO' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions: { actions: write }
-    steps:
-      - env: { GH_TOKEN: "${{ github.token }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" }
-        run: gh workflow run publish-dispatch.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
+    permissions: { pages: write, id-token: write, contents: read, actions: write, statuses: write }
 ```
 
 Add a `_release.yml`-style job that attaches each tag's built `docs.zip` (bare
 `html/` root) + the plugin as Release assets so `assemble` can reconstruct released
-versions, and a small `publish-dispatch.yml` wrapper around `publish.yml` — the single
-caller of the engine and the one place you pin `publish.yml@<tag>`. It's
-`workflow_call` (your `publish` job nests it for the inline non-tag deploy) **and**
-`workflow_dispatch` (the **tag trampoline** target — `publish-tag` dispatches it so the
-deploy runs as a `workflow_dispatch`, required for a release's same-SHA deploy to go
-live — plus the fork-PR preview opt-in via `pr`). See the full how-to + snippets in
-`docs/`.
+versions, and the `publish-dispatch.yml` wrapper around `publish.yml` — the single
+caller of the engine and the one place you pin `publish.yml@<tag>`. The wrapper owns all
+the branching: **deploy** (inline non-tag, or a dispatch), **trampoline** (a tag
+re-dispatches itself so the deploy is a `workflow_dispatch` — required for a release's
+same-SHA deploy to go live), and **warn** (a fork PR, read-only, posts the preview
+opt-in hint; a maintainer dispatches the wrapper with `pr` to actually preview). See the
+full how-to + snippets in `docs/`.
 
 ## Upstreaming
 
