@@ -108,9 +108,10 @@ jobs:
 
 ### `publish-dispatch.yml`
 
-`publish.yml` is a pure `workflow_call` engine, and this wrapper in your repo is the
-**only** thing that calls it — also the single place you pin the engine's `@<tag>`. It
-owns all the branching, so your `ci.yml` `publish` job stays a one-liner. Copy it
+`publish.yml` is the engine and owns all the branching; this is a thin **shim** — the
+only thing that calls it, and the one place you pin `@<tag>`. It has to exist as a file
+in your repo (not just be `uses:`'d) because the tag trampoline re-dispatches it as a
+`workflow_dispatch`, and a reusable workflow can't be dispatched cross-repo. Copy it
 verbatim, changing only `<tag>`:
 
 ```yaml
@@ -119,60 +120,25 @@ name: Publish (dispatch)
 on:
   workflow_call:                    # ci.yml's `publish` job, for every event
     inputs:
-      version-name:          { required: false, default: "", type: string }
-      guard-default-branch:  { required: false, default: "true", type: string }
-      pr:                    { required: false, default: "", type: string }
+      version-name: { required: false, default: "", type: string }
   workflow_dispatch:                # tag trampoline's re-dispatch + fork-PR preview + manual re-deploy
     inputs:
-      pr: { description: "Fork PR number to approve + preview (leave empty to just re-deploy)", required: false, default: "" }
+      pr: { description: "Fork PR to approve + preview (empty = re-deploy)", required: false, default: "" }
 jobs:
-  # Internal PR / default-branch push (inline), or any workflow_dispatch → deploy.
-  deploy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref_type != 'tag') ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
-    permissions: { contents: read, actions: read, pages: write, id-token: write, statuses: write }
+  publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
-      version-name: ${{ inputs.version-name }}                       # "" on dispatch → pure durable gather
-      guard-default-branch: ${{ inputs.guard-default-branch || 'true' }}
-      pr: ${{ inputs.pr }}                                           # set → pin that fork head SHA
-
-  # A tag can't deploy inline (same SHA as the default-branch push → Pages drops it
-  # unless the event is workflow_dispatch). Re-dispatch this workflow after the release.
-  trampoline:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions: { contents: read, actions: write }
-    steps:
-      - env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", TAG: "${{ github.ref_name }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" }
-        run: |
-          set -euo pipefail
-          for _ in $(seq 1 36); do gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break; sleep 5; done
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || { echo "::error::release $TAG not found"; exit 1; }
-          gh workflow run publish-dispatch.yml --repo "$REPO" --ref "$DEFAULT_BRANCH"
-
-  # Fork PR: read-only token, never deploys — just surface the manual-opt-in hint.
-  warn:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - run: |
-          echo "::warning title=Docs preview not published::Fork PR — not auto-published. A maintainer \
-          can preview it by running publish-dispatch.yml with pr=${{ github.event.pull_request.number }}: \
-          https://github.com/${{ github.repository }}/actions/workflows/publish-dispatch.yml"
+      version-name: ${{ inputs.version-name }}    # "" on dispatch → pure durable gather
+      pr: ${{ inputs.pr }}                         # set (dispatch) → pin that fork head SHA
+      dispatch-workflow: publish-dispatch.yml      # the file the tag trampoline re-dispatches
+    permissions: { contents: read, actions: write, pages: write, id-token: write, statuses: write }
 ```
 
-The three branches: **deploy** (internal PR / `main` push inline, or any dispatch),
-**trampoline** (a tag re-dispatches itself so the deploy runs as a `workflow_dispatch`
-— [why](../explanations/architecture.md)), and **warn** (a fork PR, read-only, never
-deploys). A maintainer publishes a fork preview by running this workflow from the
-Actions tab with the `pr` number.
+`publish.yml` then routes each event: **deploy** (internal PR / `main` push, or any
+dispatch), **trampoline** (a tag → re-dispatches this shim so the deploy runs as a
+`workflow_dispatch` — [why](../explanations/architecture.md)), or **warn** (a fork PR,
+read-only, never deploys). A maintainer publishes a fork preview by running this workflow
+from the Actions tab with the `pr` number.
 
 ## 4. Push your branch and open a PR
 
