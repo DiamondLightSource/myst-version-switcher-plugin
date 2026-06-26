@@ -112,7 +112,7 @@ jobs:
 
 `publish.yml` is the engine and owns all the branching; this is a thin **shim** — the
 only thing that calls it, and the one place you pin `@__LATEST_TAG__`. It has to exist as a file
-in your repo (not just be `uses:`'d) because the tag trampoline re-dispatches it as a
+in your repo (not just be `uses:`'d) because the tag re-dispatch re-fires it as a
 `workflow_dispatch`, and a reusable workflow can't be dispatched cross-repo. Copy it
 verbatim; the only thing to keep current is the `publish.yml` pin, already set to
 `__LATEST_TAG__`:
@@ -124,7 +124,7 @@ on:
   workflow_call:                    # ci.yml's `publish` job, for every event
     inputs:
       version-name: { required: false, default: "", type: string }
-  workflow_dispatch:                # tag trampoline's re-dispatch + fork-PR preview + manual re-deploy
+  workflow_dispatch:                # tag re-dispatch + fork-PR preview + manual re-deploy
     inputs:
       pr: { description: "Fork PR to approve + preview (empty = re-deploy)", required: false, default: "" }
 jobs:
@@ -133,12 +133,12 @@ jobs:
     with:
       version-name: ${{ inputs.version-name }}    # "" on dispatch → pure durable gather
       pr: ${{ inputs.pr }}                         # set (dispatch) → pin that fork head SHA
-      dispatch-workflow: publish-dispatch.yml      # the file the tag trampoline re-dispatches
+      dispatch-workflow: publish-dispatch.yml      # the file the tag re-dispatch re-fires
     permissions: { contents: read, actions: write, pages: write, id-token: write, statuses: write }
 ```
 
 `publish.yml` then routes each event: **deploy** (internal PR / `main` push, or any
-dispatch), **trampoline** (a tag → re-dispatches this shim so the deploy runs as a
+dispatch), **re-dispatch** (a tag → re-fires this shim so the deploy runs as a
 `workflow_dispatch` — [why](../explanations/architecture.md)), or **warn** (a fork PR,
 read-only, never deploys). A maintainer publishes a fork preview by running this workflow
 from the Actions tab with the `pr` number.
