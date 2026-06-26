@@ -3,21 +3,19 @@ name: Publish
 # Reconstruct the WHOLE versioned docs site from durable sources (the consumer's
 # default-branch build, release docs.zip assets, open-PR build artifacts) and
 # deploy it directly to GitHub Pages — no gh-pages branch. This is the PRIVILEGED
-# half (pages/id-token/statuses write), kept in its own reusable workflow so it can
-# only run two trusted ways:
+# half (pages/id-token/statuses write) and a pure ENGINE: its only entry point is
+# `workflow_call`, and the ONLY thing that calls it is a `publish-dispatch.yml`
+# wrapper (this repo's own, or a consumer's pinned at <tag>). That wrapper exposes the
+# engine as both `workflow_dispatch` (the tag trampoline + fork-PR opt-in + manual
+# re-deploy) and `workflow_call` (ci.yml's inline publish for internal non-tag
+# events). Keeping the dispatch surface in the wrapper means this engine has a single
+# trusted caller and no event-type branching of its own.
 #
-#   workflow_call   — invoked by the consumer's ci.yml AFTER a successful build, for
-#                     INTERNAL events only (internal PRs, pushes to the default
-#                     branch/tags). The caller never calls it for a fork PR, so
-#                     untrusted fork code never reaches a write token. The current
-#                     build isn't a *completed* CI run yet, so the caller passes its
-#                     `version-name`; this run downloads the same-run `docs` artifact
-#                     and stages it directly (otherwise a default-branch/tag push
-#                     would publish the PREVIOUS build). A consumer's manual fork-PR
-#                     preview also comes through here — a workflow_dispatch wrapper in
-#                     their repo calls this with `pr: <n>` (and version-name: "").
-#   workflow_dispatch — this repo's own maintainer opt-in to preview an EXTERNAL fork
-#                     PR (the local, non-cross-repo path).
+# `version-name` (set by ci.yml's inline path, threaded through the wrapper) names an
+# in-run build to stage directly — the run isn't a *completed* CI run yet, so the
+# gather can't find it (or would find a stale prior build); this run downloads that
+# run's `docs` artifact and stages it. The dispatch paths pass version-name "" → pure
+# durable gather. `pr` (fork opt-in) pins + previews a fork PR's head SHA.
 #
 # The assemble logic is THIS repo's assemble/assemble.sh (+ assemble.mjs); we run it
 # directly rather than wrap it in a composite action. To version-match the scripts
@@ -34,8 +32,9 @@ on:
   workflow_call:
     inputs:
       version-name:
-        description: Version name (pr-<n> | <default-branch> | <tag>) of the in-run build to inject.
-        required: true
+        description: Version name (pr-<n> | <default-branch> | <tag>) of the in-run build to inject; "" → pure durable gather.
+        required: false
+        default: ""
         type: string
       guard-default-branch:
         description: >-
@@ -48,16 +47,10 @@ on:
       pr:
         description: >-
           External fork PR number to approve (pins its head SHA) and preview. Set this
-          (with version-name: "") from a consumer's workflow_dispatch wrapper, since a
-          reusable workflow can't be workflow_dispatch'd cross-repo directly.
+          (with version-name: "") from the publish-dispatch.yml wrapper's dispatch path.
         required: false
         default: ""
         type: string
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: External fork PR number to approve (pins its head SHA) and preview.
-        required: false
 
 permissions:
   contents: read     # checkout + read release assets
@@ -72,10 +65,9 @@ concurrency:
 
 jobs:
   publish:
-    # The canonical-repo guard lives in the caller (its publish job's `if`), not
-    # here, so this reusable workflow stays generic. Both entry points are trusted:
-    # the caller only calls it for internal events, and workflow_dispatch needs write
-    # access (a fork dispatching it deploys to the fork's own Pages).
+    # The canonical-repo guard lives upstream (ci.yml's publish job `if`, and the
+    # wrapper's dispatch needs write access), not here, so this engine stays generic.
+    # Its single caller is publish-dispatch.yml, which only reaches it on trusted paths.
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -101,9 +93,8 @@ jobs:
 
       # Fork opt-in: pin the PR's head commit as approved. assemble gathers an external
       # PR only when its head SHA carries this status, so a later push (new SHA) silently
-      # drops the preview until re-approved. Gated on `pr` alone (not event_name) so it
-      # works both from this repo's own workflow_dispatch and from a consumer's dispatch
-      # wrapper that passes `pr` through workflow_call.
+      # drops the preview until re-approved. Gated on `pr` alone, which the
+      # publish-dispatch.yml wrapper threads in from its dispatch input.
       - name: Approve fork PR head SHA
         if: inputs.pr != ''
         env:
@@ -120,7 +111,7 @@ jobs:
       # When publishing within the build's own run (workflow_call), download this
       # run's `docs` artifact so assemble can stage it directly as version-name —
       # the run isn't a completed success yet, so the gather can't find it (or would
-      # find a stale prior build). Skipped on workflow_dispatch (version-name empty).
+      # find a stale prior build). Skipped when version-name is "" (the dispatch paths).
       - name: Download this run's docs artifact
         if: inputs.version-name != ''
         uses: actions/download-artifact@v8

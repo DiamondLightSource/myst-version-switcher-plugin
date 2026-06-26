@@ -107,14 +107,21 @@ So a fork's build can never reach a write token; only trusted code deploys.
 ### Why publish is *nested* in CI (for internal events)
 
 The deploy is surfaced as a **job inside the CI run** (`ci.yml`'s `publish` job →
-`publish.yml` via `workflow_call`) so its status and URL are visible on the PR /
-commit — rather than running invisibly after the fact. But this is gated to
-**internal events only**: the `publish` job's `if` excludes fork PRs
-(`head.repo.full_name != github.repository`). A fork PR's build instead emits a
-warning (a step in the build job) that the preview was not published, linking the
-manual opt-in. The privileged `publish.yml` is therefore reachable two ways, both
-trusted: `workflow_call` (nested, internal) and `workflow_dispatch` (the maintainer
-fork opt-in).
+`publish-dispatch.yml` → `publish.yml` via `workflow_call`) so its status and URL are
+visible on the PR / commit — rather than running invisibly after the fact. A single
+`publish` job runs for **every** event; `publish-dispatch.yml` does the branching.
+
+`publish.yml` itself is a pure `workflow_call` **engine** with a single caller —
+`publish-dispatch.yml`, the one wrapper that owns all the publish branching and is
+reached by `workflow_call` (the inline `publish` job) and `workflow_dispatch` (the
+trampoline's re-dispatch, the fork-PR opt-in, manual re-deploys). It routes each event
+to one of three jobs: **deploy** (internal PR / default-branch push, or a dispatch),
+**trampoline** (a tag — below), or **warn** (a fork PR — read-only, never deploys, just
+posts the manual-opt-in hint; this replaced the old warning step in the build job). A
+fork PR can't reach a write token (its `GITHUB_TOKEN` is read-only and `deploy` is
+`if`-excluded for forks), so the security boundary holds while the hint now lives next
+to the rest of the publish logic. This repo dogfoods the exact wrapper a consumer adds
+(theirs just pins `publish.yml@<tag>`).
 
 The cost of nesting is an environment-policy change: because internal PRs now deploy
 from **their own ref**, the `github-pages` environment's deployment-branch policy must
@@ -136,9 +143,10 @@ record active, but the origin keeps serving the *first* artifact. So an inline t
 deploy would "succeed" while the site stayed on the pre-tag build.
 
 The one documented escape hatch: a `workflow_dispatch` deploy of that same SHA
-*forces* a re-serve. So tags don't deploy inline. `ci.yml`'s `publish-tag` job (after
-`release`, so the new `docs.zip` asset exists) re-triggers `publish.yml` as a
-`workflow_dispatch`; that run re-gathers from durable sources (now including the new
+*forces* a re-serve. So tags don't deploy inline — the wrapper's `trampoline` job
+waits for `ci.yml`'s parallel `release` job to attach the new `docs.zip`, then
+re-dispatches `publish-dispatch.yml` as a `workflow_dispatch`; that run re-gathers from
+durable sources (now including the new
 release) and deploys, and because its event is `workflow_dispatch` the origin updates.
 `main` and internal-PR deploys are the *first* of their SHA, so they serve fine inline
 and keep their PR/commit visibility. Consumers do the same by dispatching their own

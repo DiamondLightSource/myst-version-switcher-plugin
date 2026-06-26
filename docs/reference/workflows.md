@@ -31,26 +31,18 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 |---|---|---|---|
 | `build-command` | no | `make docs` | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
 | `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip`'s `html/`. |
-| `preview-workflow` | no | `publish.yml` | Consumer's dispatchable publish workflow file, named in the fork-preview warning. |
 
 | output | meaning |
 |---|---|
 | `version-name` | The version this build was served at (`pr-<n>` \| default-branch \| `<tag>`) — pass to `publish.yml`. |
 
-## `publish.yml` — assemble + deploy (privileged)
+## `publish.yml` — assemble + deploy engine (privileged)
 
 Reconstructs the whole site and deploys it to Pages. Carries the `github-pages`
 environment, `concurrency: pages`, and `pages`/`id-token`/`statuses` write permissions.
-Reachable two ways: `workflow_call` (nested by the consumer's `ci.yml` for internal
-**non-tag** events) and `workflow_dispatch`. The dispatch path covers both the tag
-trampoline and the fork-PR opt-in — **tags must deploy via `workflow_dispatch`**, since
-GitHub Pages silently drops a second deploy of an already-deployed SHA (a release tag
-shares the merge commit's SHA) unless the event is `workflow_dispatch`
-([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383); see
-the [architecture explanation](../explanations/architecture.md)). Consumers dispatch a
-small `publish-dispatch.yml` wrapper (a reusable workflow can't be dispatched
-cross-repo). The canonical-repo guard lives in the **caller**, so the workflow stays
-generic.
+It's a pure **`workflow_call` engine** with a single caller: the `publish-dispatch.yml`
+wrapper (below). The canonical-repo guard lives upstream (in `ci.yml` / the wrapper's
+dispatch), so the engine stays generic.
 
 It self-checks-out this repo's `assemble/` scripts at `job.workflow_sha` /
 `job.workflow_repository` (the `job` context resolves to the reusable file, not the
@@ -58,9 +50,32 @@ caller), so the scripts match the `<tag>` the consumer pinned — automatically,
 version bump. The consumer's repo stays checked out at the root so `assemble.mjs`'s
 `git tag` lists *their* versions.
 
+## `publish-dispatch.yml` — the wrapper (one per repo)
+
+The only thing that calls `publish.yml`, the single place you pin `publish.yml@<tag>`,
+and the owner of **all** publish branching — so `ci.yml` needs just one `publish` job
+(called for every event) and `docs.yml` needs no fork hint. Reached via `workflow_call`
+(ci.yml's `publish`) and `workflow_dispatch` (the trampoline's re-dispatch, a fork-PR
+preview, a manual re-deploy), it routes each event to one of three jobs:
+
+- **`deploy`** — internal PR / default-branch push (inline), or any `workflow_dispatch`.
+  Nests `publish.yml`; the inline path injects the in-run build via `version-name`.
+- **`trampoline`** — a tag push. Waits for the release, then re-dispatches this workflow
+  as `workflow_dispatch` so the deploy re-serves (see below).
+- **`warn`** — a fork PR. Read-only, never deploys; just posts the manual-opt-in hint.
+
+**Tags must deploy via `workflow_dispatch`**: GitHub Pages silently drops a second
+deploy of an already-deployed SHA (a release tag shares the merge commit's SHA) unless
+the event is `workflow_dispatch`
+([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383); see
+the [architecture explanation](../explanations/architecture.md)). A reusable workflow
+can't be `workflow_dispatch`'d cross-repo, which is why the wrapper lives in each repo.
+
+### `publish.yml` inputs (threaded through by the wrapper)
+
 | input | required | default | meaning |
 |---|---|---|---|
-| `version-name` | yes (`workflow_call`) | — | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Used when publishing inside the build's own run (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather. |
+| `version-name` | no | `""` | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Set by `ci.yml`'s inline publish (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather (the dispatch paths). |
 | `guard-default-branch` | no | `true` | When `true`, hard-fail if the consumer's default branch is absent from the site (its build artifact expired). Set `false` while a repo's default branch isn't yet publishing `docs.zip` (mid-migration). |
 
 ## What `publish.yml` gathers

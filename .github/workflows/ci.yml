@@ -4,13 +4,12 @@ name: CI
 # forks), pushes to main, and tags — lint, test, build the docs, and on tags
 # publish the release assets. It uploads each build's `docs` artifact.
 #
-# Publishing is nested here (the `publish` job → publish.yml) so its status is
-# visible on the PR / commit, but ONLY for internal NON-TAG events: a fork PR's build
-# runs with a read-only token and must never deploy, so the `publish` job is skipped
-# for it (the `docs` reusable workflow points a maintainer at the manual opt-in
-# instead). TAGS deploy via the `publish-tag` trampoline (workflow_dispatch) instead
-# of inline — a same-SHA tag deploy would otherwise be silently dropped by Pages. See
-# the architecture explanation in docs/.
+# Publishing is nested here (the `publish` job → publish-dispatch.yml → publish.yml) so
+# its status is visible on the PR / commit. A single `publish` job covers every event:
+# publish-dispatch.yml branches internally into deploy (internal PR / main push), tag
+# trampoline (a same-SHA tag deploy would be silently dropped by Pages unless dispatched),
+# or a fork-PR warning (forks build with a read-only token and never deploy). See the
+# architecture explanation in docs/.
 on:
   pull_request:
   push:
@@ -38,51 +37,22 @@ jobs:
     permissions:
       contents: write    # create the GitHub Release + attach assets
 
-  # Internal NON-TAG events (an internal PR or a push to main): a same-repo build we
-  # can trust + deploy inline, with the publish status visible on the PR/commit. These
-  # are the FIRST deploy of their SHA, so the Pages backend serves them fine.
-  # publish.yml reconstructs the whole site and injects this build's `docs` artifact
-  # for `docs.version-name`. Fork PRs (head repo ≠ this repo) are excluded — docs.yml's
-  # build job warns them instead. TAGS are excluded too: see publish-tag below.
+  # One publish job for every event — publish-dispatch.yml owns the branching (deploy
+  # inline / tag trampoline / fork-PR warn), so there's no separate tag or fork job and
+  # no ref/fork guards here. It runs for fork PRs too, but only to surface the opt-in
+  # hint: the wrapper's `deploy` job excludes forks and a fork PR's token is read-only,
+  # so untrusted code never reaches a write token. `actions: write` lets the wrapper's
+  # tag trampoline re-dispatch itself; `version-name` is the in-run build for the inline
+  # path (ignored by the trampoline/warn branches).
   publish:
     needs: [lint, test, docs]
-    if: >-
-      github.repository == 'DiamondLightSource/myst-version-switcher-plugin' &&
-      github.ref_type != 'tag' &&
-      ( github.event_name != 'pull_request' ||
-        github.event.pull_request.head.repo.full_name == github.repository )
-    uses: ./.github/workflows/publish.yml
+    if: github.repository == 'DiamondLightSource/myst-version-switcher-plugin'
+    uses: ./.github/workflows/publish-dispatch.yml
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:
       contents: read
-      actions: read
+      actions: write     # the wrapper's tag trampoline dispatches via gh workflow run
       pages: write
       id-token: write
       statuses: write
-
-  # Tags can't deploy inline. A release tag is cut on the merge commit, so it shares
-  # the default branch's just-deployed SHA — and the Pages backend silently DROPS a
-  # second same-SHA deploy on a non-`workflow_dispatch` event (reports success, keeps
-  # serving the old artifact; see publish.yml). The escape hatch is that a
-  # `workflow_dispatch` deploy of that SHA forces a re-serve. So instead of nesting
-  # publish.yml inline, re-trigger it as a workflow_dispatch (after `release`, so the
-  # dispatched run gathers the new release's docs.zip). The dispatched run does the
-  # deploy + verify; its status shows on its own run rather than this tag's CI, which
-  # is fine — a tag has no PR to annotate. (Consumers do the same by dispatching their
-  # fork-preview wrapper instead — see the how-to.)
-  publish-tag:
-    needs: [lint, test, docs, release]
-    if: >-
-      github.repository == 'DiamondLightSource/myst-version-switcher-plugin' &&
-      github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write     # dispatch publish.yml
-    steps:
-      - name: Re-deploy via workflow_dispatch (tag trampoline)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
