@@ -93,7 +93,7 @@ export function orderVersions(builds, tags) {
 }
 
 /**
- * Is `tag` a prerelease? Mirrors `_release.yml`'s test (an `a`, `b`, or `rc`
+ * Is `tag` a prerelease? Mirrors `release.yml`'s test (an `a`, `b`, or `rc`
  * marker in the name, PEP 440 style) so "stable" means the same thing repo-wide.
  */
 export function isPrerelease(tag) {
