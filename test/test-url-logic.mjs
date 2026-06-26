@@ -4,7 +4,7 @@
  * Live anywidget rendering is a browser job.
  */
 import assert from "node:assert/strict";
-import {
+import plugin, {
 	computeTargetUrl,
 	detectCurrent,
 	entryLabel,
@@ -14,7 +14,6 @@ import {
 	withLocalFallback,
 	withTrailingSlash,
 } from "../plugins/version-switcher.mjs";
-import plugin from "../plugins/version-switcher.mjs";
 
 const switcher = [
 	{
