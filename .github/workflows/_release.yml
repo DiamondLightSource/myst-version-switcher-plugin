@@ -10,7 +10,7 @@ jobs:
       # a build artifact). Check it out into a dot-dir — the `files: "*"` glob below
       # only sees the cwd root and skips leading-dot paths — then copy just that file
       # to the root, so the upload is exactly {version-switcher.mjs, docs.zip}.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: .src
           sparse-checkout: plugins/version-switcher.mjs

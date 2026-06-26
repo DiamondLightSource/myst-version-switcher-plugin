@@ -51,7 +51,7 @@ jobs:
     outputs:
       version-name: ${{ steps.ver.outputs.version-name }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # uv is installed unconditionally (Node/npx is already on the runner) so every
       # docs build has the same baseline env regardless of build-command. With no
