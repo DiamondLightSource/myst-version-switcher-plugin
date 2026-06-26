@@ -89,7 +89,7 @@ jobs:
           eval "$BUILD_COMMAND"
 
       # Pack the site as docs.zip with a bare html/ root — the durable contract both
-      # publish.yml's gather and _release.yml's asset rely on. Stage into html/
+      # publish.yml's gather and release.yml's asset rely on. Stage into html/
       # first so any html-dir name yields the same root.
       - name: Pack docs.zip (bare html/ root)
         env:

@@ -39,88 +39,79 @@ for all options):
 The `json-url` points at a `switcher.json` that does not exist yet — `publish.yml`
 will generate it on your first deploy.
 
-## 2. Set the Pages source to "GitHub Actions"
+## 2. Set the Pages source to "GitHub Actions" and allow deploys from any ref
 
 In **Settings → Pages**, set **Source** to **GitHub Actions** (not "Deploy from a
 branch"). `deploy-pages` refuses to publish otherwise.
 
-## 3. Add the `ci.yml` (build · release · publish)
+Because internal PRs deploy from their own ref, the `github-pages` environment's
+deployment policy must allow those refs. In **Settings → Environments →
+github-pages**, it is recommended to set **Deployment branches and tags** to
+**No restriction**.
 
-This is the one workflow file you add. You don't copy the build/publish logic into your
-repo — you **call** this project's two reusable workflows by full path, pinned to
-`<tag>`. Three jobs:
+## 3. Add the workflow files
+
+Your project will use this project's two reusable workflows to build a single
+version of the docs, then publish all available versions of the docs into a
+single GitHub Pages site.
+
+It is recommended that you use the structure below.
+
+### `ci.yml`
+
+This is the entry point, it defines three jobs:
 
 - **`docs`** — `docs.yml` builds your site at the versioned `BASE_URL` and uploads the
   `docs` artifact, for every event (fork PRs included).
 - **`release`** — a small tag-only job that attaches the built `docs.zip` to the GitHub
-  Release. **Required:** that asset is a tag's *only* durable source (tags get no
-  `_sources/` copy, unlike the default branch), so without it a release drops on the
-  next deploy.
-- **`publish`** — calls your `publish-dispatch.yml` wrapper (below) for **every** event;
-  the wrapper decides what to do (deploy a PR/`main` preview, trampoline a tag, or just
-  warn on a fork PR), so this is one small job with no ref/fork guards. Its status shows
-  on the PR/commit. Fork PRs build + verify but never reach a write token.
+  Release.
+- **`publish`** — calls your `publish-dispatch.yml` wrapper which publishes the complete
+  built site (with all versions) to GitHub Pages.
 
 ```yaml
 # .github/workflows/ci.yml
 name: CI
 on:
   pull_request:
-  push: { branches: [main], tags: ['*'] }   # '*' never matches '/'
+  push: 
+    branches: [main]
+    tags: ['*']
 
 jobs:
-  docs:
+  docs:   # Call the docs building workflow directly
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       # Whatever turns your sources into docs/_build/html at $BASE_URL.
       # uv and Node are preinstalled, so this can be make / tox / npx / npm.
       build-command: myst build --html      # e.g. make docs · tox -e docs · npm ci && npm run docs
 
-  release:
+  release: 
     needs: [docs]
     if: github.ref_type == 'tag'            # tag pushes only
-    runs-on: ubuntu-latest
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@<tag>
     permissions:
       contents: write                       # create the Release + attach assets
-    steps:
-      # ↓ paste the two steps from the literalinclude below ↓
 
-  publish:                                  # every event — the wrapper branches
+  publish:
     needs: [docs]
-    if: github.repository == 'ORG/REPO'
-    uses: ./.github/workflows/publish-dispatch.yml   # your wrapper (below); it pins publish.yml@<tag>
+    if: github.repository == 'ORG/REPO'     # don't publish a pages site in the fork's org
+    uses: ./.github/workflows/publish-dispatch.yml   # your workflow (below)
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:
       contents: read
-      actions: write                        # the wrapper's tag trampoline dispatches via gh workflow run
+      actions: write
       pages: write
       id-token: write
       statuses: write
 ```
 
-The `release` job's `steps:` are exactly what this repo's own `_release.yml` runs (minus
-its plugin-specific `version-switcher.mjs` handling) — drop these in under `steps:`
-above (`download-artifact` pulls the `docs` artifact; `action-gh-release`'s `files: "*"`
-attaches everything in the working directory, here just that `docs.zip`):
+### `publish-dispatch.yml`
 
-```{literalinclude} ../../.github/workflows/_release.yml
-:language: yaml
-:start-after: docs-literalinclude:release-steps:start
-:end-before: docs-literalinclude:release-steps:end
-```
-
-That's the whole integration. `build-command` is the only thing most repos customise:
-`docs.yml` owns the versioning contract (the `BASE_URL`, the `docs.zip` bare-`html/`
-root, the `docs` artifact name), and `publish.yml` runs the site reconstruction
-internally — it checks out this project's `assemble` scripts at the same `<tag>` via
-`job.workflow_sha`, so there is no action or script for you to wire.
-
-### The `publish-dispatch.yml` wrapper (required)
-
-`publish.yml` is a pure `workflow_call` engine, and this wrapper in your repo is the
-**only** thing that calls it — also the single place you pin the engine's `@<tag>`. It
-owns all the branching, so your `ci.yml` `publish` job stays a one-liner. Copy it
+`publish.yml` is the engine and owns all the branching; this is a thin **shim** — the
+only thing that calls it, and the one place you pin `@<tag>`. It has to exist as a file
+in your repo (not just be `uses:`'d) because the tag trampoline re-dispatches it as a
+`workflow_dispatch`, and a reusable workflow can't be dispatched cross-repo. Copy it
 verbatim, changing only `<tag>`:
 
 ```yaml
@@ -129,73 +120,30 @@ name: Publish (dispatch)
 on:
   workflow_call:                    # ci.yml's `publish` job, for every event
     inputs:
-      version-name:          { required: false, default: "", type: string }
-      guard-default-branch:  { required: false, default: "true", type: string }
-      pr:                    { required: false, default: "", type: string }
+      version-name: { required: false, default: "", type: string }
   workflow_dispatch:                # tag trampoline's re-dispatch + fork-PR preview + manual re-deploy
     inputs:
-      pr: { description: "Fork PR number to approve + preview (leave empty to just re-deploy)", required: false, default: "" }
+      pr: { description: "Fork PR to approve + preview (empty = re-deploy)", required: false, default: "" }
 jobs:
-  # Internal PR / default-branch push (inline), or any workflow_dispatch → deploy.
-  deploy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref_type != 'tag') ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
-    permissions: { contents: read, actions: read, pages: write, id-token: write, statuses: write }
+  publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
-      version-name: ${{ inputs.version-name }}                       # "" on dispatch → pure durable gather
-      guard-default-branch: ${{ inputs.guard-default-branch || 'true' }}
-      pr: ${{ inputs.pr }}                                           # set → pin that fork head SHA
-
-  # A tag can't deploy inline (same SHA as the default-branch push → Pages drops it
-  # unless the event is workflow_dispatch). Re-dispatch this workflow after the release.
-  trampoline:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions: { contents: read, actions: write }
-    steps:
-      - env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", TAG: "${{ github.ref_name }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" }
-        run: |
-          set -euo pipefail
-          for _ in $(seq 1 36); do gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break; sleep 5; done
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || { echo "::error::release $TAG not found"; exit 1; }
-          gh workflow run publish-dispatch.yml --repo "$REPO" --ref "$DEFAULT_BRANCH"
-
-  # Fork PR: read-only token, never deploys — just surface the manual-opt-in hint.
-  warn:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - run: |
-          echo "::warning title=Docs preview not published::Fork PR — not auto-published. A maintainer \
-          can preview it by running publish-dispatch.yml with pr=${{ github.event.pull_request.number }}: \
-          https://github.com/${{ github.repository }}/actions/workflows/publish-dispatch.yml"
+      version-name: ${{ inputs.version-name }}    # "" on dispatch → pure durable gather
+      pr: ${{ inputs.pr }}                         # set (dispatch) → pin that fork head SHA
+      dispatch-workflow: publish-dispatch.yml      # the file the tag trampoline re-dispatches
+    permissions: { contents: read, actions: write, pages: write, id-token: write, statuses: write }
 ```
 
-The three branches: **deploy** (internal PR / `main` push inline, or any dispatch),
-**trampoline** (a tag re-dispatches itself so the deploy runs as a `workflow_dispatch`
-— [why](../explanations/architecture.md)), and **warn** (a fork PR, read-only, never
-deploys). A maintainer publishes a fork preview by running this workflow from the
-Actions tab with the `pr` number.
+`publish.yml` then routes each event: **deploy** (internal PR / `main` push, or any
+dispatch), **trampoline** (a tag → re-dispatches this shim so the deploy runs as a
+`workflow_dispatch` — [why](../explanations/architecture.md)), or **warn** (a fork PR,
+read-only, never deploys). A maintainer publishes a fork preview by running this workflow
+from the Actions tab with the `pr` number.
 
-## 4. Allow the deploying refs in the `github-pages` environment
+## 4. Push your branch and open a PR
 
-Because internal PRs deploy from **their own ref** (the publish job runs inside their
-CI run; tags deploy from the default-branch ref via the trampoline), the
-`github-pages` environment's deployment policy must allow those refs. In **Settings →
-Environments → github-pages**, it is recommended to set **Deployment branches and
-tags** to **No restriction**.
-
-## 5. Push your branch and open a PR
-
-Steps 2 and 4 are repo settings (done once in the UI); steps 1 and 3 are file changes —
-commit them on a branch and open a PR. On the PR you'll see:
+Make the changes from steps 1 and 3 in a branch and open a PR. On the PR you'll
+see:
 
 - **`docs / build`** go green — it builds your docs at the versioned `BASE_URL` and
   uploads the `docs` artifact. This runs for every PR, forks included.
@@ -210,7 +158,7 @@ commit them on a branch and open a PR. On the PR you'll see:
 > default-branch guard refuses to publish a site missing it. It clears the moment you
 > merge (step 6). Every PR after that previews normally.
 
-## 6. Merge to main — your first deploy
+## 5. Merge to main — your first deploy
 
 Merging pushes to `main`, which builds `main` and runs `publish`: it assembles a
 single-entry `switcher.json` and an `index.html` redirecting to `main/`, and deploys.
@@ -219,15 +167,26 @@ switcher showing one entry. (The single-entry first deploy is graceful by design
 release required.) From here on, every push to `main` redeploys and every internal PR
 gets its own `/pr-<n>/` preview.
 
-## 7. Cut your first release
+## 6. Cut your first release
+
+Push a tag:
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-The tag build runs, the **`release`** job attaches its `docs.zip` to the GitHub Release,
-and the next deploy's `assemble` gathers that release, flags it `preferred` (★), creates
-the `stable/` alias pointing at it, and points the root redirect at the constant
+The tag build runs and the **`release`** job creates the GitHub Release with that
+build's `docs.zip` attached. This works on any repo, including ones with [immutable
+releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+enabled (it attaches the asset as the release is created, before it's sealed).
+
+> On a repo **without** immutable releases you can instead **publish a release from the
+> GitHub UI** — that also creates the tag, and the `release` job attaches `docs.zip` to
+> the release you published. (This doesn't work under immutable releases: a published
+> immutable release can't receive assets after the fact, so use the tag push above.)
+
+Either way, the next deploy's `publish` gathers that release, flags it `preferred` (★),
+creates the `stable/` alias pointing at it, and points the root redirect at the constant
 `stable/` URL. Your switcher now lists `main` and `1.0.0`, and
 `https://ORG.github.io/REPO/stable/` always resolves to the latest release — a stable
 URL for cross-project `objects.inv` references.

@@ -107,21 +107,24 @@ So a fork's build can never reach a write token; only trusted code deploys.
 ### Why publish is *nested* in CI (for internal events)
 
 The deploy is surfaced as a **job inside the CI run** (`ci.yml`'s `publish` job →
-`publish-dispatch.yml` → `publish.yml` via `workflow_call`) so its status and URL are
+`publish-dispatch.yml` shim → `publish.yml` via `workflow_call`) so its status and URL are
 visible on the PR / commit — rather than running invisibly after the fact. A single
-`publish` job runs for **every** event; `publish-dispatch.yml` does the branching.
+`publish` job runs for **every** event; `publish.yml` does the branching.
 
-`publish.yml` itself is a pure `workflow_call` **engine** with a single caller —
-`publish-dispatch.yml`, the one wrapper that owns all the publish branching and is
-reached by `workflow_call` (the inline `publish` job) and `workflow_dispatch` (the
-trampoline's re-dispatch, the fork-PR opt-in, manual re-deploys). It routes each event
-to one of three jobs: **deploy** (internal PR / default-branch push, or a dispatch),
-**trampoline** (a tag — below), or **warn** (a fork PR — read-only, never deploys, just
-posts the manual-opt-in hint; this replaced the old warning step in the build job). A
-fork PR can't reach a write token (its `GITHUB_TOKEN` is read-only and `deploy` is
-`if`-excluded for forks), so the security boundary holds while the hint now lives next
-to the rest of the publish logic. This repo dogfoods the exact wrapper a consumer adds
-(theirs just pins `publish.yml@<tag>`).
+`publish.yml` is the `workflow_call` **engine** and owns all the publish branching,
+reached only through a thin `publish-dispatch.yml` shim that exposes it as both
+`workflow_call` (the inline `publish` job) and `workflow_dispatch` (the trampoline's
+re-dispatch, the fork-PR opt-in, manual re-deploys). It routes each event to one of three
+jobs: **deploy** (internal PR / default-branch push, or a dispatch), **trampoline** (a tag
+— below), or **warn** (a fork PR — read-only, never deploys, just posts the manual-opt-in
+hint; this replaced the old warning step in the build job). A fork PR can't reach a write
+token (its `GITHUB_TOKEN` is read-only and `deploy` is `if`-excluded for forks), so the
+security boundary holds while the hint lives next to the rest of the publish logic. The
+shim exists only because a reusable workflow can't be `workflow_dispatch`'d cross-repo, so
+the trampoline needs a local file to re-dispatch — it `gh workflow run`s the shim by name
+(`dispatch-workflow`), which works because a called workflow runs with the *caller's* repo
+and token. This repo dogfoods the exact shim a consumer adds (theirs just pins
+`publish.yml@<tag>`).
 
 The cost of nesting is an environment-policy change: because internal PRs now deploy
 from **their own ref**, the `github-pages` environment's deployment-branch policy must
@@ -143,14 +146,15 @@ record active, but the origin keeps serving the *first* artifact. So an inline t
 deploy would "succeed" while the site stayed on the pre-tag build.
 
 The one documented escape hatch: a `workflow_dispatch` deploy of that same SHA
-*forces* a re-serve. So tags don't deploy inline — the wrapper's `trampoline` job
+*forces* a re-serve. So tags don't deploy inline — `publish.yml`'s `trampoline` job
 waits for `ci.yml`'s parallel `release` job to attach the new `docs.zip`, then
-re-dispatches `publish-dispatch.yml` as a `workflow_dispatch`; that run re-gathers from
-durable sources (now including the new
-release) and deploys, and because its event is `workflow_dispatch` the origin updates.
-`main` and internal-PR deploys are the *first* of their SHA, so they serve fine inline
-and keep their PR/commit visibility. Consumers do the same by dispatching their own
-`publish-dispatch.yml` wrapper (a reusable workflow can't be dispatched cross-repo).
+`gh workflow run`s the shim as a `workflow_dispatch`; that run re-gathers from durable
+sources (now including the new release) and deploys, and because its event is
+`workflow_dispatch` the origin updates. `main` and internal-PR deploys are the *first* of
+their SHA, so they serve fine inline and keep their PR/commit visibility. This all lives
+in the shared engine — the consumer's only dispatch-related file is the thin shim (a
+reusable workflow can't be dispatched cross-repo, so the trampoline needs a local file to
+re-dispatch).
 The post-deploy origin-verify step in `publish.yml` backstops any residual stale
 origin by failing the run instead of serving stale docs silently.
 
@@ -275,5 +279,6 @@ full analysis and an implementation sketch are tracked as future work in
 - **JS core + bash glue.** Pure functions (and their node tests) live in
   `assemble.mjs`; bash does the `gh`/`unzip`/`mv` IO. Python was a contender (the
   team is Python-heavy) but loses on a second toolchain in a JS-only repo.
-- **`_release.yml` attaches `docs.zip`** (it downloads the run's `docs` artifact and
-  uploads it verbatim), so `assemble` only ever *reads* release assets.
+- **`release.yml` attaches `docs.zip`** (it downloads the run's artifacts and
+  creates/uploads the Release via `gh`, verbatim), so `assemble` only ever *reads*
+  release assets.

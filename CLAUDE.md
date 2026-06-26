@@ -16,9 +16,10 @@ scripts/migrate.sh                             # operator gh-pages → durable-s
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
-.github/workflows/publish.yml                  # PUBLIC reusable ENGINE: run assemble/ (checked out at job.workflow_sha) + deploy to Pages (PRIVILEGED). workflow_call ONLY; its sole caller is publish-dispatch.yml
-.github/workflows/publish-dispatch.yml         # PUBLIC wrapper around publish.yml: workflow_call (ci.yml's inline publish) + workflow_dispatch (tag trampoline + fork-PR opt-in + manual re-deploy). Dogfoods the wrapper consumers add
-.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / _release, then ONE publish job nesting publish-dispatch.yml for every event (the wrapper branches: deploy / tag-trampoline / fork-warn)
+.github/workflows/publish.yml                  # PUBLIC reusable ENGINE (PRIVILEGED): branches on the event into 3 jobs — deploy (assemble@job.workflow_sha + Pages), tag-trampoline (re-dispatch the shim), fork-warn. workflow_call ONLY; reached via the publish-dispatch.yml shim
+.github/workflows/publish-dispatch.yml         # PUBLIC thin shim: workflow_call (ci.yml's publish, every event) + workflow_dispatch (trampoline re-dispatch + fork-PR opt-in + manual re-deploy) → forwards to publish.yml. The dispatchable file consumers copy (reusable workflows can't be dispatched cross-repo)
+.github/workflows/release.yml                  # PUBLIC reusable: attach the run's build artifacts (docs.zip; + version-switcher.mjs via _test.yml) to the tag's GitHub Release via gh (create-or-upload, immutable-safe). Consumers `uses:` it directly
+.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / release, then ONE publish job nesting publish-dispatch.yml (shim) → publish.yml for every event (publish.yml branches: deploy / tag-trampoline / fork-warn)
 ```
 
 ## Two halves, different lifecycles
@@ -66,15 +67,14 @@ gathered (a merged/closed PR, a deleted release) is correctly dropped — no
 
 ### Split build (unprivileged) from publish (privileged), but nest publish for visibility
 `ci.yml` builds + uploads the `docs` artifact for every event including fork PRs.
-It then nests a single privileged `publish` job (`uses: publish-dispatch.yml`) for
-**every** event in the canonical repo. `publish-dispatch.yml` branches: an internal
-PR / main push deploys inline (status **visible on the PR/commit**); a fork PR hits a
-read-only **warn** job (untrusted fork-PR code never reaches a write token — the
+It then nests a single privileged `publish` job (`uses: publish-dispatch.yml` shim →
+`publish.yml`) for **every** event in the canonical repo. `publish.yml` branches: an
+internal PR / main push deploys inline (status **visible on the PR/commit**); a fork PR
+hits a read-only **warn** job (untrusted fork-PR code never reaches a write token — the
 `deploy` job is `if`-excluded for forks and the token is read-only anyway); a **tag**
 hits the **trampoline** (a tag shares the merge commit's SHA and Pages drops a second
 same-SHA deploy unless it's a `workflow_dispatch` — deploy-pages#383 — so it
-re-dispatches `publish-dispatch.yml`). One `publish` job, no ref/fork guards in
-`ci.yml`.
+re-dispatches the shim). One `publish` job, no ref/fork guards in `ci.yml`.
 
 Because the inline publish runs **inside the build's own CI run**, the current build
 isn't a *completed* successful run the gather can discover (and for a main push the
@@ -128,7 +128,7 @@ With no releases and no other branches, `assemble` produces a single-entry
 rather than failing. The "preferred" version (the redirect target, flagged
 `preferred: true` in switcher.json, rendered with a ★) is the newest deployed
 non-prerelease tag, falling back to `main`/`master`. Prerelease detection mirrors
-`_release.yml` (an `a`/`b`/`rc` marker).
+`release.yml` (an `a`/`b`/`rc` marker).
 
 ### `stable/` alias
 When a non-prerelease release is deployed, the site serves a `stable/` symlink
@@ -143,33 +143,31 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
 
 - `ci.yml` — **build + verify, then publish on internal events.** Triggers on
   `pull_request` + push to `main`/tags (no other-branch pushes; `*` excludes
-  `/`-tags). Orchestrates `_lint` / `_test` / `_docs` / `_release`, runs for forks,
+  `/`-tags). Orchestrates `_lint` / `_test` / `docs` / `release`, runs for forks,
   and uploads the `docs` artifact. It then nests a single `publish` job
   (`uses: publish-dispatch.yml`) for **every** event in the canonical repo (the `if`
   is just `repository == '…'`); grants `pages`/`id-token`/`statuses`/`actions:write`
   perms to the call and passes `version-name: needs.docs.outputs.version-name`. No
-  ref/fork guards and no separate tag job — `publish-dispatch.yml` does all the
-  branching.
-- `publish-dispatch.yml` — **the one wrapper around the engine**, owning all publish
-  branching. `workflow_call` (ci.yml's `publish` job, every event) + `workflow_dispatch`
-  (the tag trampoline's re-dispatch + fork-PR opt-in + manual re-deploy). Three jobs by
-  originating event: **deploy** (internal PR / default-branch push inline, or any
-  dispatch → `uses: publish.yml`), **trampoline** (a tag — waits for `_release`, then
-  `gh workflow run publish-dispatch.yml` so the deploy is a `workflow_dispatch` that
-  re-serves; a same-SHA tag deploy is otherwise dropped by Pages — deploy-pages#383),
-  and **warn** (a fork PR — read-only, never deploys, posts the manual-opt-in hint;
-  moved here from `docs.yml`'s build job). This repo dogfoods the exact wrapper
+  ref/fork guards and no separate tag job — `publish.yml` does all the branching.
+- `publish-dispatch.yml` — **the thin shim** (the dispatchable file each repo carries).
+  `workflow_call` (ci.yml's `publish` job, every event) + `workflow_dispatch` (the tag
+  trampoline's re-dispatch + fork-PR opt-in + manual re-deploy); both just `uses:
+  publish.yml`, threading `version-name`/`pr` + its own filename as `dispatch-workflow`.
+  It exists only because a reusable workflow can't be dispatched cross-repo, so the
+  trampoline needs a local file to re-dispatch. This repo dogfoods the exact shim
   consumers add (theirs pins `publish.yml@<tag>`; this one uses the local path).
-- `publish.yml` — **assemble + deploy ENGINE, privileged.** `workflow_call` ONLY
-  (sole caller: `publish-dispatch.yml`). Sparse-checks-out this repo's `assemble/` at
-  `job.workflow_sha` (so the scripts match the ref the consumer pinned
-  `publish.yml@<ref>` to — see "Self-referencing the assemble scripts" below), runs
-  `assemble.sh`, then `upload-pages-artifact` + `deploy-pages`, carrying the
-  `github-pages` environment + `pages`/`id-token`/`statuses` perms + `concurrency`.
-  Its job has **no `if`** — the canonical-repo guard lives upstream in ci.yml's
-  `publish` job + the wrapper's dispatch (which needs write access).
-  On `workflow_call` with a non-empty `version-name` it injects the in-run build (see
-  the split design decision). See the architecture explanation in docs/.
+- `publish.yml` — **assemble + deploy ENGINE, privileged; owns the event branching.**
+  `workflow_call` ONLY (reached via the shim). Three jobs by originating event:
+  **deploy** (internal PR / default-branch push inline, or any dispatch → sparse-checks
+  out this repo's `assemble/` at `job.workflow_sha` so the scripts match the pinned ref —
+  see "Self-referencing the assemble scripts" below — runs `assemble.sh`, then
+  `upload-pages-artifact` + `deploy-pages` + verify, carrying the `github-pages`
+  environment + perms + `concurrency`), **trampoline** (a tag — waits for the release,
+  then `gh workflow run <dispatch-workflow>` in the consumer's repo with their token, so
+  the deploy lands as a `workflow_dispatch` that re-serves; a same-SHA tag deploy is
+  otherwise dropped — deploy-pages#383), and **warn** (a fork PR — read-only, posts the
+  opt-in hint). No canonical guard (it lives upstream in ci.yml). `version-name` injects
+  the in-run build on the inline path. See the architecture explanation in docs/.
 
 Sub-workflows of `ci.yml`:
 - `_lint.yml` — biome
@@ -183,18 +181,23 @@ Sub-workflows of `ci.yml`:
   `tox -e docs` regardless of project. This repo passes `npm ci && npm run docs`. It
   OWNS the build↔publish contract (version name, BASE_URL, docs.zip `html/` root,
   `docs` artifact name) so consumers only choose a command.
-- `_release.yml` — attaches `version-switcher.mjs` + the tag's `docs.zip` (the
-  `docs` artifact, verbatim — no repack) as Release assets (tag-only).
+- `release.yml` — **PUBLIC reusable, tag-only.** Downloads every artifact in the run
+  and attaches them to the tag's GitHub Release via `gh` — `gh release create` if no
+  Release exists yet (draft→upload→publish atomically, so immutable-safe), else
+  `gh release upload --clobber` to an existing (UI-published, mutable) Release. No
+  third-party action. For this repo the artifacts are the tag's `docs.zip` (the `docs`
+  artifact, verbatim) + `version-switcher.mjs` (uploaded by `_test.yml` as an artifact,
+  so the generic workflow needs no plugin-specific step). Consumers `uses:` it directly.
 
-**Publish flow.** The single `publish` job (→ `publish-dispatch.yml`) runs for every
-event and the wrapper branches. Internal PRs and `main` deploy inline as part of the
+**Publish flow.** The single `publish` job (→ `publish-dispatch.yml` shim → `publish.yml`)
+runs for every event and `publish.yml` branches. Internal PRs and `main` deploy inline as part of the
 same CI run once lint/test/docs pass (`publish.yml` injects this build + `assemble`
 gathers `main`, releases, and every other open PR → deploy), a visible check on the
 PR/commit. **Tags** hit the wrapper's `trampoline`: a release tag shares the merge
 commit's SHA, and GitHub Pages silently drops a second deploy of an already-deployed
 SHA *unless* the event is `workflow_dispatch`
 ([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)) —
-so it waits for `_release`, then `gh workflow run publish-dispatch.yml`
+so it waits for the release, then `gh workflow run publish-dispatch.yml`
 (`workflow_dispatch`), which re-gathers from durable sources (incl. the new release)
 and deploys with the origin actually updating (the dispatched run carries the deploy
 status, not the tag's CI run). An **external fork PR** hits the wrapper's `warn` job
@@ -226,9 +229,9 @@ forwarded port in a real browser and hard-reload (MyST caches the localized esm)
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-CI runs lint + tests + docs build, `_release.yml` creates a GitHub Release with
-`version-switcher.mjs` and the tag's `docs.zip` as assets, and `publish.yml`
-(triggered by CI completing) reconstructs + deploys the site including the new tag.
+CI runs lint + tests + docs build, then `release.yml` creates the GitHub Release with
+`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`), and the tag
+trampoline reconstructs + deploys the site including the new tag.
 The plugin URL and the `uses:` refs for `docs.yml`/`publish.yml` all resolve to the
 same tag.
 
@@ -263,7 +266,7 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       build-command: make docs        # or: tox -e docs / npx … myst build / npm ci && npm run docs
-  publish:                            # every event — the wrapper branches
+  publish:                            # every event — publish.yml branches
     needs: [docs]
     if: github.repository == 'ORG/REPO'
     uses: ./.github/workflows/publish-dispatch.yml   # your wrapper; it pins publish.yml@<tag>
@@ -272,10 +275,11 @@ jobs:
     permissions: { pages: write, id-token: write, contents: read, actions: write, statuses: write }
 ```
 
-Add a `_release.yml`-style job that attaches each tag's built `docs.zip` (bare
-`html/` root) + the plugin as Release assets so `assemble` can reconstruct released
-versions, and the `publish-dispatch.yml` wrapper around `publish.yml` — the single
-caller of the engine and the one place you pin `publish.yml@<tag>`. The wrapper owns all
+Add a `release` job that `uses:` this repo's `release.yml@<tag>` (with `permissions:
+contents: write`) to attach each tag's built `docs.zip` (bare `html/` root) as a
+Release asset so `assemble` can reconstruct released versions, and the
+`publish-dispatch.yml` wrapper around `publish.yml` — the single caller of the engine
+and the one place you pin `publish.yml@<tag>`. The wrapper owns all
 the branching: **deploy** (inline non-tag, or a dispatch), **trampoline** (a tag
 re-dispatches itself so the deploy is a `workflow_dispatch` — required for a release's
 same-SHA deploy to go live), and **warn** (a fork PR, read-only, posts the preview

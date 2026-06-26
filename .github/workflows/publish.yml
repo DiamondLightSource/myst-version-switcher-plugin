@@ -1,33 +1,36 @@
 name: Publish
 
 # Reconstruct the WHOLE versioned docs site from durable sources (the consumer's
-# default-branch build, release docs.zip assets, open-PR build artifacts) and
-# deploy it directly to GitHub Pages — no gh-pages branch. This is the PRIVILEGED
-# half (pages/id-token/statuses write) and a pure ENGINE: its only entry point is
-# `workflow_call`, and the ONLY thing that calls it is a `publish-dispatch.yml`
-# wrapper (this repo's own, or a consumer's pinned at <tag>). That wrapper exposes the
-# engine as both `workflow_dispatch` (the tag trampoline + fork-PR opt-in + manual
-# re-deploy) and `workflow_call` (ci.yml's inline publish for internal non-tag
-# events). Keeping the dispatch surface in the wrapper means this engine has a single
-# trusted caller and no event-type branching of its own.
+# default-branch build, release docs.zip assets, open-PR build artifacts) and deploy it
+# directly to GitHub Pages — no gh-pages branch. The PRIVILEGED half. Its only caller is
+# a thin `publish-dispatch.yml` shim (this repo's own, or a consumer's pinned at <tag>)
+# which exposes it as both `workflow_call` (ci.yml's `publish` job, for every event) and
+# `workflow_dispatch` (the trampoline's re-dispatch + fork-PR opt-in + manual re-deploy).
+# This workflow OWNS the event branching, into one of three jobs:
 #
-# `version-name` (set by ci.yml's inline path, threaded through the wrapper) names an
-# in-run build to stage directly — the run isn't a *completed* CI run yet, so the
-# gather can't find it (or would find a stale prior build); this run downloads that
-# run's `docs` artifact and stages it. The dispatch paths pass version-name "" → pure
-# durable gather. `pr` (fork opt-in) pins + previews a fork PR's head SHA.
+#   deploy     — internal PR / default-branch push / any workflow_dispatch → assemble +
+#                deploy + verify. The inline path injects the in-run build via
+#                `version-name`; the dispatch paths pure-gather (version-name "").
+#   trampoline — a TAG push. An inline tag deploy is silently DROPPED by Pages (it reuses
+#                the default branch's just-deployed SHA on a non-dispatch event —
+#                deploy-pages#383), so wait for the release, then re-dispatch the shim
+#                (`inputs.dispatch-workflow`, a file in the CONSUMER's repo — a
+#                workflow_call run executes with the caller's repo + token, so we can
+#                dispatch it) → the deploy lands on a `workflow_dispatch` event and
+#                re-serves. A reusable workflow can't be dispatched cross-repo, which is
+#                why the shim (not this engine) is the dispatch target.
+#   warn       — a FORK PR. Read-only token, never deploys; just surfaces the opt-in hint.
 #
 # The assemble logic is THIS repo's assemble/assemble.sh (+ assemble.mjs); we run it
-# directly rather than wrap it in a composite action. To version-match the scripts
-# to this workflow, we check out the reusable workflow's OWN repo at its OWN commit
-# via the `job` context: unlike github.workflow_* (which resolve to the CALLER's
-# entry workflow), `job.workflow_repository` + `job.workflow_sha` resolve to the file
-# that defines THIS job — i.e. the reusable workflow at the ref a consumer pinned
-# `publish.yml@<ref>` to. So the scripts always match the workflow version, with no
-# hardcoded repo and no manual release-time bump, in both the dogfood and cross-repo
-# cases. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's repo is checked
-# out at the root (with tags) to supply their version list; the scripts come from
-# .mvs.
+# directly rather than wrap it in a composite action. To version-match the scripts to
+# this workflow, we check out the reusable workflow's OWN repo at its OWN commit via the
+# `job` context: unlike github.workflow_* (which resolve to the CALLER's entry workflow),
+# `job.workflow_repository` + `job.workflow_sha` resolve to the file that defines THIS
+# job — i.e. the reusable workflow at the ref a consumer pinned `publish.yml@<ref>` to.
+# So the scripts always match the workflow version, with no hardcoded repo and no manual
+# release-time bump. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's repo is
+# checked out at the root (with tags) to supply their version list; the scripts come
+# from .mvs.
 on:
   workflow_call:
     inputs:
@@ -38,40 +41,62 @@ on:
         type: string
       guard-default-branch:
         description: >-
-          'true' (default) → hard-fail if the consumer's default branch is absent
-          from the assembled site (its build artifact expired). Set 'false' while a
-          repo's default branch is not yet publishing docs.zip (e.g. mid-migration).
+          'true' (default) → hard-fail if the consumer's default branch is absent from
+          the assembled site (its build artifact expired). Set 'false' while a repo's
+          default branch is not yet publishing docs.zip (e.g. mid-migration).
         required: false
         default: "true"
         type: string
       pr:
-        description: >-
-          External fork PR number to approve (pins its head SHA) and preview. Set this
-          (with version-name: "") from the publish-dispatch.yml wrapper's dispatch path.
+        description: External fork PR number to approve (pins its head SHA) and preview.
         required: false
         default: ""
         type: string
-
-permissions:
-  contents: read     # checkout + read release assets
-  actions: read      # gh run download (this run's + cross-run docs artifacts)
-  pages: write       # deploy to Pages
-  id-token: write    # deploy-pages OIDC
-  statuses: write    # set the preview-approved status on a fork PR head SHA
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+      dispatch-workflow:
+        description: >-
+          Filename of the publish-dispatch shim in the consumer's repo, re-dispatched by
+          the tag trampoline. Defaults to the conventional name; override if you renamed it.
+        required: false
+        default: publish-dispatch.yml
+        type: string
 
 jobs:
-  publish:
-    # The canonical-repo guard lives upstream (ci.yml's publish job `if`, and the
-    # wrapper's dispatch needs write access), not here, so this engine stays generic.
-    # Its single caller is publish-dispatch.yml, which only reaches it on trusted paths.
+  # Fork PR: read-only token, never deploys — surface the manual-opt-in hint on the PR.
+  warn:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Explain the fork-preview opt-in
+        run: |
+          echo "::warning title=Docs preview not published::This is a fork PR, so the \
+          versioned docs site is NOT auto-published (fork builds run with a read-only \
+          token). A maintainer can publish a preview by running the \
+          ${{ inputs.dispatch-workflow }} workflow for PR #${{ github.event.pull_request.number }}: \
+          https://github.com/${{ github.repository }}/actions/workflows/${{ inputs.dispatch-workflow }}"
+
+  # Internal PR / default-branch push (inline), or any workflow_dispatch → deploy.
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_type != 'tag') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read     # checkout + read release assets
+      actions: read      # gh run download (this run's + cross-run docs artifacts)
+      pages: write       # deploy to Pages
+      id-token: write    # deploy-pages OIDC
+      statuses: write    # set the preview-approved status on a fork PR head SHA
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     steps:
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
       # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
@@ -93,8 +118,8 @@ jobs:
 
       # Fork opt-in: pin the PR's head commit as approved. assemble gathers an external
       # PR only when its head SHA carries this status, so a later push (new SHA) silently
-      # drops the preview until re-approved. Gated on `pr` alone, which the
-      # publish-dispatch.yml wrapper threads in from its dispatch input.
+      # drops the preview until re-approved. Gated on `pr` alone, which the shim threads
+      # in from its dispatch input.
       - name: Approve fork PR head SHA
         if: inputs.pr != ''
         env:
@@ -144,12 +169,11 @@ jobs:
       # DROPS a *second* deploy of an already-deployed SHA on a non-`workflow_dispatch`
       # event (it reports success but the origin keeps serving the first artifact),
       # EXCEPT a `workflow_dispatch` deploy of that SHA, which forces a re-serve. A
-      # release tag is cut on the merge commit, so it shares the default branch's
-      # just-deployed SHA → an inline tag deploy would be dropped. The fix lives in the
-      # CALLER: tags don't deploy inline — they re-trigger this workflow via
-      # `workflow_dispatch` (see ci.yml's tag trampoline / the consumer how-to), which
-      # re-serves. main/internal-PR deploys are the FIRST of their SHA, so they serve
-      # fine inline. The Verify step below backstops any residual stale-origin case.
+      # release tag shares the default branch's just-deployed SHA, so an inline tag
+      # deploy would be dropped — which is why tags go through the `trampoline` job
+      # below (re-dispatch as workflow_dispatch) instead of here. main/internal-PR
+      # deploys are the FIRST of their SHA, so they serve fine inline. The Verify step
+      # below backstops any residual stale-origin case.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
@@ -158,16 +182,16 @@ jobs:
       # if the Pages backend silently fails to update the SERVED origin (a wedged
       # site can serve a stale artifact indefinitely; see the 2026-06 incident where
       # a gh-pages→Actions cutover froze the origin while every deploy reported OK).
-      # The caller's tag trampoline (deploy via workflow_dispatch) prevents the
-      # tag-after-merge drop; this is the backstop that turns any *other* stale-origin
-      # failure into a red check instead of silently serving old docs. Confirm the live
-      # switcher.json byte-matches the one we just assembled, polling up to ~6 min — the
-      # window is generous because a release deploys TWICE in quick succession on the
-      # same SHA (the merge-to-default-branch push, then the tag trampoline), and the
-      # second (dispatch) re-serve can take a few minutes to propagate to the origin
-      # behind the first (observed ~4 min on 2026-06-25). The loop exits the instant the
-      # origin matches, so a fast/first-of-SHA deploy isn't slowed. On failure, dump the
-      # origin headers (a frozen etag/last-modified is the wedge signature).
+      # The trampoline (deploy via workflow_dispatch) prevents the tag-after-merge
+      # drop; this is the backstop that turns any *other* stale-origin failure into a
+      # red check instead of silently serving old docs. Confirm the live switcher.json
+      # byte-matches the one we just assembled, polling up to ~6 min — the window is
+      # generous because a release deploys TWICE in quick succession on the same SHA (the
+      # merge-to-default-branch push, then the tag trampoline), and the second (dispatch)
+      # re-serve can take a few minutes to propagate to the origin behind the first
+      # (observed ~4 min on 2026-06-25). The loop exits the instant the origin matches,
+      # so a fast/first-of-SHA deploy isn't slowed. On failure, dump the origin headers
+      # (a frozen etag/last-modified is the wedge signature).
       - name: Verify the deployed origin matches what we assembled
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
@@ -201,3 +225,32 @@ jobs:
             fi
             sleep 5
           done
+
+  # A tag can't deploy inline (same SHA as the default-branch push → Pages drops it
+  # unless the event is workflow_dispatch). Wait for the release, then re-dispatch the
+  # shim so the deploy runs on a workflow_dispatch event and re-serves.
+  trampoline:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read     # gh release view
+      actions: write     # gh workflow run (re-dispatch the shim)
+    steps:
+      - name: Wait for the release, then re-deploy via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          WF: ${{ inputs.dispatch-workflow }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # ci.yml's release job attaches the tag's docs.zip in parallel; the dispatched
+          # run gathers the tag from that asset, so don't dispatch until it exists.
+          for _ in $(seq 1 36); do
+            gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break
+            sleep 5
+          done
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+            || { echo "::error::release $TAG not found after 3 min — did the release job fail?"; exit 1; }
+          gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH"
