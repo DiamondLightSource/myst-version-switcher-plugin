@@ -19,7 +19,7 @@
 		"assemble/assemble.mjs"
 	],
 	"devDependencies": {
-		"@biomejs/biome": "^1.9.0",
+		"@biomejs/biome": "^2.0.0",
 		"@j178/prek": "^0.4.0",
 		"mystmd": "1.10.1"
 	}
