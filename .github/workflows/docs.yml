@@ -53,7 +53,13 @@ jobs:
       # python-version input it only puts uv on PATH, honouring a committed
       # .python-version if the project has one — a no-op for npx-only repos.
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v8.2.0   # full version: setup-uv uses immutable releases (no floating @v8)
+        with:
+          # No project deps to cache here: build-command owns dependency install
+          # (npx/make/tox/uv) and there are no requirements/pyproject/uv.lock files to
+          # key the cache on — which otherwise emits a "cache will never get
+          # invalidated" warning every build. uv's own download is small, so skip it.
+          enable-cache: false
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
       # must be built with. pr-<n> for PRs; otherwise the ref name (default branch or
