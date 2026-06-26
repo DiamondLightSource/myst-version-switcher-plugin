@@ -20,7 +20,7 @@
 	],
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.0",
-		"@j178/prek": "^0.3.0",
+		"@j178/prek": "^0.4.0",
 		"mystmd": "1.10.1"
 	}
 }
