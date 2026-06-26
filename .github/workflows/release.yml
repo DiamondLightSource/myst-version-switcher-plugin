@@ -1,24 +1,58 @@
+name: Release
+
+# Reusable: attach this run's build artifacts (the docs.zip; for this repo also
+# version-switcher.mjs, fed in as a _test.yml artifact) to the tag's GitHub Release.
+# Robust to how the release came to be, by branching on whether a Release already
+# exists for the tag:
+#
+#   - `git tag && git push` (no Release object yet) → CREATE it with the assets.
+#     `gh release create` does draft → upload → publish atomically, so the assets are
+#     in place before publish — this is the only path that is safe on a repo with
+#     IMMUTABLE RELEASES enabled.
+#   - a Release published from the UI on a NON-immutable repo → UPLOAD the assets to the
+#     existing (mutable) Release, preserving its notes / prerelease flag.
+#
+# Caller must grant `contents: write` and trigger it on the tag push. The whole step
+# uses `gh`, so there is no third-party action to pin.
+#
+# LIMITATION — immutable repos + UI releases: GitHub does NOT run workflows for *draft*
+# releases (community#7118), and a *published* immutable release rejects new assets
+# ("Cannot upload assets to an immutable release"). So on an immutable repo you cannot
+# have CI attach assets to a UI-made release — use the tag-push path above instead.
 on:
   workflow_call:
 
 jobs:
   release:
     runs-on: ubuntu-latest
-
     steps:
-      # Download every artifact produced earlier in the run (here: docs.zip).
+      # Every artifact produced earlier in the run, merged into dist/ (docs.zip, and
+      # for this repo version-switcher.mjs).
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
+          path: dist
           merge-multiple: true
 
-      - name: Create GitHub Release
-        # We pin to the SHA, not the tag, for security reasons.
-        # https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#using-third-party-actions
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        with:
-          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
-          files: "*"            # everything staged in the cwd — here, docs.zip
-          generate_release_notes: true
+      - name: Create or update the Release with its assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Flag a/b/rc tags as prereleases (mirrors the version-discovery marker).
+          prerelease=""
+          case "$TAG" in *a*|*b*|*rc*) prerelease="--prerelease" ;; esac
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # The Release already exists (e.g. published from the UI on a mutable repo).
+            # Add the assets, leaving its notes + draft/published state untouched.
+            echo "Release $TAG exists — uploading assets"
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+          else
+            # No Release yet (tag push). Create it WITH the assets in one shot —
+            # gh release create is draft→upload→publish, so it is immutable-safe.
+            echo "Release $TAG does not exist — creating it with assets"
+            gh release create "$TAG" dist/* --generate-notes $prerelease --repo "$REPO"
+          fi
