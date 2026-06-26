@@ -46,7 +46,14 @@ jobs:
     outputs:
       version-name: ${{ steps.ver.outputs.version-name }}
     steps:
+      # fetch-depth: 0 brings the full history *and tags* — a build-command may
+      # derive a version from `git describe` (this repo's docs do, to pin the
+      # tutorial's snippets at the latest release), and the default shallow clone
+      # has no tags. Tags are cheap; fetch them unconditionally so any consumer's
+      # build-command can rely on them.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # uv is installed unconditionally (Node/npx is already on the runner) so every
       # docs build has the same baseline env regardless of build-command. With no
