@@ -38,8 +38,8 @@ the required-branch guard) lives in `assemble/assemble.mjs` and is unit-tested
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-CI runs lint + tests + the docs build; `_release.yml` creates a GitHub Release with
-`version-switcher.mjs` and the tag's `docs.zip` as assets; and the nested
-`publish.yml` reconstructs + deploys the site including the new tag. The plugin URL
+CI runs lint + tests + the docs build; `release.yml` creates the GitHub Release with
+`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`); and the nested
+publish (tag trampoline) reconstructs + deploys the site including the new tag. The plugin URL
 and the `uses:` refs for the reusable workflows all resolve to the same tag, so one
 tag versions both halves.

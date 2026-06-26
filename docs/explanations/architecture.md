@@ -275,5 +275,6 @@ full analysis and an implementation sketch are tracked as future work in
 - **JS core + bash glue.** Pure functions (and their node tests) live in
   `assemble.mjs`; bash does the `gh`/`unzip`/`mv` IO. Python was a contender (the
   team is Python-heavy) but loses on a second toolchain in a JS-only repo.
-- **`_release.yml` attaches `docs.zip`** (it downloads the run's `docs` artifact and
-  uploads it verbatim), so `assemble` only ever *reads* release assets.
+- **`release.yml` attaches `docs.zip`** (it downloads the run's artifacts and
+  creates/uploads the Release via `gh`, verbatim), so `assemble` only ever *reads*
+  release assets.
