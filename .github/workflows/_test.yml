@@ -8,3 +8,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Unit tests (widget logic + make-switcher parity)
         run: npm test
+      - name: Upload version switcher artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: plugins/version-switcher.mjs

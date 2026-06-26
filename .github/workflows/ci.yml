@@ -33,7 +33,7 @@ jobs:
   release:
     needs: [lint, test, docs]
     if: github.ref_type == 'tag'
-    uses: ./.github/workflows/_release.yml
+    uses: ./.github/workflows/release.yml
     permissions:
       contents: write    # create the GitHub Release + attach assets
 
