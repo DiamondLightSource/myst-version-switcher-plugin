@@ -14,7 +14,12 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
-    permissions: { pages: write, id-token: write, contents: read, actions: read, statuses: write }
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
+      actions: read
+      statuses: write
 ```
 
 The site-reconstruction logic (`assemble/`) is **internal** — `publish.yml` runs it

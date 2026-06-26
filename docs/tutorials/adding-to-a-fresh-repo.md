@@ -83,9 +83,9 @@ jobs:
   docs:   # Call the docs building workflow directly
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@__LATEST_TAG__
     with:
-      # Whatever turns your sources into docs/_build/html at $BASE_URL.
-      # uv and Node are preinstalled, so this can be make / tox / npx / npm.
-      build-command: myst build --html      # e.g. make docs · tox -e docs · npm ci && npm run docs
+      # Whatever turns your sources into docs/_build/html at $BASE_URL. uv and Node
+      # are preinstalled, so: make docs · tox -e docs · npm ci && npm run docs
+      build-command: myst build --html
 
   release: 
     needs: [docs]
@@ -96,7 +96,8 @@ jobs:
 
   publish:
     needs: [docs]
-    if: github.repository == 'ORG/REPO'     # don't publish a pages site in the fork's org
+    # don't publish a pages site in the fork's org
+    if: github.repository == 'ORG/REPO'
     uses: ./.github/workflows/publish-dispatch.yml   # your workflow (below)
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
@@ -124,17 +125,29 @@ on:
   workflow_call:                    # ci.yml's `publish` job, for every event
     inputs:
       version-name: { required: false, default: "", type: string }
-  workflow_dispatch:                # tag re-dispatch + fork-PR preview + manual re-deploy
+  # tag re-dispatch + fork-PR preview + manual re-deploy
+  workflow_dispatch:
     inputs:
-      pr: { description: "Fork PR to approve + preview (empty = re-deploy)", required: false, default: "" }
+      pr:
+        description: "Fork PR to approve + preview (empty = re-deploy)"
+        required: false
+        default: ""
 jobs:
   publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@__LATEST_TAG__
     with:
-      version-name: ${{ inputs.version-name }}    # "" on dispatch → pure durable gather
-      pr: ${{ inputs.pr }}                         # set (dispatch) → pin that fork head SHA
-      dispatch-workflow: publish-dispatch.yml      # the file the tag re-dispatch re-fires
-    permissions: { contents: read, actions: write, pages: write, id-token: write, statuses: write }
+      # "" on dispatch → pure durable gather
+      version-name: ${{ inputs.version-name }}
+      # set (dispatch) → pin that fork head SHA
+      pr: ${{ inputs.pr }}
+      # the file the tag re-dispatch re-fires
+      dispatch-workflow: publish-dispatch.yml
+    permissions:
+      contents: read
+      actions: write
+      pages: write
+      id-token: write
+      statuses: write
 ```
 
 `publish.yml` then routes each event: **deploy** (internal PR / `main` push, or any
