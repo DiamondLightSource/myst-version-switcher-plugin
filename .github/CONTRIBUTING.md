@@ -34,9 +34,18 @@ the required-branch guard) lives in `assemble/assemble.mjs` and is unit-tested
 
 ## Releasing
 
+Releases are cut by pushing a tag (the UI "publish a release" flow can't attach the
+build's assets under immutable releases). Tag the merged commit on `origin/main`
+directly — you're usually on a feature branch, so this avoids tagging your branch HEAD:
+
 ```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
+git fetch origin
+git tag vX.Y.Z origin/main
+git push origin --tags
 ```
+
+(`--tags` pushes every local tag; on a clean clone that's just the new one. Use
+`git push origin vX.Y.Z` to push only that tag.)
 
 CI runs lint + tests + the docs build; `release.yml` creates the GitHub Release with
 `version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`); and the nested

@@ -187,10 +187,13 @@ gets its own `/pr-<n>/` preview.
 
 ## 6. Cut your first release
 
-Push a tag:
+Tag the merged commit on `origin/main` and push the tag (tagging `origin/main`
+rather than your local HEAD means you can release straight from a feature branch):
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git fetch origin
+git tag v1.0.0 origin/main
+git push origin --tags   # or: git push origin v1.0.0 to push just this tag
 ```
 
 The tag build runs and the **`release`** job creates the GitHub Release with that

@@ -225,8 +225,14 @@ forwarded port in a real browser and hard-reload (MyST caches the localized esm)
 
 ## Releasing
 
+Releasing is a tag push (immutable releases rule out the UI "publish release" flow for
+attaching assets). Tag the merged commit on `origin/main` directly — you're usually on a
+feature branch, so tag `origin/main` rather than your branch HEAD:
+
 ```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
+git fetch origin
+git tag vX.Y.Z origin/main
+git push origin --tags   # or: git push origin vX.Y.Z to push just this tag
 ```
 
 CI runs lint + tests + docs build, then `release.yml` creates the GitHub Release with
