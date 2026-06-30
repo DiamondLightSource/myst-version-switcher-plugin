@@ -1,6 +1,8 @@
 # Reference: the reusable workflows + contracts
 
-The public interface is two reusable workflows, consumed by `uses:` at a `<tag>`:
+The public interface is two reusable workflows consumed by `uses:` at a `<tag>` —
+`docs.yml` directly from `ci.yml`, and `publish.yml` via a local `publish-dispatch.yml`
+shim (one per repo — see the [tutorial](../tutorials/adding-to-a-fresh-repo.md)):
 
 ```yaml
 jobs:
@@ -10,15 +12,15 @@ jobs:
       build-command: make docs
   publish:
     needs: [docs]
-    if: <internal-event + canonical-repo guard>
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
+    if: github.repository == 'ORG/REPO'
+    uses: ./.github/workflows/publish-dispatch.yml
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
     permissions:
       pages: write
       id-token: write
       contents: read
-      actions: read
+      actions: write
       statuses: write
 ```
 
