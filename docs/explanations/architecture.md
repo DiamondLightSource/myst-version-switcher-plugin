@@ -10,14 +10,9 @@ the *what* (inputs, options, copy-paste snippets), see the
 Every deploy rebuilds the **complete** site tree from authoritative sources and
 publishes it **directly to GitHub Pages** via `actions/upload-pages-artifact` +
 `actions/deploy-pages`. There is **no `gh-pages` branch** — `deploy-pages` publishes
-one artifact as the *entire* site, which is a whole-site-replace.
-
-| version kind | source | durability |
-|---|---|---|
-| current build | the build staged into the publish run via `version-name` | n/a (just built) |
-| released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
-| default branch (e.g. `main`) | the latest CI **push** artifact, else the durable `_sources/<branch>.zip` persisted in the live site (hard-fail if neither exists) | durable (re-persisted each deploy) |
-| open PRs (`pr-<n>`) | each PR's build artifact, keyed by head SHA | ephemeral (drops on merge/close) |
+one artifact as the *entire* site, which is a whole-site-replace. The four source
+kinds and their durability are in the
+[reference](../reference/workflows.md#what-publishyml-gathers).
 
 Releases are permanent, so old versions never vanish. PR previews come from CI
 artifacts and silently drop if the artifact expires and nothing rebuilds — fine for
@@ -71,24 +66,19 @@ ordering:
   when the repo already serves Pages from Actions (where a publish deploys live
   immediately); an un-seeded publish fails loudly rather than silently dropping the branch.
 
-## The `docs.zip` and version-token contracts
+## The `docs.zip` / version-name contracts
 
-Two small contracts let the build (in CI) and the reconstruction (in `assemble`)
-agree without coordinating:
+Two contracts (described in the [reference](../reference/workflows.md#the-docszip--version-name-contracts))
+keep build and reconstruction in sync. The design rationale in both is to eliminate
+sanitisation:
 
-- **`docs.zip` is one zip with a bare `html/` root.** The CI build packs it once and
-  delivers the *same file* two ways — uploaded verbatim as the `docs` artifact
-  (every run, `compression-level: 0` since it is already compressed) and attached
-  verbatim as the `docs.zip` Release asset on tags. So there is a single contract and
-  no repack; both release and branch/PR gather unzip the same `html/` shape.
-- **The version name is both the site sub-dir and the `BASE_URL`.** A mismatch
-  produces a version whose root-absolute assets 404, so the two must be identical.
-  They are, by construction: the name is `pr-<n>` (an integer), `main` (the default
-  branch), or a tag without `/` (the `tags: ['*']` trigger never matches `/`). The
-  build sets `BASE_URL=/<repo>/<version-name>` and `assemble` files the artifact at
-  `site/<version-name>` — the same literal name on both sides. There is **no
-  sanitisation**: with nothing to transform, there is nothing to drift, and no parity
-  test to maintain.
+- **`docs.zip`**: packing and delivering the same file verbatim (once as the `docs`
+  artifact, once as the Release asset) means a single contract with no repack step —
+  nothing to drift between the two delivery paths.
+- **Version name**: the name must be both the site sub-dir *and* the `BASE_URL` — a
+  mismatch produces root-absolute asset 404s. Making them identical by construction
+  (clean tokens: `pr-<n>`, `main`, or a tag without `/`) means nothing to transform,
+  nothing to drift, and no parity test to maintain.
 
 ## Split build (unprivileged) from publish (privileged)
 
