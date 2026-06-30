@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # One-time gh-pages → durable-source migration, run LOCALLY by an operator from
-# inside a clone of the TARGET repo (it reads that repo's tags and gh-pages tree
-# from the working directory; it fetches origin/gh-pages itself).
+# the myst-version-switcher-plugin devcontainer. If the script detects it is
+# already running inside a clone of the target repo it will use that; otherwise
+# it clones the repo itself into a temporary directory.
 #
 # Why local, not CI (see docs/how-to/migrate-from-gh-pages.md):
 #   - flipping the Pages source needs repo-admin, which a CI GITHUB_TOKEN lacks;
@@ -75,6 +76,18 @@ fi
 OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 BASE="https://$(echo "$OWNER" | tr '[:upper:]' '[:lower:]').github.io/$NAME"
+
+# Clone the target repo if not already running inside it.
+_tmp_clone=""
+trap '[ -n "$_tmp_clone" ] && rm -rf "$_tmp_clone"' EXIT
+_current_origin=$(git remote get-url origin 2>/dev/null || echo "")
+_normalized=$(printf '%s' "$_current_origin" | sed 's|.*github\.com[:/]||; s|\.git$||')
+if [ "$_normalized" != "$REPO" ]; then
+  _tmp_clone=$(mktemp -d)
+  git clone "https://github.com/$REPO.git" "$_tmp_clone"
+  cd "$_tmp_clone"
+fi
+unset _current_origin _normalized
 
 # Fetch the gh-pages ref into its remote-tracking ref (a bare `git fetch origin
 # gh-pages` only guarantees FETCH_HEAD; we read `$PAGES_REF` by name).
