@@ -10,13 +10,12 @@ to `publish.yml`, not a separately consumed action.
 
 ```
 plugins/version-switcher.mjs                   # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
-assemble/assemble.sh                           # INTERNAL: reconstruct the whole site from durable sources (gh/unzip plumbing); run directly by publish.yml; runnable standalone for local testing
-assemble/assemble.mjs                          # INTERNAL: dependency-free Node kernel behind assemble.sh (the `generate` subcommand)
+assemble/assemble.mjs                          # INTERNAL: dependency-free Node kernel for publish.yml's "Generate" step (the `generate` subcommand writes switcher.json + index.html)
 scripts/migrate.sh                             # operator gh-pages → durable-source migration (bash); two-phase: reversible cutover, then guarded --delete-gh-pages
 test/                                          # npm test suite (node, no framework)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
-.github/workflows/publish.yml                  # PUBLIC reusable ENGINE (PRIVILEGED): branches on the event into 3 jobs — deploy (assemble@job.workflow_sha + Pages), tag-re-dispatch (re-fire the shim), fork-warn. workflow_call ONLY; reached via the publish-dispatch.yml shim
+.github/workflows/publish.yml                  # PUBLIC reusable ENGINE (PRIVILEGED): branches on the event into 3 jobs — deploy (gather+extract inline bash + assemble.mjs@job.workflow_sha + Pages), tag-re-dispatch (re-fire the shim), fork-warn. workflow_call ONLY; reached via the publish-dispatch.yml shim
 .github/workflows/publish-dispatch.yml         # PUBLIC thin shim: workflow_call (ci.yml's publish, every event) + workflow_dispatch (tag re-dispatch + fork-PR opt-in + manual re-deploy) → forwards to publish.yml. The dispatchable file consumers copy (reusable workflows can't be dispatched cross-repo)
 .github/workflows/release.yml                  # PUBLIC reusable: attach the run's build artifacts (docs.zip; + version-switcher.mjs via _test.yml) to the tag's GitHub Release via gh (create-or-upload, immutable-safe). Consumers `uses:` it directly
 .github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / release, then ONE publish job nesting publish-dispatch.yml (shim) → publish.yml for every event (publish.yml branches: deploy / tag-re-dispatch / fork-warn)
@@ -31,7 +30,7 @@ docs/                                          # this repo's own docs (dogfoods 
 
 One `vX.Y.Z` tag versions both. The plugin is published as a GitHub Release asset
 (alongside the tag's `docs.zip`); the workflows are consumed by `uses:` at the same
-tag (and `publish.yml` self-checks-out its `assemble/` scripts at that tag via
+tag (and `publish.yml` self-checks-out `assemble.mjs` at that tag via
 `job.workflow_sha`). `assemble/` is internal — consumed only by `publish.yml`, not a
 public action.
 
@@ -79,38 +78,36 @@ re-dispatches the shim). One `publish` job, no ref/fork guards in `ci.yml`.
 Because the inline publish runs **inside the build's own CI run**, the current build
 isn't a *completed* successful run the gather can discover (and for a main push the
 gather would find the *previous* build). So `ci.yml` passes `publish.yml` the build's
-version name (`needs.docs.outputs.version-name`); `publish.yml` hands it to assemble
-as `ARTIFACT_VERSION_NAME`. `publish.yml` downloads the same-run `docs` artifact and
-`assemble.sh` unzips + stages it directly, **skipping the re-gather of that version**.
-Everything else (other releases, other open PRs, the rest) still comes from durable
-sources.
+version name (`needs.docs.outputs.version-name`); `publish.yml` downloads this run's
+`docs` artifact and stages it into the gather dir as the **highest-priority** source —
+overwriting any same-name zip gathered from durable sources. Everything else (other
+releases, other open PRs, the rest) still comes from durable sources.
 
-`publish.yml` runs **`assemble/assemble.sh`** (checked out from this repo at
-`job.workflow_sha`, so the scripts match the workflow's own ref) to gather + generate
-+ output the site dir, then `deploy-pages`. Operator note: because internal PRs/tags now deploy from
-their **own ref** (not only the default branch), the `github-pages` environment's
+`publish.yml`'s `deploy` job runs inline gather + extract steps, then calls
+`assemble.mjs` (checked out from this repo at `job.workflow_sha`, so the kernel
+matches the workflow's own ref) to generate + output the site dir, then
+`deploy-pages`. Operator note: because internal PRs/tags now deploy from their
+**own ref** (not only the default branch), the `github-pages` environment's
 deployment-branch policy must allow those refs (or be unrestricted) — this is the
-cost of nesting publish for visibility. Bash in `assemble` does the `gh`/`unzip`/`mv`
-IO (gather); the JS kernel does the pure logic (`generate` + the folded-in
+cost of nesting publish for visibility. Inline bash steps do the `gh`/`unzip`/`mv`
+IO (gather + extract); the JS kernel does the pure logic (`generate` + the folded-in
 `missingRequired` guard) and is unit-tested without git/network/fs. There is **no
 sanitisation**: version names are clean by construction — `main`, `pr-<number>`, or
 a tag without `/` (the `tags: ['*']` trigger never builds `/`-tags).
 
-### Self-referencing the assemble scripts (no separate action)
-`publish.yml` runs `assemble/assemble.sh` directly rather than wrapping it in a
-composite action. To version-match the scripts to the workflow, it sparse-checks-out
-**this** repo's `assemble/` at `job.workflow_repository` + `job.workflow_sha` — the
-`job` context resolves to the file that defines the running job, i.e. the *reusable*
-workflow (unlike `github.workflow_*`, which resolve to the *caller's* entry
-workflow). So a consumer pinning `publish.yml@vX` gets `assemble@vX` automatically,
-with no hardcoded repo and no release-time bump, and this repo's own publish job
-tests the working-tree scripts (no dogfood gap). The consumer's repo stays checked
-out at the root so `assemble.mjs`'s `git tag` lists *their* versions; the scripts run
-from `.mvs`. (`uses:` can't take an expression, so a composite action could only be
-pinned to a literal tag — the `job` context is the only way to self-reference at the
-running ref.) Note: actionlint's `job`-context schema is stale and false-flags
-`job.workflow_sha`/`job.workflow_repository`; the GitHub docs confirm both. This repo
-lints with biome, not actionlint.
+### Self-referencing assemble.mjs (no separate action)
+`publish.yml` sparse-checks-out **this** repo's `assemble/` at `job.workflow_repository`
++ `job.workflow_sha` — the `job` context resolves to the file that defines the running
+job, i.e. the *reusable* workflow (unlike `github.workflow_*`, which resolve to the
+*caller's* entry workflow). So a consumer pinning `publish.yml@vX` gets
+`assemble.mjs@vX` automatically, with no hardcoded repo and no release-time bump,
+and this repo's own publish job tests the working-tree script (no dogfood gap). The
+consumer's repo stays checked out at the root so `assemble.mjs`'s `git tag` lists
+*their* versions; `assemble.mjs` runs from `.mvs`. (`uses:` can't take an expression,
+so a composite action could only be pinned to a literal tag — the `job` context is
+the only way to self-reference at the running ref.) Note: actionlint's `job`-context
+schema is stale and false-flags `job.workflow_sha`/`job.workflow_repository`; the
+GitHub docs confirm both. This repo lints with biome, not actionlint.
 
 ### BASE_URL must be set before `myst build`
 ```yaml
@@ -159,10 +156,11 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
 - `publish.yml` — **assemble + deploy ENGINE, privileged; owns the event branching.**
   `workflow_call` ONLY (reached via the shim). Three jobs by originating event:
   **deploy** (internal PR / default-branch push inline, or any dispatch → sparse-checks
-  out this repo's `assemble/` at `job.workflow_sha` so the scripts match the pinned ref —
-  see "Self-referencing the assemble scripts" below — runs `assemble.sh`, then
-  `upload-pages-artifact` + `deploy-pages` + verify, carrying the `github-pages`
-  environment + perms + `concurrency`), **re-dispatch** (a tag — waits for the release,
+  out `assemble.mjs` at `job.workflow_sha` so it matches the pinned ref — see
+  "Self-referencing assemble.mjs" above — runs inline gather + extract steps then
+  `assemble.mjs generate`, then `upload-pages-artifact` + `deploy-pages` + verify,
+  carrying the `github-pages` environment + perms + `concurrency`), **re-dispatch**
+  (a tag — waits for the release,
   then `gh workflow run <dispatch-workflow>` in the consumer's repo with their token, so
   the deploy lands as a `workflow_dispatch` that re-serves; a same-SHA tag deploy is
   otherwise dropped — deploy-pages#383), and **warn** (a fork PR — read-only, posts the

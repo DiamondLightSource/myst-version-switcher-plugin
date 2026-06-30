@@ -21,16 +21,16 @@ name: Publish
 #                  why the shim (not this engine) is the dispatch target.
 #   warn         — a FORK PR. Read-only token, never deploys; just surfaces the opt-in hint.
 #
-# The assemble logic is THIS repo's assemble/assemble.sh (+ assemble.mjs); we run it
-# directly rather than wrap it in a composite action. To version-match the scripts to
-# this workflow, we check out the reusable workflow's OWN repo at its OWN commit via the
-# `job` context: unlike github.workflow_* (which resolve to the CALLER's entry workflow),
+# The assemble logic is THIS repo's assemble.mjs (the pure kernel); the IO plumbing
+# lives as inline steps in this file. To version-match assemble.mjs to this workflow,
+# we check out the reusable workflow's OWN repo at its OWN commit via the `job` context:
+# unlike github.workflow_* (which resolve to the CALLER's entry workflow),
 # `job.workflow_repository` + `job.workflow_sha` resolve to the file that defines THIS
 # job — i.e. the reusable workflow at the ref a consumer pinned `publish.yml@<ref>` to.
-# So the scripts always match the workflow version, with no hardcoded repo and no manual
-# release-time bump. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's repo is
-# checked out at the root (with tags) to supply their version list; the scripts come
-# from .mvs.
+# So assemble.mjs always matches the workflow version, with no hardcoded repo and no
+# manual release-time bump. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's
+# repo is checked out at the root (with tags) to supply their version list; assemble.mjs
+# comes from .mvs.
 on:
   workflow_call:
     inputs:
@@ -38,14 +38,6 @@ on:
         description: Version name (pr-<n> | <default-branch> | <tag>) of the in-run build to inject; "" → pure durable gather.
         required: false
         default: ""
-        type: string
-      guard-default-branch:
-        description: >-
-          'true' (default) → hard-fail if the consumer's default branch is absent from
-          the assembled site (its build artifact expired). Set 'false' while a repo's
-          default branch is not yet publishing docs.zip (e.g. mid-migration).
-        required: false
-        default: "true"
         type: string
       pr:
         description: External fork PR number to approve (pins its head SHA) and preview.
@@ -97,6 +89,12 @@ jobs:
     concurrency:
       group: pages
       cancel-in-progress: false
+    env:
+      REPO: ${{ github.repository }}
+      DEFAULT: ${{ github.event.repository.default_branch }}
+      SITE: ${{ runner.temp }}/site
+      SEED_TAG: pages-default-seed
+      SOURCES_DIR: _sources
     steps:
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
       # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
@@ -105,10 +103,10 @@ jobs:
           fetch-depth: 0
 
       # THIS reusable workflow's repo + commit (the `job` context resolves to the
-      # reusable file, not the caller), so the assemble scripts match the ref the
-      # consumer pinned publish.yml@<ref> to — automatically, no version bump.
+      # reusable file, not the caller), so assemble.mjs matches the ref the consumer
+      # pinned publish.yml@<ref> to — automatically, no version bump.
       # Sparse: only assemble/ is needed.
-      - name: Fetch assemble scripts
+      - name: Fetch assemble.mjs
         uses: actions/checkout@v7
         with:
           repository: ${{ job.workflow_repository }}
@@ -124,38 +122,134 @@ jobs:
         if: inputs.pr != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
-          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          sha=$(gh pr view "${{ inputs.pr }}" --repo "$REPO" --json headRefOid -q .headRefOid)
           gh api --method POST "repos/$REPO/statuses/$sha" \
             -f state=success -f context=preview-approved \
             -f description="Fork docs preview approved"
 
-      # When publishing within the build's own run (workflow_call), download this
-      # run's `docs` artifact so assemble can stage it directly as version-name —
-      # the run isn't a completed success yet, so the gather can't find it (or would
-      # find a stale prior build). Skipped when version-name is "" (the dispatch paths).
+      - name: Create staging dirs
+        run: mkdir -p "$SITE" "$RUNNER_TEMP/gather"
+
+      # Releases are permanent sources; the seed release (if present) stands in for the
+      # default branch until _sources/ is established — store it as $DEFAULT.zip so the
+      # priority-overwrite chain below can supersede it with a fresher source.
+      - name: Gather release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tags=$(gh api --paginate "repos/$REPO/releases" \
+            -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
+          for tag in $tags; do
+            case "$tag" in */*) continue ;; esac
+            [ "$tag" = "$DEFAULT" ] && continue
+            [ "$tag" = "$SEED_TAG" ] && dest="$DEFAULT" || dest="$tag"
+            gh release download "$tag" --repo "$REPO" -p docs.zip \
+              -O "$RUNNER_TEMP/gather/$dest.zip" \
+              || echo "::warning::release $tag download failed — skipping"
+          done
+
+      # Branch CI artifacts overwrite the seed (higher priority). Default branch: latest
+      # successful push run. PRs: internal always; external forks only when the head SHA
+      # carries a preview-approved status. No $ARTIFACT_VERSION_NAME skip — the current
+      # build (staged next) overwrites anything gathered here with the same name.
+      - name: Gather branch CI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gather_run() {
+            local query="$1" dest="$2" label="$3"
+            local run; run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?$query&status=success&per_page=1" \
+              -q '.workflow_runs[0].id // empty')
+            [ -n "$run" ] || return 0
+            local tmp; tmp=$(mktemp -d)
+            gh run download "$run" --repo "$REPO" -n docs -D "$tmp" \
+              && mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip" \
+              || echo "::warning::$label artifact unavailable — skipping"
+            rm -rf "$tmp"
+          }
+          gather_run "branch=$DEFAULT&event=push" "$DEFAULT" "default-branch CI"
+          prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
+            --json number,headRefOid,isCrossRepository -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+          while IFS=$'\t' read -r num sha cross; do
+            [ -z "$num" ] && continue
+            if [ "$cross" = "true" ]; then
+              approved=$(gh api "repos/$REPO/commits/$sha/statuses" \
+                -q 'any(.[]; .context=="preview-approved" and .state=="success")')
+              [ "$approved" = "true" ] || continue
+            fi
+            gather_run "head_sha=$sha" "pr-$num" "PR #$num"
+          done <<< "$prs"
+
+      # Highest priority: the current build overwrites anything gathered above.
+      # Skipped on the dispatch paths (version-name is ""), which gather purely from durable sources.
       - name: Download this run's docs artifact
         if: inputs.version-name != ''
         uses: actions/download-artifact@v8
         with:
           name: docs
-          path: ${{ runner.temp }}/assemble-current
+          path: ${{ runner.temp }}/gather-current
+      - name: Stage current build
+        if: inputs.version-name != ''
+        env:
+          ARTIFACT_VERSION_NAME: ${{ inputs.version-name }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/gather-current/docs.zip"
+          [ -f "$src" ] || { echo "::error::in-run artifact not found at $src"; exit 1; }
+          mv "$src" "$RUNNER_TEMP/gather/$ARTIFACT_VERSION_NAME.zip"
 
-      # Run the assemble script directly (cwd = the consumer's checkout, so its
-      # `git tag` sees the consumer's tags). The script self-locates assemble.mjs and
-      # writes `dir=<site>` to $GITHUB_OUTPUT.
-      - name: Assemble versioned site
-        id: site
+      # Final fallback: if no prior step provided $DEFAULT.zip, try the durable in-site
+      # copy. Hard-fail if it isn't there — a deploy missing the default branch is a hole.
+      - name: Ensure default-branch zip
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          GUARD_DEFAULT_BRANCH: ${{ inputs.guard-default-branch }}
-          ARTIFACT_VERSION_NAME: ${{ inputs.version-name }}
-          ARTIFACT_ZIP: ${{ inputs.version-name != '' && format('{0}/assemble-current/docs.zip', runner.temp) || '' }}
-        run: bash "$GITHUB_WORKSPACE/.mvs/assemble/assemble.sh"
+        run: |
+          set -euo pipefail
+          [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ] && exit 0
+          owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
+          pages_url="https://$owner.github.io/${REPO#*/}"
+          if curl -fsSL "$pages_url/$SOURCES_DIR/$DEFAULT.zip" \
+              -o "$RUNNER_TEMP/gather/$DEFAULT.zip" 2>/dev/null; then
+            echo "::notice::$DEFAULT restored from durable in-site copy ($pages_url/$SOURCES_DIR/$DEFAULT.zip)"
+          else
+            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, or durable in-site copy — deploy aborted"
+            exit 1
+          fi
+
+      # Unzip every gathered zip into SITE/<version-name>.
+      # Persist the default-branch zip into SITE/_sources/ for future recovery.
+      - name: Extract artifacts into site
+        run: |
+          set -euo pipefail
+          for f in "$RUNNER_TEMP/gather"/*.zip; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f" .zip)
+            tmp=$(mktemp -d)
+            unzip -q "$f" 'html/*' -d "$tmp" 2>/dev/null && [ -d "$tmp/html" ] \
+              && { rm -rf "$SITE/$name"; mv "$tmp/html" "$SITE/$name"; } \
+              || echo "::warning::$name: no html/ root in zip — skipping"
+            rm -rf "$tmp"
+          done
+          dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
+          [ -d "$SITE/$DEFAULT" ] && [ -f "$dzip" ] \
+            && { mkdir -p "$SITE/$SOURCES_DIR"; cp "$dzip" "$SITE/$SOURCES_DIR/$DEFAULT.zip"; }
+
+      # `generate` orders versions, writes switcher.json + index.html, and prints the
+      # stable-alias source dir (the newest release), or "" when no release is deployed yet.
+      # Hard-fails if the default branch is absent (Ensure step guarantees the zip, but
+      # the extract could still fail if the zip had no html/ root).
+      - name: Generate switcher.json and stable alias
+        id: site
+        run: |
+          set -euo pipefail
+          stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
+            --site-dir "$SITE" --repo "$REPO" --required "$DEFAULT")
+          [ -n "$stable_src" ] && ln -s "$stable_src" "$SITE/stable"
+          echo "dir=$SITE" >> "$GITHUB_OUTPUT"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

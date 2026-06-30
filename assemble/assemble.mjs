@@ -1,17 +1,16 @@
 /**
- * assemble — the logic kernel behind the `assemble` composite action.
+ * assemble.mjs — the pure logic kernel for publish.yml's "Generate" step.
  *
- * The action reconstructs the *whole* versioned docs site on every deploy from
- * durable sources (main's build, `docs.zip` release assets, open-PR CI artifacts),
- * then the publish workflow deploys it directly to GitHub Pages. Bash does the IO
- * plumbing (`gh` downloads, `unzip`, `mv`); this file is the pure-ish kernel it
- * shells into, exposed as one subcommand:
+ * publish.yml's gather steps download every version's docs.zip into a staging
+ * dir, then the extract step unzips them all into the site tree. This file is
+ * the final step: given the populated site tree it orders the versions, writes
+ * switcher.json + index.html, and prints the stable-alias source dir on stdout.
+ * Exposed as one subcommand:
  *
  *   node assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
- *         source dir (the newest deployed release) on stdout, or nothing. Runs
- *         after all gathering, so it also exit-1s if a --required branch is
- *         absent from the site (the required-branch guard).
+ *         source dir (the newest deployed release) on stdout, or nothing. Also
+ *         exit-1s if a --required branch is absent from the site.
  *
  * The pure functions take plain data so they unit-test without git, the network,
  * or (mostly) the filesystem. Only `discoverVersions`, `getSortedTags` and the
@@ -26,9 +25,9 @@ import { parseArgs } from "node:util";
 export const STABLE_ALIAS = "stable";
 
 /**
- * The in-site durable store directory (`_sources/<default>.zip`) that assemble.sh
- * writes the default branch's docs.zip into each deploy. It is published with the
- * site but is NOT a version, so version discovery skips it.
+ * The in-site durable store directory (`_sources/<default>.zip`) persisted by
+ * publish.yml's extract step each deploy. Published with the site but NOT a
+ * version, so version discovery skips it.
  */
 export const SOURCES_DIR = "_sources";
 
