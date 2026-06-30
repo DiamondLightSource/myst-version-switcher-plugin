@@ -58,8 +58,7 @@ migration has the same inputs — and it deploys to *your* `github.io`, never up
 1. **Fork the repo and enable Actions on the fork** (the **Actions** tab → enable
    workflows; forks start with Actions disabled). You have admin on your own fork,
    which is what the Pages-source flip in step 2 needs.
-2. **Run `migrate.sh` against the fork**, from a clone of it — dry-run first, then for
-   real:
+2. **Run `migrate.sh` against the fork** — dry-run first, then for real:
 
    ```bash
    scripts/migrate.sh FORKORG/REPO --dry-run
@@ -88,12 +87,13 @@ tag to the fork if you also want to rehearse the tag re-dispatch.
 
 ## Before you start
 
-- `gh` authenticated with **repo-admin** on the target repo (flipping the Pages source
-  and setting the environment policy need admin; a CI token can't — which is why this is
-  a local script).
-- Run the script from **inside a clone of the target repo**: it reads the repo's tags
-  and `gh-pages` tree from the working directory (it fetches `origin/gh-pages` for you).
-  Running it from anywhere else will find no tags/branches.
+- Run the script from the **myst-version-switcher-plugin devcontainer** (it needs `gh`,
+  `zip`, and `node`, which the devcontainer provides).
+- Authenticate `gh` with **repo-admin** on the target repo — run `gh auth login` if
+  needed (flipping the Pages source and setting the environment policy need admin; a CI
+  token can't — which is why this is a local script).
+- If the script detects it is running in a clone of the target repo it will use that,
+  otherwise it will clone the repo itself.
 
 ## Step 1 — dry-run (recommended)
 
