@@ -92,7 +92,6 @@ jobs:
     env:
       REPO: ${{ github.repository }}
       DEFAULT: ${{ github.event.repository.default_branch }}
-      SITE: ${{ runner.temp }}/site
       SEED_TAG: pages-default-seed
       SOURCES_DIR: _sources
     steps:
@@ -130,7 +129,7 @@ jobs:
             -f description="Fork docs preview approved"
 
       - name: Create staging dirs
-        run: mkdir -p "$SITE" "$RUNNER_TEMP/gather"
+        run: mkdir -p "$RUNNER_TEMP/site" "$RUNNER_TEMP/gather"
 
       # Releases are permanent sources; the seed release (if present) stands in for the
       # default branch until _sources/ is established — store it as $DEFAULT.zip so the
@@ -230,31 +229,29 @@ jobs:
             name=$(basename "$f" .zip)
             tmp=$(mktemp -d)
             unzip -q "$f" 'html/*' -d "$tmp" 2>/dev/null && [ -d "$tmp/html" ] \
-              && { rm -rf "$SITE/$name"; mv "$tmp/html" "$SITE/$name"; } \
+              && { rm -rf "$RUNNER_TEMP/site/$name"; mv "$tmp/html" "$RUNNER_TEMP/site/$name"; } \
               || echo "::warning::$name: no html/ root in zip — skipping"
             rm -rf "$tmp"
           done
           dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
-          [ -d "$SITE/$DEFAULT" ] && [ -f "$dzip" ] \
-            && { mkdir -p "$SITE/$SOURCES_DIR"; cp "$dzip" "$SITE/$SOURCES_DIR/$DEFAULT.zip"; }
+          [ -d "$RUNNER_TEMP/site/$DEFAULT" ] && [ -f "$dzip" ] \
+            && { mkdir -p "$RUNNER_TEMP/site/$SOURCES_DIR"; cp "$dzip" "$RUNNER_TEMP/site/$SOURCES_DIR/$DEFAULT.zip"; }
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.
       # Hard-fails if the default branch is absent (Ensure step guarantees the zip, but
       # the extract could still fail if the zip had no html/ root).
       - name: Generate switcher.json and stable alias
-        id: site
         run: |
           set -euo pipefail
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
-            --site-dir "$SITE" --repo "$REPO" --required "$DEFAULT")
-          [ -n "$stable_src" ] && ln -s "$stable_src" "$SITE/stable"
-          echo "dir=$SITE" >> "$GITHUB_OUTPUT"
+            --site-dir "$RUNNER_TEMP/site" --repo "$REPO" --required "$DEFAULT")
+          [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ${{ steps.site.outputs.dir }}
+          path: ${{ runner.temp }}/site
 
       # Deploy the uploaded artifact. deploy-pages stamps the deployment with
       # pages_build_version = GITHUB_SHA and has no input to change it; the value is
@@ -289,7 +286,7 @@ jobs:
       - name: Verify the deployed origin matches what we assembled
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-          SITE_DIR: ${{ steps.site.outputs.dir }}
+          SITE_DIR: ${{ runner.temp }}/site
         run: |
           set -euo pipefail
           [ -n "$PAGE_URL" ] || { echo "::error::deploy-pages did not report a page_url"; exit 1; }
