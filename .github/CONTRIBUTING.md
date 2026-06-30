@@ -18,20 +18,6 @@ so edits are reflected on rebuild.
 **Browser caveat:** `<select>` popups don't open in the VS Code Simple Browser. Open
 the forwarded port in a real browser and hard-reload (MyST caches the localised esm).
 
-## Running assemble locally
-
-`assemble/assemble.sh` (run directly by `publish.yml`) is also runnable standalone so
-the `gh` plumbing can be exercised outside CI:
-
-```bash
-REPO=DiamondLightSource/myst-version-switcher-plugin GH_TOKEN=$(gh auth token) \
-  assemble/assemble.sh
-```
-
-The pure logic (ordering, prerelease detection, `switcher.json`/redirect rendering,
-the required-branch guard) lives in `assemble/assemble.mjs` and is unit-tested
-(`npm test`) without git, the network, or the filesystem.
-
 ## Releasing
 
 Releases are cut by pushing a tag (the UI "publish a release" flow can't attach the

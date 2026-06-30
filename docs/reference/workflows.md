@@ -50,11 +50,11 @@ jobs. The `deploy` job carries the `github-pages` environment, `concurrency: pag
 generic.
 
 - **`deploy`** — internal PR / default-branch push (inline), or any `workflow_dispatch`.
-  Self-checks-out this repo's `assemble/` at `job.workflow_sha` / `job.workflow_repository`
-  (the `job` context resolves to the reusable file, not the caller), so the scripts match
-  the `<tag>` the consumer pinned — no version bump; the consumer's repo stays checked out
-  at the root so `assemble.mjs`'s `git tag` lists *their* versions. The inline path injects
-  the in-run build via `version-name`; the dispatch paths pure-gather.
+  Self-checks-out `assemble.mjs` at `job.workflow_sha` / `job.workflow_repository`
+  (the `job` context resolves to the reusable file, not the caller), so the kernel
+  matches the `<tag>` the consumer pinned — no version bump; the consumer's repo stays
+  checked out at the root so `assemble.mjs`'s `git tag` lists *their* versions. The
+  inline path injects the in-run build via `version-name`; the dispatch paths pure-gather.
 - **`re-dispatch`** — a tag push. Waits for the release, then re-fires the shim
   (`dispatch-workflow`, a file in the consumer's repo — a `workflow_call` run executes with
   the caller's token, so it can dispatch it) so the deploy lands as a `workflow_dispatch`
@@ -80,7 +80,6 @@ re-dispatch, a fork-PR preview, a manual re-deploy). A reusable workflow can't b
 | input | required | default | meaning |
 |---|---|---|---|
 | `version-name` | no | `""` | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Set by `ci.yml`'s inline publish (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather (the dispatch paths). |
-| `guard-default-branch` | no | `true` | When `true`, hard-fail if the consumer's default branch is absent from the site (its build artifact expired). Set `false` while a repo's default branch isn't yet publishing `docs.zip` (mid-migration). |
 | `pr` | no | `""` | Fork PR number to approve (pins its head SHA as `preview-approved`) and preview. Set on the shim's `workflow_dispatch` path. |
 | `dispatch-workflow` | no | `publish-dispatch.yml` | Filename of the shim in the consumer's repo, re-fired by the `re-dispatch` job. Override only if you renamed the shim. |
 
@@ -90,15 +89,15 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 
 | version kind | source | durability |
 |---|---|---|
-| current build | this run's `docs` artifact, staged via `version-name` | n/a (just built) |
-| default branch (e.g. `main`) | latest CI **push** artifact → durable `_sources/<branch>.zip` in the live site → one-time migration seed release | durable — re-persisted into the site each deploy |
-| released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
+| current build | this run's `docs` artifact, staged via `version-name` (highest priority — overwrites any same-name gathered source) | n/a (just built) |
+| default branch (e.g. `main`) | latest CI **push** artifact → durable `_sources/<branch>.zip` in the live site (hard-fail if neither exists) | durable — re-persisted into the site each deploy |
+| released tags | the `docs.zip` asset attached to each **GitHub Release** (the migration seed release, if present, seeds the default-branch zip) | permanent |
 | open PRs (`pr-<n>`) | each PR's build artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |
 
 A version no longer gathered (a merged/closed PR, a deleted release) is correctly
-dropped, because `deploy-pages` replaces the *entire* site. The version passed as
-`version-name` is staged first and **skipped** by every gather, so a stale previous
-build never clobbers the fresh one.
+dropped, because `deploy-pages` replaces the *entire* site. Sources are gathered in
+priority order (releases lowest, then branch CI, then the current build highest), so a
+fresher source always wins when names collide.
 
 ## The `docs.zip` / version-name contracts
 
@@ -116,18 +115,10 @@ without coordination — `docs.yml` owns both:
   There is **no sanitisation**: version names are clean by construction (the
   `tags: ['*']` trigger never builds `/`-tags).
 
-## Internals: running `assemble` standalone
+## Internals: `assemble.mjs`
 
-`assemble/assemble.sh` (run directly by `publish.yml`) is also runnable outside CI so
-the `gh` plumbing can be exercised locally:
-
-```bash
-REPO=DiamondLightSource/myst-version-switcher-plugin GH_TOKEN=$(gh auth token) \
-  assemble/assemble.sh
-```
-
-It is driven entirely by env (`REPO`, `GUARD_DEFAULT_BRANCH`, `GH_TOKEN`, `SITE`, and —
-for injection — `ARTIFACT_VERSION_NAME` + `ARTIFACT_ZIP`, the `docs.zip` `publish.yml`
-downloads before calling the script). The pure logic (ordering, prerelease detection,
-`switcher.json`/redirect rendering, the required-branch guard) lives in `assemble.mjs`
-and is unit-tested without git, the network, or the filesystem.
+The pure logic (ordering, prerelease detection, `switcher.json`/redirect rendering,
+the required-branch guard) lives in `assemble/assemble.mjs` and is unit-tested
+(`npm test`) without git, the network, or the filesystem. The `gh`/`unzip`/`mv` IO
+plumbing lives as inline bash steps in `publish.yml`'s `deploy` job — named and
+separated so step timing and failures are visible in the GH Actions UI.

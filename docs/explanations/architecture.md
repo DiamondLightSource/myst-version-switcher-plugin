@@ -16,7 +16,7 @@ one artifact as the *entire* site, which is a whole-site-replace.
 |---|---|---|
 | current build | the build staged into the publish run via `version-name` | n/a (just built) |
 | released tags | the `docs.zip` asset attached to each **GitHub Release** | permanent |
-| default branch (e.g. `main`) | the latest CI **push** artifact, else the durable `_sources/<branch>.zip` persisted in the live site | durable (re-persisted each deploy) |
+| default branch (e.g. `main`) | the latest CI **push** artifact, else the durable `_sources/<branch>.zip` persisted in the live site (hard-fail if neither exists) | durable (re-persisted each deploy) |
 | open PRs (`pr-<n>`) | each PR's build artifact, keyed by head SHA | ephemeral (drops on merge/close) |
 
 Releases are permanent, so old versions never vanish. PR previews come from CI
@@ -69,8 +69,7 @@ ordering:
   `pages-default-seed` release captured from the old gh-pages tree) before the first
   publish — which is the pipeline PR's own CI. This makes that first publish safe even
   when the repo already serves Pages from Actions (where a publish deploys live
-  immediately); with `guard-default-branch` at its default `true`, an un-seeded publish
-  fails loudly rather than silently dropping the branch.
+  immediately); an un-seeded publish fails loudly rather than silently dropping the branch.
 
 ## The `docs.zip` and version-token contracts
 
@@ -164,22 +163,21 @@ Because the inline publish runs *inside* the build's own CI run, that run isn't 
 *completed* successful run yet — so `assemble`'s normal gather can't discover it. For
 a `main` push it would be worse than missing: the gather would find the **previous**
 successful run and publish a build behind by one commit. So `ci.yml` passes the
-build's version name to `publish.yml`, which hands it to `assemble` as
-`ARTIFACT_VERSION_NAME`; `publish.yml` downloads this run's `docs` artifact and
-`assemble` unzips + stages it directly, **skipping the re-gather of that version**.
-Everything else still comes from durable sources. The dispatch paths (the tag
-re-dispatch and the fork opt-in) pass no current build — they gather entirely from
-durable sources, the tag from its just-attached `docs.zip` Release asset and a fork
-from its approved head SHA's successful run.
+build's version name to `publish.yml`, which downloads this run's `docs` artifact and
+stages it into the gather dir as the **highest-priority** source — overwriting any
+same-name zip gathered from durable sources. Everything else still comes from durable
+sources. The dispatch paths (the tag re-dispatch and the fork opt-in) pass no current
+build — they gather entirely from durable sources, the tag from its just-attached
+`docs.zip` Release asset and a fork from its approved head SHA's successful run.
 
-## The bash / JS split inside `assemble`
+## The inline-bash / JS split inside `assemble`
 
-`assemble` is two implementation files, run directly by `publish.yml` (which
-sparse-checks-them-out at `job.workflow_sha`):
+The `assemble` logic is split between `publish.yml` inline steps and `assemble.mjs`
+(sparse-checked-out at `job.workflow_sha`):
 
-- **`assemble.sh`** does the IO plumbing — `gh` downloads, `unzip`, `mv`, the
-  `stable/` symlink — where shelling out is concise. It is also runnable standalone,
-  so the `gh` plumbing can be exercised locally.
+- **`publish.yml`'s gather and extract steps** do the IO plumbing — `gh` downloads,
+  `unzip`, `mv`, the `stable/` symlink — as inline bash. The steps are individually
+  named so each one's timing and failures are visible in the GH Actions UI.
 - **`assemble.mjs`** is the pure-ish kernel: ordering, prerelease detection,
   `switcher.json`/redirect rendering, and the folded-in required-branch guard. Its
   functions take plain data and return strings/verdicts, so they unit-test without
@@ -188,8 +186,9 @@ sparse-checks-them-out at `job.workflow_sha`):
 Pure bash is ruled out — semver ordering, prerelease detection and JSON rendering
 are not unit-testable in bash. Bash never parses JSON itself: every extraction uses
 `gh`'s built-in `-q`/`--jq` (it embeds real jq), never a piped standalone `jq` — a
-`gh … | jq` pipe would mask an API failure as empty output. Gather order is
-irrelevant; all ordering and prerelease logic lives in `generate`.
+`gh … | jq` pipe would mask an API failure as empty output. Gather order encodes
+priority — releases first, then branch CI overwrites them, then the current build
+overwrites those; all version-ordering and prerelease logic lives in `generate`.
 
 ## Fork-PR previews: per-commit maintainer opt-in
 
@@ -247,9 +246,9 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
   redirect → `main/`. Graceful; no release required.
 - **Release without `docs.zip`** (cut before this scheme): not selected by the
   releases query (it filters on a `docs.zip` asset) → skipped, no hard failure.
-- **Default branch missing** (`guard-default-branch: true`): if `main` has no recent
-  successful build to gather and none was injected, `generate` **hard-fails** rather
-  than publish a site missing it.
+- **Default branch missing**: if `main` has no recent successful CI artifact, no durable
+  `_sources/main.zip` in the live site, and no migration seed release, the deploy
+  **hard-fails** rather than publish a site missing it.
 - **PR build not yet green / SHA moved:** an open PR whose current head SHA has no
   successful CI run is skipped; its preview appears once the build passes.
 - **Merged/closed PR:** drops from the gather (open-PRs only) on the next deploy.
@@ -276,9 +275,11 @@ full analysis and an implementation sketch are tracked as future work in
   (`docs.yml`) computes the clean token inline and uploads the `docs` artifact.
 - **Direct Pages publish, no `gh-pages` branch** (`upload-pages-artifact` +
   `deploy-pages`), requiring the repo's Pages source set to "GitHub Actions".
-- **JS core + bash glue.** Pure functions (and their node tests) live in
-  `assemble.mjs`; bash does the `gh`/`unzip`/`mv` IO. Python was a contender (the
-  team is Python-heavy) but loses on a second toolchain in a JS-only repo.
+- **JS core + inline-bash glue.** Pure functions (and their node tests) live in
+  `assemble.mjs`; the `gh`/`unzip`/`mv` IO lives as inline bash steps in
+  `publish.yml` — individually named so step timing and failures are visible in
+  the GH Actions UI. Python was a contender (the team is Python-heavy) but loses
+  on a second toolchain in a JS-only repo.
 - **`release.yml` attaches `docs.zip`** (it downloads the run's artifacts and
   creates/uploads the Release via `gh`, verbatim), so `assemble` only ever *reads*
   release assets.
