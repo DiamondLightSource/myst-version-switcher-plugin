@@ -4,4 +4,5 @@ FROM ghcr.io/diamondlightsource/ubuntu-devcontainer:resolute AS developer
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     npm \
+    zip \
     && apt-get dist-clean
