@@ -30,7 +30,7 @@ directly; it is not a separately consumed action.
 ## `docs.yml` — build (unprivileged)
 
 Builds the docs at the versioned `BASE_URL`, packs `docs.zip` (bare `html/` root),
-uploads the `docs` artifact, and warns on fork PRs. Declares `contents: read` only —
+and uploads the `docs` artifact. Declares `contents: read` only —
 it never holds a write token. Installs `uv` unconditionally and relies on the runner's
 preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driven.
 
@@ -42,6 +42,12 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 | output | meaning |
 |---|---|
 | `version-name` | The version this build was served at (`pr-<n>` \| default-branch \| `<tag>`) — pass to `publish.yml`. |
+
+`build-command` runs with two env vars set: **`BASE_URL`**
+(`/REPO/<version-name>` — the sub-path the build is served at) and
+**`VERSION_NAME`** (the bare version token — for builds that need it directly,
+e.g. a Sphinx `conf.py` setting the pydata theme's switcher `version_match`; see
+[how-to: use with Sphinx](../how-to/use-with-sphinx.md)).
 
 ## `publish.yml` — the engine, owns the branching (privileged)
 
@@ -92,9 +98,15 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 | version kind | source | durability |
 |---|---|---|
 | current build | this run's `docs` artifact, staged via `version-name` (highest priority — overwrites any same-name gathered source) | n/a (just built) |
-| default branch (e.g. `main`) | latest CI **push** artifact → durable `_sources/<branch>.zip` in the live site (hard-fail if neither exists) | durable — re-persisted into the site each deploy |
+| default branch (e.g. `main`) | newest `docs` artifact built from that branch → durable `_sources/<branch>.zip` in the live site (hard-fail if neither exists) | durable — re-persisted into the site each deploy |
 | released tags | the `docs.zip` asset attached to each **GitHub Release** (the migration seed release, if present, seeds the default-branch zip) | permanent |
-| open PRs (`pr-<n>`) | each PR's build artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |
+| open PRs (`pr-<n>`) | each PR's `docs` artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |
+
+Branch and PR artifacts are found via the **artifacts API by name** (`docs` — the
+artifact name is the contract), not by workflow filename, so the consumer's entry
+workflow can be called anything. The URLs baked into `switcher.json` (and the
+`_sources` restore) use the site's live Pages URL from the **Pages API**, so a
+custom domain (CNAME) works.
 
 A version no longer gathered (a merged/closed PR, a deleted release) is correctly
 dropped, because `deploy-pages` replaces the *entire* site. Sources are gathered in

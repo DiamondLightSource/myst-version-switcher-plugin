@@ -84,11 +84,15 @@ jobs:
       # BASE_URL must match the versioned sub-path the build is served at, or its
       # root-absolute assets 404. assemble files this build's artifact at the same
       # version name (site/<default-branch>, site/<tag>, site/pr-<n>), so the two
-      # cannot drift. build-command comes through an env var (not interpolated into
-      # the script) and is run with `eval` so compound commands work.
+      # cannot drift. VERSION_NAME is the bare version token, exported for builds
+      # that need it directly — e.g. a Sphinx conf.py setting pydata-sphinx-theme's
+      # switcher `version_match` — without parsing it back out of BASE_URL.
+      # build-command comes through an env var (not interpolated into the script)
+      # and is run with `eval` so compound commands work.
       - name: Build docs
         env:
           BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version-name }}
+          VERSION_NAME: ${{ steps.ver.outputs.version-name }}
           BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
           set -euo pipefail
@@ -116,6 +120,6 @@ jobs:
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
 
-      # NOTE: the fork-PR "preview not published" hint now lives in publish-dispatch.yml
-      # (its `warn` job), which runs for fork PRs too — so this build job stays purely
-      # about building + uploading the docs artifact.
+      # NOTE: the fork-PR "preview not published" hint lives in publish.yml's `warn`
+      # job (reached via the publish-dispatch.yml shim), which runs for fork PRs too —
+      # so this build job stays purely about building + uploading the docs artifact.

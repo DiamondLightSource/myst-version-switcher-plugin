@@ -41,9 +41,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Flag a/b/rc tags as prereleases (mirrors the version-discovery marker).
+          # Flag PEP 440-style prerelease tags — a/b/rc following a digit, e.g.
+          # 1.0a1 / 2.0rc1 (mirrors assemble.mjs's isPrerelease). Anchoring on the
+          # digit keeps tags that merely contain those letters out.
           prerelease=""
-          case "$TAG" in *a*|*b*|*rc*) prerelease="--prerelease" ;; esac
+          case "$TAG" in *[0-9]a*|*[0-9]b*|*[0-9]rc*) prerelease="--prerelease" ;; esac
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             # The Release already exists (e.g. published from the UI on a mutable repo).

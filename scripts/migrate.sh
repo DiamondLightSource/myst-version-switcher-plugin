@@ -32,16 +32,22 @@
 # the Pages source back to "Deploy from a branch" to restore serving instantly.
 #
 # Usage:
-#   scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>]
-#   scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes]
+#   scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--seed-from <dir>]
+#   scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes] [--wait]
 #
-#   --dry-run            print the backfill + seed plan + probe the current site only;
-#                        upload nothing, skip the flip.
+#   --dry-run            print the backfill + seed plan, the versions the new model
+#                        will DROP, + probe the current site; upload nothing, skip
+#                        the flip.
 #   --delete-gh-pages    finalize: guard _sources/<default>.zip is live, verify the live
 #                        site, then delete gh-pages + the seed release. The only mode
 #                        that deletes.
 #   --pages-ref <ref>    gh-pages ref to read (default: origin/gh-pages)
+#   --seed-from <dir>    gh-pages dir to seed the default branch from, when it isn't
+#                        named after the branch (e.g. an old site publishing latest/).
 #   --yes                skip the typed confirmation before deleting gh-pages.
+#   --wait               with --delete-gh-pages: poll until _sources/<default>.zip goes
+#                        live (up to 30 min) instead of failing the guard immediately —
+#                        lets you run finalize right after merging the pipeline PR.
 set -euo pipefail
 
 REPO=""
@@ -49,11 +55,13 @@ PAGES_REF="origin/gh-pages"
 DRY_RUN=false
 DELETE_GH_PAGES=false
 ASSUME_YES=false
+WAIT=false
+SEED_FROM=""
 SEED_TAG="pages-default-seed"   # published seed release holding the default branch's docs
 
 usage() {
-  echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>]" >&2
-  echo "       scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes]" >&2
+  echo "usage: scripts/migrate.sh <org/repo> [--dry-run] [--pages-ref <ref>] [--seed-from <dir>]" >&2
+  echo "       scripts/migrate.sh <org/repo> --delete-gh-pages [--pages-ref <ref>] [--yes] [--wait]" >&2
 }
 
 while [ $# -gt 0 ]; do
@@ -61,7 +69,9 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=true; shift ;;
     --delete-gh-pages) DELETE_GH_PAGES=true; shift ;;
     --yes) ASSUME_YES=true; shift ;;
+    --wait) WAIT=true; shift ;;
     --pages-ref) PAGES_REF="$2"; shift 2 ;;
+    --seed-from) SEED_FROM="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) if [ -z "$REPO" ]; then REPO="$1"; else echo "unexpected arg: $1" >&2; exit 2; fi; shift ;;
@@ -71,6 +81,9 @@ done
 if [ -z "$REPO" ]; then usage; exit 2; fi
 if $DELETE_GH_PAGES && $DRY_RUN; then
   echo "--delete-gh-pages and --dry-run are mutually exclusive" >&2; exit 2
+fi
+if $WAIT && ! $DELETE_GH_PAGES; then
+  echo "--wait only makes sense with --delete-gh-pages" >&2; exit 2
 fi
 
 OWNER="${REPO%%/*}"
@@ -84,7 +97,10 @@ _current_origin=$(git remote get-url origin 2>/dev/null || echo "")
 _normalized=$(printf '%s' "$_current_origin" | sed 's|.*github\.com[:/]||; s|\.git$||')
 if [ "$_normalized" != "$REPO" ]; then
   _tmp_clone=$(mktemp -d)
-  git clone "https://github.com/$REPO.git" "$_tmp_clone"
+  # Blobless partial clone: all refs + tags but no file contents up front — the
+  # gh-pages blobs (the bulk of a docs repo) are fetched lazily by `git archive`
+  # only for the dirs actually backfilled/seeded.
+  git clone --filter=blob:none "https://github.com/$REPO.git" "$_tmp_clone"
   cd "$_tmp_clone"
 fi
 unset _current_origin _normalized
@@ -100,33 +116,91 @@ fetch_pages_ref() {
 }
 
 # --- backfill docs.zip from the gh-pages tree (non-destructive) --------------
-# For each release tag that is a gh-pages dir and whose release lacks a docs.zip,
-# zip that dir as a bare html/ and attach it. Tags containing `/` are skipped:
-# they are never built/published under the new model. Branch dirs (main/) are NOT
-# backfilled here — the default branch self-heals from its own CI artifact once it
-# runs the new pipeline (and is the reason gh-pages is kept until then).
+# For each tag that is a gh-pages dir: if its release lacks a docs.zip, zip that
+# dir as a bare html/ and attach it; if there is NO release at all, CREATE one
+# with the docs.zip (created-with-asset, so immutable-release-safe). The create
+# path is what makes a fork rehearsal faithful — forking copies branches and tags
+# but not releases, so without it every released version would drop — and also
+# covers repos that tag without cutting releases. Tags containing `/` are
+# skipped: they are never built/published under the new model. Branch dirs
+# (main/) are NOT backfilled here — the default branch self-heals from its own CI
+# artifact once it runs the new pipeline (and is the reason gh-pages is kept
+# until then).
 backfill() {
   echo
   echo "-- 1. Backfilling docs.zip from $PAGES_REF --"
   fetch_pages_ref
-  local pages_dirs tag dir has tmp
+  local pages_dirs tag dir has tmp action prerelease
   pages_dirs=$(git ls-tree -d --name-only "$PAGES_REF")
   for tag in $(git tag -l); do
     case "$tag" in */*) continue ;; esac                          # not published
     dir="$tag"
     if ! grep -qxF "$dir" <<<"$pages_dirs"; then continue; fi      # no gh-pages dir
-    has=$(gh release view "$tag" --repo "$REPO" --json assets \
-            -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)
-    if [ "$has" = "true" ]; then continue; fi                      # already has it
-    echo "   backfill $tag  (from $dir/)"
+    if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+      has=$(gh release view "$tag" --repo "$REPO" --json assets \
+              -q 'any(.assets[]; .name=="docs.zip")')
+      if [ "$has" = "true" ]; then continue; fi                    # already has it
+      action="attach to existing release"
+    else
+      action="create release"
+    fi
+    echo "   backfill $tag  (from $dir/ — $action)"
     if $DRY_RUN; then continue; fi
     tmp=$(mktemp -d)
     git archive "$PAGES_REF" "$dir" | tar -x -C "$tmp"             # → $tmp/$dir/…
     mv "$tmp/$dir" "$tmp/html"
     ( cd "$tmp" && zip -rq docs.zip html )                         # bare html/ root
-    gh release upload "$tag" "$tmp/docs.zip" --repo "$REPO" --clobber
+    if [ "$action" = "create release" ]; then
+      # Prerelease marker: a/b/rc following a digit (parity with release.yml).
+      prerelease=""
+      case "$tag" in *[0-9]a*|*[0-9]b*|*[0-9]rc*) prerelease="--prerelease" ;; esac
+      gh release create "$tag" "$tmp/docs.zip" --repo "$REPO" --verify-tag \
+        --latest=false $prerelease --title "$tag" \
+        --notes "Docs backfilled from the gh-pages branch by migrate.sh."
+    else
+      gh release upload "$tag" "$tmp/docs.zip" --repo "$REPO" --clobber
+    fi
     rm -rf "$tmp"
   done
+}
+
+# --- report versions the reconstructed site will DROP -------------------------
+# The new model serves: the default branch (seeded), tags whose release has (or
+# will get, via backfill) a docs.zip, and open PRs. Anything else the LIVE site
+# currently lists in switcher.json — extra branch dirs, dirs whose tag was
+# deleted — is never gathered, so it drops from the reconstructed site. It stays
+# on gh-pages until finalize (recoverable), but say so up front instead of
+# leaving the operator to diff the plan against the probe by eye.
+report_drops() {
+  echo
+  echo "-- Versions the reconstructed site will DROP --"
+  fetch_pages_ref
+  local versions v default drops=0
+  default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+  if ! versions=$(curl -fsSL "$BASE/switcher.json?cb=$(date +%s%N)" 2>/dev/null | node -e \
+        'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const e of JSON.parse(s))console.log(e.version)})' 2>/dev/null); then
+    echo "   (no live switcher.json at $BASE — skipping the drop report)"
+    return 0
+  fi
+  for v in $versions; do
+    [ "$v" = "$default" ] && continue                              # seeded
+    case "$v" in pr-*) continue ;; esac                            # own artifact
+    if git tag -l | grep -qxF "$v"; then
+      # a tag: kept if backfill covers it (gh-pages dir) or a docs.zip exists
+      if git ls-tree -d --name-only "$PAGES_REF" | grep -qxF "$v"; then continue; fi
+      has=$(gh release view "$v" --repo "$REPO" --json assets \
+              -q 'any(.assets[]; .name=="docs.zip")' 2>/dev/null || echo false)
+      [ "$has" = "true" ] && continue
+    fi
+    echo "   DROP $v  (no tag+gh-pages dir to backfill and no release docs.zip)"
+    drops=$((drops + 1))
+  done
+  if [ "$drops" = "0" ]; then
+    echo "   none — every currently served version survives the migration"
+  else
+    echo "   ($drops version(s) will no longer be served. They remain on gh-pages"
+    echo "    until finalize; cut a real Release for any you want to keep.)"
+  fi
 }
 
 # --- seed the default branch durably (so we can cut over before it builds docs) ---
@@ -140,17 +214,22 @@ seed_default_branch() {
   echo
   echo "-- 1b. Seeding the default branch durably (published release '$SEED_TAG') --"
   fetch_pages_ref
-  local default tmp
+  local default srcdir tmp
   default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
-  if ! git ls-tree -d --name-only "$PAGES_REF" | grep -qxF "$default"; then
-    echo "   no '$default/' dir on $PAGES_REF — nothing to seed (skipping)"
+  # The gh-pages dir usually shares the branch name; --seed-from overrides for
+  # old sites that published it under another name (e.g. latest/).
+  srcdir="${SEED_FROM:-$default}"
+  if ! git ls-tree -d --name-only "$PAGES_REF" | grep -qxF "$srcdir"; then
+    echo "   no '$srcdir/' dir on $PAGES_REF — nothing to seed (skipping)."
+    echo "   (If the default branch's docs live under another dir, rerun with --seed-from <dir>;"
+    echo "    without a seed, the pipeline PR's publish stays red until it merges.)"
     return 0
   fi
-  echo "   seed $default  (from $default/ on $PAGES_REF → release '$SEED_TAG')"
+  echo "   seed $default  (from $srcdir/ on $PAGES_REF → release '$SEED_TAG')"
   if $DRY_RUN; then return 0; fi
   tmp=$(mktemp -d)
-  git archive "$PAGES_REF" "$default" | tar -x -C "$tmp"
-  mv "$tmp/$default" "$tmp/html"
+  git archive "$PAGES_REF" "$srcdir" | tar -x -C "$tmp"
+  mv "$tmp/$srcdir" "$tmp/html"
   ( cd "$tmp" && zip -rq docs.zip html )                           # bare html/ root
   if gh release view "$SEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
     gh release upload "$SEED_TAG" "$tmp/docs.zip" --repo "$REPO" --clobber
@@ -200,18 +279,29 @@ verify() {
 # live site directly: if that copy is served, the default branch survives a gh-pages
 # delete (and a later artifact expiry), so it is safe to remove.
 guard_default_durable() {
-  local default url code
+  local default url code deadline
   default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
   url="$BASE/_sources/$default.zip"
   echo "-- guard: is the default branch ($default) durable in the site (_sources)? --"
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$url?cb=$(date +%s%N)")
-  if [ "$code" != "200" ]; then
-    echo "::error::REFUSING to delete gh-pages: $url is not live ($code)." >&2
-    echo "  The deployed site has no durable copy of '$default' yet, so gh-pages is still" >&2
-    echo "  the only recoverable copy. Open/merge the pipeline PR so its publish persists" >&2
-    echo "  _sources/$default.zip into the site, then retry." >&2
-    exit 1
-  fi
+  deadline=$(( $(date +%s) + 1800 ))
+  while :; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$url?cb=$(date +%s%N)")
+    [ "$code" = "200" ] && break
+    if ! $WAIT; then
+      echo "::error::REFUSING to delete gh-pages: $url is not live ($code)." >&2
+      echo "  The deployed site has no durable copy of '$default' yet, so gh-pages is still" >&2
+      echo "  the only recoverable copy. Open/merge the pipeline PR so its publish persists" >&2
+      echo "  _sources/$default.zip into the site, then retry (or rerun with --wait to poll)." >&2
+      exit 1
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "::error::gave up after 30 min: $url still not live ($code). Has the pipeline" >&2
+      echo "  PR's publish deployed? Check the repo's Actions runs, then retry." >&2
+      exit 1
+    fi
+    echo "   not live yet ($code) — waiting 15s (Ctrl-C to abort; gh-pages is untouched)"
+    sleep 15
+  done
   echo "   ok: $url is live — '$default' is durable independently of gh-pages"
 }
 
@@ -241,7 +331,10 @@ if $DELETE_GH_PAGES; then
   fi
   echo
   echo "-- Deleting gh-pages (rollback gone after this) --"
-  git push origin --delete "${PAGES_REF#origin/}"
+  # Via the API, not `git push --delete`: gh is the auth we required, whereas a
+  # git-over-https push from the temp clone would need a separately configured
+  # credential helper (`gh auth setup-git`).
+  gh api --method DELETE "repos/$REPO/git/refs/heads/${PAGES_REF#origin/}"
   delete_seed_release          # the in-site _sources copy now carries the default branch
   echo "Done. Site is served from GitHub Actions; gh-pages removed."
   exit 0
@@ -253,13 +346,14 @@ fi
 # ============================================================================
 backfill
 seed_default_branch
+report_drops
 
 if $DRY_RUN; then
   echo
   echo "-- (dry-run) probing current site --"
   verify || echo "(dry-run probe failed — expected if the site isn't deployed yet)"
   echo
-  echo "Dry run complete: backfill + seed plan shown (nothing uploaded); flip skipped."
+  echo "Dry run complete: backfill + seed + drop plan shown (nothing uploaded); flip skipped."
   exit 0
 fi
 
@@ -292,3 +386,4 @@ echo "     the seed and persists _sources/<default>.zip into the deployed site."
 echo "  2. Once that publish has deployed, finalize (verify + delete gh-pages and the"
 echo "     seed). The guard checks _sources/<default>.zip is live first:"
 echo "         scripts/migrate.sh $REPO --delete-gh-pages"
+echo "     (add --wait to run it right after merging — it polls until the copy is live)"

@@ -85,13 +85,19 @@ ok(
 assert.deepEqual(discoverVersions(join(site, "does-not-exist")), []);
 ok("discoverVersions returns [] for a missing dir");
 
-// --- isPrerelease: rc/a/b markers (parity with release.yml) ---
+// --- isPrerelease: digit-anchored rc/a/b markers (parity with release.yml) ---
 assert.equal(isPrerelease("2.1"), false);
 assert.equal(isPrerelease("2.1.0"), false);
 assert.ok(isPrerelease("2.1rc1"));
 assert.ok(isPrerelease("3.0a2"));
 assert.ok(isPrerelease("3.0b1"));
 ok("isPrerelease flags rc/a/b tags only");
+
+// tags that merely contain a/b/rc letters (no digit before) are NOT prereleases.
+assert.equal(isPrerelease("release-1.0"), false);
+assert.equal(isPrerelease("beta-program"), false);
+assert.equal(isPrerelease("stable-2.0"), false);
+ok("isPrerelease ignores a/b/rc letters not following a digit");
 
 // --- preferredVersion: newest deployed stable tag, else main ---
 assert.equal(preferredVersion(["main", "2.1", "2.0"], tags), "2.1");
@@ -153,26 +159,36 @@ ok("missingRequired is a no-op with no required branches");
 // --- switcherStruct shape, with the stable entry flagged ---
 assert.deepEqual(
 	switcherStruct(
-		"DiamondLightSource/myst-version-switcher-plugin",
+		"https://diamondlightsource.github.io/myst-version-switcher-plugin/",
 		["main", "2.1"],
 		"2.1",
 	),
 	[
 		{
 			version: "main",
-			url: "https://DiamondLightSource.github.io/myst-version-switcher-plugin/main/",
+			url: "https://diamondlightsource.github.io/myst-version-switcher-plugin/main/",
 		},
 		{
 			version: "2.1",
-			url: "https://DiamondLightSource.github.io/myst-version-switcher-plugin/2.1/",
+			url: "https://diamondlightsource.github.io/myst-version-switcher-plugin/2.1/",
 			preferred: true,
 		},
 	],
 );
 ok("switcherStruct builds the pydata array and flags the preferred entry");
 
+// a custom-domain base URL (no trailing slash) roots the entries verbatim.
+assert.deepEqual(switcherStruct("https://docs.example.com", ["main"], null), [
+	{ version: "main", url: "https://docs.example.com/main/" },
+]);
+ok("switcherStruct roots entries at a custom-domain base URL");
+
 // --- exact serialisation (2-space, no trailing newline), parity with json.dumps(indent=2) ---
-const text = renderSwitcher("acme/widget", ["main", "2.0"], "2.0");
+const text = renderSwitcher(
+	"https://acme.github.io/widget",
+	["main", "2.0"],
+	"2.0",
+);
 assert.equal(
 	text,
 	`[

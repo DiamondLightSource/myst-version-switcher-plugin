@@ -1,7 +1,7 @@
 {
 	"name": "myst-version-switcher-plugin",
 	"private": true,
-	"description": "A pydata-style version switcher for MyST, as a single anywidget plugin, plus a CI action to generate switcher.json.",
+	"description": "A pydata-style version switcher for MyST, as a single anywidget plugin, plus reusable CI workflows that reconstruct and deploy the versioned site.",
 	"type": "module",
 	"license": "Apache-2.0",
 	"repository": {
@@ -10,12 +10,11 @@
 	},
 	"scripts": {
 		"test": "node test/test-url-logic.mjs && node test/test-assemble.mjs",
-		"docs": "cd docs && myst build --html",
+		"docs": "cd docs && myst build --html --strict",
 		"docs-dev": "cd docs && myst start"
 	},
 	"files": [
 		"plugins/version-switcher.mjs",
-		"assemble/assemble.sh",
 		"assemble/assemble.mjs"
 	],
 	"devDependencies": {
