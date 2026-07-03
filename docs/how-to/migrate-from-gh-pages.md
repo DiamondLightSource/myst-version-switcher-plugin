@@ -30,7 +30,10 @@ Two consequences drive the procedure:
 
 1. **Your old releases are not durable yet.** Their docs exist only as directories on
    `gh-pages`; the matching Releases have no `docs.zip`. So run 1 includes a one-time
-   **backfill** of `docs.zip` onto those Releases — not just a config flip.
+   **backfill** of `docs.zip` onto those Releases — not just a config flip. (A tag with
+   a `gh-pages` directory but **no Release at all** gets one *created* with the
+   `docs.zip` — covering repos that tag without releasing, and fork rehearsals, since
+   forking copies tags but not Releases.)
 2. **The default branch has no permanent source until a publish captures it.** Each
    deploy persists the branch's `docs.zip` into the site (`_sources/<branch>.zip`) and
    restores from there when the CI artifact expires — but before the *first* publish
@@ -52,8 +55,10 @@ and it removes the seed release too.
 ## Optional: rehearse on a fork first
 
 To de-risk the real migration, run the whole thing on a fork before touching the
-upstream site. A fork copies the repo's `gh-pages` branch and release tags, so the
-migration has the same inputs — and it deploys to *your* `github.io`, never upstream's.
+upstream site. A fork copies the repo's `gh-pages` branch and tags — but **not the
+Releases** — so the backfill *creates* a Release (with the `docs.zip`) for every tag
+that has a `gh-pages` directory. The migration therefore has the same inputs and keeps
+every version, and it deploys to *your* `github.io`, never upstream's.
 
 1. **Fork the repo and enable Actions on the fork** (the **Actions** tab → enable
    workflows; forks start with Actions disabled). You have admin on your own fork,
@@ -101,12 +106,13 @@ tag to the fork if you also want to rehearse the tag re-dispatch.
 scripts/migrate.sh ORG/REPO --dry-run
 ```
 
-It prints the backfill + seed plan and probes the current site, uploading nothing and
-flipping nothing. Compare the **backfill plan** against the **probe list**: any version
-the live site serves that is *not* in the backfill plan is a `gh-pages` directory with
-**no matching GitHub Release** — it will be **dropped** from the reconstructed site (it
-stays on `gh-pages`, so it is recoverable, but won't be served). Cut real Releases for
-any such versions you want to keep before proceeding.
+It prints the backfill + seed plan, then a **drop report**: every version the live
+site's `switcher.json` currently lists that the new model will *not* serve (not the
+default branch, not an open-PR preview, and no tag + `gh-pages` directory to backfill
+from or existing `docs.zip` Release). Dropped versions stay on `gh-pages` until
+finalize, so they are recoverable — cut a real Release (or restore the tag) for any you
+want to keep before proceeding. It ends by probing the current site; nothing is
+uploaded and nothing is flipped.
 
 ## Step 2 — prepare (uploads + flips; no deploy)
 
@@ -116,11 +122,14 @@ scripts/migrate.sh ORG/REPO
 
 It does the following, then **stops with `gh-pages` intact and still serving**:
 
-1. **Backfill (non-destructive, idempotent).** For each release tag that is a `gh-pages`
-   directory and whose Release lacks a `docs.zip`, zip that directory (bare `html/`
-   root) and attach it as `docs.zip`. Tags containing `/` are skipped.
-2. **Seed the default branch.** Capture the gh-pages `<default>/` tree as the published
-   `pages-default-seed` release, so the default branch is durable before any publish.
+1. **Backfill (non-destructive, idempotent).** For each tag that is a `gh-pages`
+   directory: zip that directory (bare `html/` root) and attach it as `docs.zip` to its
+   Release — or, if no Release exists for the tag, *create* one with the `docs.zip`
+   (flagged prerelease for `a`/`b`/`rc` tags). Tags containing `/` are skipped.
+2. **Seed the default branch.** Capture the gh-pages `<default>/` tree (or the
+   `--seed-from <dir>` directory, if the old site published it under another name) as
+   the published `pages-default-seed` release, so the default branch is durable before
+   any publish.
 3. **Flip the Pages source → GitHub Actions** and **open the `github-pages` environment's
    `deployment_branch_policy`** to "no restriction" (so deploys from PR/tag refs — which
    run under the nested-publish model — aren't rejected by the environment). The flip is
@@ -152,6 +161,9 @@ Once the publish has deployed and `_sources/<default>.zip` is live:
 scripts/migrate.sh ORG/REPO --delete-gh-pages
 ```
 
+(Or run it right after merging with `--wait`: the guard then polls until the durable
+copy goes live — up to 30 minutes — instead of failing immediately.)
+
 This **guards** the deletion: it refuses unless
 `https://ORG.github.io/REPO/_sources/<default>.zip` returns `200` — i.e. the deployed
 site holds a durable copy of the default branch, so the new model can reconstruct
@@ -182,7 +194,9 @@ lost. That is exactly why the deletion is a separate, gated run.
 
 | flag | effect |
 |---|---|
-| `--dry-run` | Print the backfill + seed plan + probe the current site only; upload nothing; skip the flip. |
+| `--dry-run` | Print the backfill + seed plan and the drop report + probe the current site only; upload nothing; skip the flip. |
 | `--delete-gh-pages` | **The only mode that deletes.** Guard that `_sources/<default>.zip` is live (`200`), verify the live site, then delete `gh-pages` **and the seed release**. |
 | `--pages-ref <ref>` | `gh-pages` ref to read (default `origin/gh-pages`). |
+| `--seed-from <dir>` | `gh-pages` directory to seed the default branch from, when the old site published it under a different name (e.g. `latest/`). |
 | `--yes` | Skip the typed confirmation before deleting `gh-pages` (with `--delete-gh-pages`; use with care). |
+| `--wait` | With `--delete-gh-pages`: poll (up to 30 min) until `_sources/<default>.zip` goes live instead of failing the guard immediately — lets you finalize right after merging the pipeline PR. |

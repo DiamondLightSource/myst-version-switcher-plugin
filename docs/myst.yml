@@ -8,6 +8,17 @@ project:
     - ../plugins/version-switcher.mjs
     # Build-only: swaps __LATEST_TAG__ in the tutorial for this repo's latest tag.
     - ./_ext/inject-latest-tag.mjs
+  # Escalate link/cross-reference quality rules from warning to error so that,
+  # combined with `myst build --strict` (the `npm run docs` command CI uses), a
+  # broken link, an unresolved cross reference, or an empty auto-filled label
+  # fails the build instead of publishing a dead link.
+  error_rules:
+    - rule: link-resolves
+      severity: error
+    - rule: reference-target-resolves
+      severity: error
+    - rule: link-text-exists
+      severity: error
   toc:
     - file: index.md
     - file: tutorials.md
@@ -16,6 +27,7 @@ project:
     - file: how-to.md
       children:
         - file: how-to/migrate-from-gh-pages.md
+        - file: how-to/use-with-sphinx.md
         - file: how-to/contribute.md
     - file: explanations.md
       children:

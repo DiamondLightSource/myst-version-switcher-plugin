@@ -131,6 +131,22 @@ jobs:
       - name: Create staging dirs
         run: mkdir -p "$RUNNER_TEMP/site" "$RUNNER_TEMP/gather"
 
+      # The live Pages base URL, from the Pages API — respects a custom domain
+      # (CNAME); falls back to the conventional github.io URL if the API call
+      # fails. Used by the _sources restore below and baked into switcher.json.
+      - name: Resolve the Pages URL
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url=$(gh api "repos/$REPO/pages" -q .html_url 2>/dev/null || true)
+          if [ -z "$url" ]; then
+            owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
+            url="https://$owner.github.io/${REPO#*/}"
+          fi
+          echo "PAGES_URL=${url%/}" >> "$GITHUB_ENV"
+          echo "Pages URL: ${url%/}"
+
       # Releases are permanent sources; the seed release (if present) stands in for the
       # default branch until _sources/ is established — store it as $DEFAULT.zip so the
       # priority-overwrite chain below can supersede it with a fresher source.
@@ -150,27 +166,39 @@ jobs:
               || echo "::warning::release $tag download failed — skipping"
           done
 
-      # Branch CI artifacts overwrite the seed (higher priority). Default branch: latest
-      # successful push run. PRs: internal always; external forks only when the head SHA
-      # carries a preview-approved status. No $ARTIFACT_VERSION_NAME skip — the current
-      # build (staged next) overwrites anything gathered here with the same name.
+      # Branch CI artifacts overwrite the seed (higher priority). Found via the
+      # artifacts API by NAME (`docs` — the contract), never by workflow filename,
+      # so the consumer's entry workflow can be called anything. An artifact's
+      # workflow_run carries head_branch/head_sha/head_repository_id but no run
+      # conclusion — existence is the signal (docs.yml only uploads after a
+      # successful build). Default branch: newest non-expired docs artifact built
+      # from THIS repo's code on that branch (head_repository_id keeps a same-named
+      # fork branch out). PRs: keyed by head SHA — internal always; external forks
+      # only when the SHA carries a preview-approved status. No
+      # $ARTIFACT_VERSION_NAME skip — the current build (staged next) overwrites
+      # anything gathered here with the same name.
       - name: Gather branch CI artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gather_run() {
-            local query="$1" dest="$2" label="$3"
-            local run; run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?$query&status=success&per_page=1" \
-              -q '.workflow_runs[0].id // empty')
-            [ -n "$run" ] || return 0
+          repo_id=$(gh api "repos/$REPO" -q .id)
+          gather_artifact() {
+            local filter="$1" dest="$2" label="$3"
+            local id; id=$(gh api --paginate \
+              "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
+              | jq -rs "[.[].artifacts[] | select((.expired | not) and ($filter))] | sort_by(.created_at) | last | .id // empty")
+            [ -n "$id" ] || return 0
+            # The API serves the artifact as a zip-of-the-artifact (docs.zip inside).
             local tmp; tmp=$(mktemp -d)
-            gh run download "$run" --repo "$REPO" -n docs -D "$tmp" \
-              && mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip" \
+            { gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" \
+                && unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" \
+                && mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip"; } \
               || echo "::warning::$label artifact unavailable — skipping"
             rm -rf "$tmp"
           }
-          gather_run "branch=$DEFAULT&event=push" "$DEFAULT" "default-branch CI"
+          gather_artifact ".workflow_run.head_branch == \"$DEFAULT\" and .workflow_run.head_repository_id == $repo_id" \
+            "$DEFAULT" "default-branch CI"
           prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
             --json number,headRefOid,isCrossRepository -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
           while IFS=$'\t' read -r num sha cross; do
@@ -180,7 +208,7 @@ jobs:
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
               [ "$approved" = "true" ] || continue
             fi
-            gather_run "head_sha=$sha" "pr-$num" "PR #$num"
+            gather_artifact ".workflow_run.head_sha == \"$sha\"" "pr-$num" "PR #$num"
           done <<< "$prs"
 
       # Highest priority: the current build overwrites anything gathered above.
@@ -209,11 +237,9 @@ jobs:
         run: |
           set -euo pipefail
           [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ] && exit 0
-          owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
-          pages_url="https://$owner.github.io/${REPO#*/}"
-          if curl -fsSL "$pages_url/$SOURCES_DIR/$DEFAULT.zip" \
+          if curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" \
               -o "$RUNNER_TEMP/gather/$DEFAULT.zip" 2>/dev/null; then
-            echo "::notice::$DEFAULT restored from durable in-site copy ($pages_url/$SOURCES_DIR/$DEFAULT.zip)"
+            echo "::notice::$DEFAULT restored from durable in-site copy ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip)"
           else
             echo "::error::$DEFAULT: not provided by current build, releases, branch CI, or durable in-site copy — deploy aborted"
             exit 1
@@ -245,7 +271,7 @@ jobs:
         run: |
           set -euo pipefail
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
-            --site-dir "$RUNNER_TEMP/site" --repo "$REPO" --required "$DEFAULT")
+            --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT")
           [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
 
       - name: Upload Pages artifact

@@ -12,7 +12,7 @@ publishes it **directly to GitHub Pages** via `actions/upload-pages-artifact` +
 `actions/deploy-pages`. There is **no `gh-pages` branch** — `deploy-pages` publishes
 one artifact as the *entire* site, which is a whole-site-replace. The four source
 kinds and their durability are in the
-[reference](../reference/workflows.md#what-publishyml-gathers).
+[reference](../reference/workflows.md#what-publish-yml-gathers).
 
 Releases are permanent, so old versions never vanish. PR previews come from CI
 artifacts and silently drop if the artifact expires and nothing rebuilds — fine for
@@ -68,7 +68,7 @@ ordering:
 
 ## The `docs.zip` / version-name contracts
 
-Two contracts (described in the [reference](../reference/workflows.md#the-docszip--version-name-contracts))
+Two contracts (described in the [reference](../reference/workflows.md#the-docs-zip-version-name-contracts))
 keep build and reconstruction in sync. The design rationale in both is to eliminate
 sanitisation:
 
@@ -242,8 +242,10 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
 - **PR build not yet green / SHA moved:** an open PR whose current head SHA has no
   successful CI run is skipped; its preview appears once the build passes.
 - **Merged/closed PR:** drops from the gather (open-PRs only) on the next deploy.
-- **Prereleases:** excluded from `preferred`/redirect (an `a`/`b`/`rc` marker, parity
-  with the release workflow), but still listed in the switcher if gathered.
+- **Prereleases:** excluded from `preferred`/redirect (an `a`/`b`/`rc` marker
+  following a digit, PEP 440 style — parity with the release workflow; a tag that
+  merely contains those letters, like `release-1.0`, is not a prerelease), but still
+  listed in the switcher if gathered.
 - **Concurrency:** `concurrency: { group: pages, cancel-in-progress: false }` makes
   deploys last-writer-wins; reconstructing from durable sources keeps that mostly
   self-healing.

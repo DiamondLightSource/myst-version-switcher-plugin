@@ -7,7 +7,7 @@
  * switcher.json + index.html, and prints the stable-alias source dir on stdout.
  * Exposed as one subcommand:
  *
- *   node assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]
+ *   node assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
  *         source dir (the newest deployed release) on stdout, or nothing. Also
  *         exit-1s if a --required branch is absent from the site.
@@ -92,11 +92,13 @@ export function orderVersions(builds, tags) {
 }
 
 /**
- * Is `tag` a prerelease? Mirrors `release.yml`'s test (an `a`, `b`, or `rc`
- * marker in the name, PEP 440 style) so "stable" means the same thing repo-wide.
+ * Is `tag` a prerelease? Mirrors `release.yml`'s test (a PEP 440-style `a`,
+ * `b`, or `rc` marker *following a digit*, e.g. `1.0a1`/`2.0rc1`) so "stable"
+ * means the same thing repo-wide. Anchoring on the digit keeps tags that merely
+ * contain those letters (`release-1.0`, `beta-program`) out of the prerelease set.
  */
 export function isPrerelease(tag) {
-	return /a|b|rc/i.test(tag);
+	return /\d(a|b|rc)/i.test(tag);
 }
 
 /**
@@ -153,13 +155,17 @@ export function missingRequired(required = [], versions = []) {
 	return required.filter((branch) => !have.has(branch));
 }
 
-/** Build the pydata switcher array for `org/repo`, flagging the stable entry. */
-export function switcherStruct(repository, versions, preferred) {
-	const [org, repoName] = repository.split("/");
+/**
+ * Build the pydata switcher array rooted at `baseUrl` (the site's live Pages
+ * URL — publish.yml resolves it from the Pages API, so custom domains work),
+ * flagging the stable entry.
+ */
+export function switcherStruct(baseUrl, versions, preferred) {
+	const base = String(baseUrl).replace(/\/+$/, "");
 	return versions.map((version) => {
 		const entry = {
 			version,
-			url: `https://${org}.github.io/${repoName}/${version}/`,
+			url: `${base}/${version}/`,
 		};
 		if (version === preferred) entry.preferred = true;
 		return entry;
@@ -167,12 +173,8 @@ export function switcherStruct(repository, versions, preferred) {
 }
 
 /** Serialise the switcher exactly as the Python tool did (2-space JSON). */
-export function renderSwitcher(repository, versions, preferred) {
-	return JSON.stringify(
-		switcherStruct(repository, versions, preferred),
-		null,
-		2,
-	);
+export function renderSwitcher(baseUrl, versions, preferred) {
+	return JSON.stringify(switcherStruct(baseUrl, versions, preferred), null, 2);
 }
 
 /** Root redirect to `target` (relative, so it is host- and repo-agnostic). */
@@ -202,7 +204,7 @@ function csv(value) {
 }
 
 /**
- * `generate --site-dir --repo [--required <csv>]` — write switcher.json +
+ * `generate --site-dir --base-url [--required <csv>]` — write switcher.json +
  * index.html and emit the stable-alias source. Runs after all gathering, so it
  * also hard-fails (exit 1) if a `--required` branch is absent from the site.
  */
@@ -211,15 +213,15 @@ function cmdGenerate(rest) {
 		args: rest,
 		options: {
 			"site-dir": { type: "string" },
-			repo: { type: "string" },
+			"base-url": { type: "string" },
 			required: { type: "string" },
 		},
 	});
 	const siteDir = values["site-dir"];
-	const repo = values.repo;
-	if (!siteDir || !repo) {
+	const baseUrl = values["base-url"];
+	if (!siteDir || !baseUrl) {
 		throw new Error(
-			"usage: assemble.mjs generate --site-dir <dir> --repo <org/repo> [--required <csv>]",
+			"usage: assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]",
 		);
 	}
 
@@ -251,7 +253,7 @@ function cmdGenerate(rest) {
 
 	writeFileSync(
 		join(siteDir, "switcher.json"),
-		renderSwitcher(repo, versions, preferred),
+		renderSwitcher(baseUrl, versions, preferred),
 		"utf8",
 	);
 	if (redirectTarget) {

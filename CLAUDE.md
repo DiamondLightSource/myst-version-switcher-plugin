@@ -36,7 +36,7 @@ public action.
 
 ## Key design decisions
 
-See [`docs/explanation/architecture.md`](docs/explanation/architecture.md) for the
+See [`docs/explanations/architecture.md`](docs/explanations/architecture.md) for the
 full rationale. In short:
 
 ### The default branch is self-durable in the site (`_sources/`)
@@ -47,7 +47,9 @@ persists the default branch's `docs.zip` (the one it arrived as — current buil
 gathered run, or the fallback — copied verbatim) into the published site at
 `_sources/<branch>.zip` (excluded from version discovery), and a deploy whose fresh
 artifact is gone restores the branch from that durable in-site copy (fetched from
-`PAGES_URL`, default `https://<owner>.github.io/<repo>`). Before the branch ever builds
+`$PAGES_URL` — the live Pages URL resolved from the Pages API, so custom domains
+work, falling back to `https://<owner>.github.io/<repo>`; the same URL roots the
+`switcher.json` entries). Before the branch ever builds
 docs (mid gh-pages migration) a final rung reads a **published seed release**
 (`pages-default-seed`, created by `scripts/migrate.sh` from the old gh-pages `<default>/`
 tree) and persists it to `_sources` on that deploy — so a repo can cut over to the
@@ -125,7 +127,8 @@ With no releases and no other branches, `assemble` produces a single-entry
 rather than failing. The "preferred" version (the redirect target, flagged
 `preferred: true` in switcher.json, rendered with a ★) is the newest deployed
 non-prerelease tag, falling back to `main`/`master`. Prerelease detection mirrors
-`release.yml` (an `a`/`b`/`rc` marker).
+`release.yml` (an `a`/`b`/`rc` marker following a digit, PEP 440 style — so
+`1.0a1`/`2.0rc1` are prereleases but `release-1.0` is not).
 
 ### `stable/` alias
 When a non-prerelease release is deployed, the site serves a `stable/` symlink
@@ -172,13 +175,16 @@ Sub-workflows of `ci.yml`:
 - `_test.yml` — `npm test`
 - `docs.yml` — **reusable build, parameterised for cross-repo reuse.** Compute the
   version name (`pr-<n>` / default-branch / tag) → run `build-command` (required
-  input) with `BASE_URL` set → pack `docs.zip` (bare `html/`, staged so
-  any `html-dir` works) → upload the `docs` artifact → warn on fork PRs. No deploy;
-  `contents: read` only. Installs uv unconditionally and relies on the runner's
+  input) with `BASE_URL` + `VERSION_NAME` set (the latter for builds that need the
+  bare token, e.g. a Sphinx conf.py setting pydata's switcher `version_match`) →
+  pack `docs.zip` (bare `html/`, staged so any `html-dir` works) → upload the `docs`
+  artifact. No deploy; `contents: read` only (the fork-PR hint lives in publish.yml's
+  `warn` job). Installs uv unconditionally and relies on the runner's
   preinstalled Node, so `build-command` can be `make docs` / `npx … myst build` /
   `tox -e docs` regardless of project. This repo passes `npm ci && npm run docs`. It
   OWNS the build↔publish contract (version name, BASE_URL, docs.zip `html/` root,
-  `docs` artifact name) so consumers only choose a command.
+  `docs` artifact name — publish.yml gathers cross-run artifacts by that NAME via the
+  artifacts API, never by workflow filename) so consumers only choose a command.
 - `release.yml` — **PUBLIC reusable, tag-only.** Downloads every artifact in the run
   and attaches them to the tag's GitHub Release via `gh` — `gh release create` if no
   Release exists yet (draft→upload→publish atomically, so immutable-safe), else
