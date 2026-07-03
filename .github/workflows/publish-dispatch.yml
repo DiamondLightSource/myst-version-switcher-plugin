@@ -24,14 +24,20 @@ on:
         description: External fork PR number to approve (pins its head SHA) and preview. Leave empty to just re-deploy.
         required: false
         default: ""
+      verify-retry:
+        description: >-
+          Internal — auto-retry counter for a wedged Pages origin. Don't set manually.
+        required: false
+        default: "0"
 
 jobs:
   publish:
     uses: ./.github/workflows/publish.yml
     with:
-      version-name: ${{ inputs.version-name }}   # "" on dispatch → pure durable gather
-      pr: ${{ inputs.pr }}                        # set (dispatch only) → pin that fork head SHA
-      dispatch-workflow: publish-dispatch.yml     # the file the tag re-dispatch re-fires
+      version-name: ${{ inputs.version-name }}          # "" on dispatch → pure durable gather
+      pr: ${{ inputs.pr }}                               # set (dispatch only) → pin that fork head SHA
+      dispatch-workflow: publish-dispatch.yml            # the file the tag re-dispatch re-fires
+      verify-retry: ${{ inputs.verify-retry || '0' }}    # "" on workflow_call → publish.yml's own default
     permissions:
       contents: read
       actions: write     # publish.yml's re-dispatch job re-fires this shim via gh
