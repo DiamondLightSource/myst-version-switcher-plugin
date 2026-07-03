@@ -185,9 +185,9 @@ jobs:
           repo_id=$(gh api "repos/$REPO" -q .id)
           gather_artifact() {
             local filter="$1" dest="$2" label="$3"
-            local id; id=$(gh api --paginate --slurp \
+            local id; id=$(gh api --paginate \
               "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
-              -q "[.[].artifacts[] | select((.expired | not) and ($filter))] | sort_by(.created_at) | last | .id // empty")
+              | jq -rs "[.[].artifacts[] | select((.expired | not) and ($filter))] | sort_by(.created_at) | last | .id // empty")
             [ -n "$id" ] || return 0
             # The API serves the artifact as a zip-of-the-artifact (docs.zip inside).
             local tmp; tmp=$(mktemp -d)
