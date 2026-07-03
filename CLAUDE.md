@@ -285,6 +285,15 @@ jobs:
     permissions: { pages: write, id-token: write, contents: read, actions: write, statuses: write }
 ```
 
+Your `publish-dispatch.yml` wrapper's `workflow_dispatch` inputs must include `pr`
+**and `retry-until`**, forwarding both into `publish.yml`'s `with:` — copy the shim
+in [`docs/reference/workflows.md`](docs/reference/workflows.md) or the
+[tutorial](docs/tutorials/adding-to-a-fresh-repo.md) verbatim rather than
+hand-rolling it. `retry-until` is never set by a human; `publish.yml`'s
+`re-dispatch` job always passes it when re-firing the shim after a tag release, so
+a shim missing the input rejects that dispatch (breaking every tagged release's
+re-publish, not just the wedged-origin retry it exists for).
+
 Add a `release` job that `uses:` this repo's `release.yml@<tag>` (with `permissions:
 contents: write`) to attach each tag's built `docs.zip` (bare `html/` root) as a
 Release asset so `assemble` can reconstruct released versions, and the

@@ -132,6 +132,10 @@ on:
         description: "Fork PR to approve + preview (empty = re-deploy)"
         required: false
         default: ""
+      retry-until:
+        description: "Internal — epoch-seconds retry deadline. Don't set manually."
+        required: false
+        default: ""
 jobs:
   publish:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@__LATEST_TAG__
@@ -142,6 +146,8 @@ jobs:
       pr: ${{ inputs.pr }}
       # the file the tag re-dispatch re-fires
       dispatch-workflow: publish-dispatch.yml
+      # forwarded so the re-dispatch job's auto-retry can re-fire this shim
+      retry-until: ${{ inputs.retry-until }}
     permissions:
       contents: read
       actions: write
