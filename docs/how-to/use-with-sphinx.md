@@ -36,9 +36,6 @@ html_theme_options = {
     # switcher.json doesn't exist until the first deploy; don't fail the build on it.
     "check_switcher": False,
 }
-
-# Optional but recommended: correct canonical URLs + sitemap under the versioned path.
-html_baseurl = f"https://ORG.github.io/REPO{os.environ.get('BASE_URL', '')}/"
 ```
 
 Unlike MyST's book-theme, Sphinx emits *relative* asset URLs, so the build doesn't
