@@ -51,12 +51,13 @@ on:
         required: false
         default: publish-dispatch.yml
         type: string
-      verify-retry:
+      retry-until:
         description: >-
-          Internal — auto-retry counter for a wedged Pages origin, incremented by the
-          deploy job itself when it re-dispatches. Don't set manually.
+          Internal — epoch-seconds deadline for auto-retrying a wedged Pages origin.
+          Empty means no retry budget (set only by the tag re-dispatch job, from the
+          release's publish time); carried unchanged through any retries. Don't set manually.
         required: false
-        default: "0"
+        default: ""
         type: string
 
 jobs:
@@ -357,24 +358,27 @@ jobs:
       # fresh workflow_dispatch, not a longer timeout. This must be a fresh dispatch and
       # NOT a job rerun — rerunning would stack a second `github-pages` artifact under
       # this same run and break deploy-pages' artifact lookup ("Multiple artifacts named
-      # github-pages"). Capped at 2 retries so a genuine outage still ends up red instead
-      # of looping forever.
+      # github-pages"). Only tag/release deploys carry a retry-until budget (set by the
+      # re-dispatch job below, from the release's publish time, carried unchanged through
+      # each retry) — that's the same-SHA dedup wedge this targets, which a push/PR/manual
+      # deploy can't hit (those are always first-of-SHA). No budget → no auto-retry, just
+      # the red check.
       - name: Retry via a fresh dispatch if the origin is wedged
-        if: failure() && steps.verify.outcome == 'failure'
+        if: failure() && steps.verify.outcome == 'failure' && inputs.retry-until != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WF: ${{ inputs.dispatch-workflow }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          RETRY: ${{ inputs.verify-retry }}
+          RETRY_UNTIL: ${{ inputs.retry-until }}
         run: |
           set -euo pipefail
-          if [ "$RETRY" -ge 2 ]; then
-            echo "::error::origin still wedged after $RETRY retries — giving up, manual re-dispatch needed"
+          if [ "$(date +%s)" -ge "$RETRY_UNTIL" ]; then
+            echo "::error::origin still wedged past the retry deadline ($(date -d "@$RETRY_UNTIL" -Is)) — giving up, manual re-dispatch needed"
             exit 0
           fi
-          gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH" -f verify-retry="$((RETRY + 1))"
-          echo "::notice::origin wedged — dispatched a fresh retry ($((RETRY + 1))/2)"
+          gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH" -f retry-until="$RETRY_UNTIL"
+          echo "::notice::origin wedged — dispatched a fresh retry (budget until $(date -d "@$RETRY_UNTIL" -Is))"
 
   # A tag can't deploy inline (same SHA as the default-branch push → Pages drops it
   # unless the event is workflow_dispatch). Wait for the release, then re-dispatch the
@@ -397,10 +401,16 @@ jobs:
           set -euo pipefail
           # ci.yml's release job attaches the tag's docs.zip in parallel; the dispatched
           # run gathers the tag from that asset, so don't dispatch until it exists.
+          published_at=""
           for _ in $(seq 1 36); do
-            gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break
+            published_at=$(gh release view "$TAG" --repo "$REPO" --json publishedAt -q .publishedAt 2>/dev/null) && break
             sleep 5
           done
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
+          [ -n "$published_at" ] \
             || { echo "::error::release $TAG not found after 3 min — did the release job fail?"; exit 1; }
-          gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH"
+          # Retry budget anchored on the release's publish time, not the commit's — a tag
+          # can be cut long after its commit was merged (this repo's own release flow
+          # allows it), so the commit's own timestamp would wrongly disqualify the exact
+          # same-SHA dedup wedge (deploy-pages#383) this budget exists to retry through.
+          retry_until=$(( $(date -d "$published_at" +%s) + 900 ))
+          gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH" -f retry-until="$retry_until"
