@@ -269,7 +269,8 @@ jobs:
           done
           dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
           [ -d "$RUNNER_TEMP/site/$DEFAULT" ] && [ -f "$dzip" ] \
-            && { mkdir -p "$RUNNER_TEMP/site/$SOURCES_DIR"; cp "$dzip" "$RUNNER_TEMP/site/$SOURCES_DIR/$DEFAULT.zip"; }
+            && { mkdir -p "$RUNNER_TEMP/site/$SOURCES_DIR"; cp "$dzip" "$RUNNER_TEMP/site/$SOURCES_DIR/$DEFAULT.zip"; } \
+            || true
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.
@@ -280,7 +281,7 @@ jobs:
           set -euo pipefail
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
             --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT")
-          [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
+          [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable" || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
