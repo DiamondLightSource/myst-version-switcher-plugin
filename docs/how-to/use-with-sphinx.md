@@ -53,7 +53,7 @@ jobs:
   docs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@__LATEST_TAG__
     with:
-      build-command: tox -e docs        # or: sphinx-build -T docs build/html
+      build-command: uv run --locked tox -e docs        # or: sphinx-build -T docs build/html
       html-dir: build/html              # wherever your build writes the HTML
 
   release:
