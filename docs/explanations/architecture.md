@@ -236,6 +236,11 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
   redirect → `main/`. Graceful; no release required.
 - **Release without `docs.zip`** (cut before this scheme): not selected by the
   releases query (it filters on a `docs.zip` asset) → skipped, no hard failure.
+- **Release with a differently-rooted `docs.zip`**: served fine. The extract takes
+  the zip's single top-level directory whatever it is named, so an immutable release
+  asset packed by another pipeline (python-copier-template's `_release.yml` roots
+  its zip at the tag name, not `html/`) still deploys. A zip with *no* single root
+  directory is malformed → warning, skipped.
 - **Default branch missing**: if `main` has no recent successful CI artifact, no durable
   `_sources/main.zip` in the live site, and no migration seed release, the deploy
   **hard-fails** rather than publish a site missing it.

@@ -97,6 +97,14 @@ IO (gather + extract); the JS kernel does the pure logic (`generate` + the folde
 sanitisation**: version names are clean by construction — `main`, `pr-<number>`, or
 a tag without `/` (the `tags: ['*']` trigger never builds `/`-tags).
 
+The extract step's zip-shape rule is deliberately **name-agnostic**: a `docs.zip` must
+unzip to exactly one top-level directory, whose *contents* become `site/<version-name>`
+— the directory's *name* is ignored. `docs.yml` packs `html/`, but release assets are
+durable and may predate this pipeline (python-copier-template's `_release.yml` roots
+its zip at the tag name, and an immutable release can't be re-cut), so keying on
+`html/` silently dropped every such release from the switcher. Zero entries, several
+entries, or files loose at the zip root are malformed — warn and skip, never guess.
+
 ### Self-referencing assemble.mjs (no separate action)
 `publish.yml` sparse-checks-out **this** repo's `assemble/` at `job.workflow_repository`
 + `job.workflow_sha` — the `job` context resolves to the file that defines the running
@@ -177,14 +185,14 @@ Sub-workflows of `ci.yml`:
   version name (`pr-<n>` / default-branch / tag) → run `build-command` (required
   input) with `BASE_URL` + `VERSION_NAME` set (the latter for builds that need the
   bare token, e.g. a Sphinx conf.py setting pydata's switcher `version_match`) →
-  pack `docs.zip` (bare `html/`, staged so any `html-dir` works) → upload the `docs`
+  pack `docs.zip` (single root dir `html/`, staged so any `html-dir` works) → upload the `docs`
   artifact. No deploy; `contents: read` only (the fork-PR hint lives in publish.yml's
   `warn` job). Installs uv unconditionally and relies on the runner's
   preinstalled Node, so `build-command` can be `make docs` / `npx … myst build` /
   `tox -e docs` regardless of project. This repo passes `npm ci && npm run docs`. It
-  OWNS the build↔publish contract (version name, BASE_URL, docs.zip `html/` root,
-  `docs` artifact name — publish.yml gathers cross-run artifacts by that NAME via the
-  artifacts API, never by workflow filename) so consumers only choose a command.
+  OWNS the build↔publish contract (version name, BASE_URL, docs.zip's single root
+  dir, `docs` artifact name — publish.yml gathers cross-run artifacts by that NAME via
+  the artifacts API, never by workflow filename) so consumers only choose a command.
 - `release.yml` — **PUBLIC reusable, tag-only.** Downloads every artifact in the run
   and attaches them to the tag's GitHub Release via `gh` — `gh release create` if no
   Release exists yet (draft→upload→publish atomically, so immutable-safe), else
@@ -295,7 +303,7 @@ a shim missing the input rejects that dispatch (breaking every tagged release's
 re-publish, not just the wedged-origin retry it exists for).
 
 Add a `release` job that `uses:` this repo's `release.yml@<tag>` (with `permissions:
-contents: write`) to attach each tag's built `docs.zip` (bare `html/` root) as a
+contents: write`) to attach each tag's built `docs.zip` (single `html/` root dir) as a
 Release asset so `assemble` can reconstruct released versions, and the
 `publish-dispatch.yml` wrapper around `publish.yml` — the single caller of the engine
 and the one place you pin `publish.yml@<tag>`. The wrapper owns all

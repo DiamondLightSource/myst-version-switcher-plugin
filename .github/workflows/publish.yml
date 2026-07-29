@@ -255,6 +255,16 @@ jobs:
 
       # Unzip every gathered zip into SITE/<version-name>.
       # Persist the default-branch zip into SITE/_sources/ for future recovery.
+      #
+      # THE ZIP-SHAPE CONTRACT: a docs.zip must unzip to exactly ONE top-level
+      # directory, whose CONTENTS become site/<version-name>. The directory's NAME is
+      # ignored. docs.yml packs `html/`, but release assets are durable and long-lived
+      # — a repo migrating from python-copier-template's `_release.yml` has immutable
+      # releases carrying zips rooted at the TAG NAME (`mv html $GITHUB_REF_NAME;
+      # zip -r docs.zip $GITHUB_REF_NAME`), which cannot be re-cut. Keying on `html/`
+      # silently dropped every one of those releases from the switcher. Anything else
+      # — no entries, several entries, or files loose at the zip root — is malformed
+      # (nothing is known to produce it) and warns + skips rather than guessing.
       - name: Extract artifacts into site
         run: |
           set -euo pipefail
@@ -262,9 +272,20 @@ jobs:
             [ -f "$f" ] || continue
             name=$(basename "$f" .zip)
             tmp=$(mktemp -d)
-            unzip -q "$f" 'html/*' -d "$tmp" 2>/dev/null && [ -d "$tmp/html" ] \
-              && { rm -rf "$RUNNER_TEMP/site/$name"; mv "$tmp/html" "$RUNNER_TEMP/site/$name"; } \
-              || echo "::warning::$name: no html/ root in zip — skipping"
+            if ! unzip -q "$f" -d "$tmp" 2>/dev/null; then
+              echo "::warning::$name: could not unzip docs.zip — skipping"
+              rm -rf "$tmp"; continue
+            fi
+            # -print0/-d '' so the count is exact whatever the entries are named,
+            # and dotfiles at the root count too (they would be a malformed zip).
+            roots=(); mapfile -d '' -t roots < <(find "$tmp" -mindepth 1 -maxdepth 1 -print0)
+            if [ "${#roots[@]}" -eq 1 ] && [ -d "${roots[0]}" ]; then
+              rm -rf "$RUNNER_TEMP/site/$name"
+              mv "${roots[0]}" "$RUNNER_TEMP/site/$name"
+            else
+              found=$(printf '%s ' "${roots[@]##*/}")
+              echo "::warning::$name: docs.zip must unzip to exactly one top-level directory — found [${found% }] — skipping"
+            fi
             rm -rf "$tmp"
           done
           dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
@@ -275,7 +296,7 @@ jobs:
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.
       # Hard-fails if the default branch is absent (Ensure step guarantees the zip, but
-      # the extract could still fail if the zip had no html/ root).
+      # the extract could still fail if the zip was malformed).
       - name: Generate switcher.json and stable alias
         run: |
           set -euo pipefail
