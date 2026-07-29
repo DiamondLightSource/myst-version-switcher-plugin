@@ -33,7 +33,11 @@ Two consequences drive the procedure:
    **backfill** of `docs.zip` onto those Releases — not just a config flip. (A tag with
    a `gh-pages` directory but **no Release at all** gets one *created* with the
    `docs.zip` — covering repos that tag without releasing, and fork rehearsals, since
-   forking copies tags but not Releases.)
+   forking copies tags but not Releases.) If your Releases *already* carry a `docs.zip`
+   from a previous pipeline, the backfill leaves them alone and they are used as-is —
+   the extract takes the zip's single root directory whatever it is named, so
+   python-copier-template's tag-name-rooted zips (`1.2.3/` rather than `html/`) need no
+   re-cutting, which matters because an immutable release cannot be re-cut anyway.
 2. **The default branch has no permanent source until a publish captures it.** Each
    deploy persists the branch's `docs.zip` into the site (`_sources/<branch>.zip`) and
    restores from there when the CI artifact expires — but before the *first* publish

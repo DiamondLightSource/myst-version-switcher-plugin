@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       html-dir:
-        description: Directory the build writes the site to (packed as docs.zip's html/).
+        description: Directory the build writes the site to (packed as docs.zip's single root dir, html/).
         required: false
         default: docs/_build/html
         type: string
@@ -19,14 +19,14 @@ on:
 
 # REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
 # the docs at the versioned BASE_URL and uploads this build's `docs` artifact
-# (docs.zip, bare html/ root). It runs for every event — PRs (including forks),
+# (docs.zip, a single html/ root dir). It runs for every event — PRs (including forks),
 # pushes to the default branch, and tags — but NEVER publishes. publish.yml (the
 # privileged half) deploys, called separately by the consumer's ci.yml on internal
 # events, injecting THIS build's artifact for the current version name.
 #
 # This workflow OWNS the build/publish contract so it cannot drift: the version
-# name, the BASE_URL, the docs.zip bare-html/ root, and the `docs` artifact name all
-# live here. The consumer supplies only HOW to turn sources into HTML, via
+# name, the BASE_URL, the docs.zip single-root-dir shape, and the `docs` artifact name
+# all live here. The consumer supplies only HOW to turn sources into HTML, via
 # `build-command`.
 #
 # Environment given to build-command: Node/npx (preinstalled on the runner) and uv
@@ -98,10 +98,13 @@ jobs:
           set -euo pipefail
           eval "$BUILD_COMMAND"
 
-      # Pack the site as docs.zip with a bare html/ root — the durable contract both
-      # publish.yml's gather and release.yml's asset rely on. Stage into html/
-      # first so any html-dir name yields the same root.
-      - name: Pack docs.zip (bare html/ root)
+      # Pack the site as docs.zip with a single root directory — the durable contract
+      # both publish.yml's gather and release.yml's asset rely on. Stage into html/
+      # first so any html-dir name yields the same root. publish.yml's extract keys on
+      # there being exactly ONE root dir, not on it being called html/ (release assets
+      # are durable and may have been packed by another pipeline), but everything this
+      # workflow produces is html/-rooted.
+      - name: Pack docs.zip (single html/ root)
         env:
           HTML_DIR: ${{ inputs.html-dir }}
         run: |

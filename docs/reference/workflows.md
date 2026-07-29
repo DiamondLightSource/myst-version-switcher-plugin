@@ -29,7 +29,7 @@ directly; it is not a separately consumed action.
 
 ## `docs.yml` — build (unprivileged)
 
-Builds the docs at the versioned `BASE_URL`, packs `docs.zip` (bare `html/` root),
+Builds the docs at the versioned `BASE_URL`, packs `docs.zip` (single `html/` root dir),
 and uploads the `docs` artifact. Declares `contents: read` only —
 it never holds a write token. Installs `uv` unconditionally and relies on the runner's
 preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driven.
@@ -37,7 +37,7 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 | input | required | default | meaning |
 |---|---|---|---|
 | `build-command` | **yes** | — | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
-| `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip`'s `html/`. |
+| `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip` as its single root directory, `html/`. |
 
 | output | meaning |
 |---|---|
@@ -119,10 +119,15 @@ fresher source always wins when names collide.
 Two contracts let the build (`docs.yml`) and the reconstruction (`assemble`) agree
 without coordination — `docs.yml` owns both:
 
-- **`docs.zip` is one zip with a bare `html/` root.** `docs.yml` packs it once and it
-  is delivered the *same file* two ways: uploaded verbatim as the `docs` artifact
-  (every run), and attached verbatim as the `docs.zip` Release asset on tags. Both the
-  release gather and the branch/PR gather unzip the same `html/` shape.
+- **`docs.zip` unzips to exactly one top-level directory.** `docs.yml` packs it once,
+  rooted at `html/`, and it is delivered the *same file* two ways: uploaded verbatim as
+  the `docs` artifact (every run), and attached verbatim as the `docs.zip` Release asset
+  on tags. The extract side is deliberately looser than the pack side: it takes that
+  single directory's **contents** and ignores its **name**, because release assets are
+  durable and may predate this pipeline — python-copier-template's `_release.yml` roots
+  its zip at the tag name (`1.2.3/`), and an immutable release cannot be re-cut. Zero
+  entries, several entries, or files loose at the zip root are malformed: that version
+  is skipped with a warning rather than guessed at.
 - **The version name is the site sub-dir *and* the `BASE_URL`.** It is `pr-<n>` for
   PRs, else the ref name (the default branch, or a tag without `/`). `docs.yml` sets
   `BASE_URL=/REPO/<version-name>` and `assemble` files the artifact at
