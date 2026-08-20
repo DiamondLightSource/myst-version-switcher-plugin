@@ -63,7 +63,10 @@ generic.
   matches the `<tag>` the consumer pinned — no version bump; the consumer's repo stays
   checked out at the root so `assemble.mjs`'s `git tag` lists *their* versions. The
   inline path injects the in-run build via `version-name`; the dispatch paths pure-gather.
-- **`re-dispatch`** — a tag push. Waits for the release, then re-fires the shim
+- **`re-dispatch`** — a tag push. Waits for the tag's **`docs.zip` release asset** —
+  not merely for the release record, which a UI-published release creates *before* CI
+  even starts, so the deploy would list releases before the asset landed and drop the
+  tag from its own site — then re-fires the shim
   (`dispatch-workflow`, a file in the consumer's repo — a `workflow_call` run executes with
   the caller's token, so it can dispatch it) so the deploy lands as a `workflow_dispatch`
   and re-serves.
@@ -90,7 +93,7 @@ re-dispatch, a fork-PR preview, a manual re-deploy). A reusable workflow can't b
 | `version-name` | no | `""` | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Set by `ci.yml`'s inline publish (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather (the dispatch paths). |
 | `pr` | no | `""` | Fork PR number to approve (pins its head SHA as `preview-approved`) and preview. Set on the shim's `workflow_dispatch` path. |
 | `dispatch-workflow` | no | `publish-dispatch.yml` | Filename of the shim in the consumer's repo, re-fired by the `re-dispatch` job. Override only if you renamed the shim. |
-| `retry-until` | no | `""` | Internal — epoch-seconds deadline for auto-retrying a wedged Pages origin. Set only by the `re-dispatch` job (from the release's publish time) when it re-fires the shim; carried unchanged through any retries. **The shim must declare + forward this input** (`workflow_dispatch` + the `with:` block below) even though consumers never set it themselves — `re-dispatch` always passes it, and a shim missing the input rejects the dispatch. Don't set manually. |
+| `retry-until` | no | `""` | Internal — epoch-seconds deadline for auto-retrying a wedged Pages origin. Set only by the `re-dispatch` job (15 min from the moment the tag's `docs.zip` asset lands — i.e. from when a deploy first becomes possible, *not* from the release's publish time, which a UI-published release stamps before CI even starts) when it re-fires the shim; carried unchanged through any retries. **The shim must declare + forward this input** (`workflow_dispatch` + the `with:` block below) even though consumers never set it themselves — `re-dispatch` always passes it, and a shim missing the input rejects the dispatch. Don't set manually. |
 
 ## What `publish.yml` gathers
 

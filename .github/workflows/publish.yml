@@ -13,7 +13,8 @@ name: Publish
 #                  `version-name`; the dispatch paths pure-gather (version-name "").
 #   re-dispatch  — a TAG push. An inline tag deploy is silently DROPPED by Pages (it reuses
 #                  the default branch's just-deployed SHA on a non-dispatch event —
-#                  deploy-pages#383), so wait for the release, then re-fire the shim
+#                  deploy-pages#383), so wait for the tag's docs.zip ASSET (not merely
+#                  its release record — see the job), then re-fire the shim
 #                  (`inputs.dispatch-workflow`, a file in the CONSUMER's repo — a
 #                  workflow_call run executes with the caller's repo + token, so we can
 #                  dispatch it) → the deploy lands on a `workflow_dispatch` event and
@@ -103,6 +104,37 @@ jobs:
       SEED_TAG: pages-default-seed
       SOURCES_DIR: _sources
     steps:
+      # Everything a post-mortem needs, in one place, at the top of the log: which
+      # event, which ref, which inputs, which assemble.mjs. Timestamped — the gather
+      # below races a release's asset upload, and you cannot see a race without clocks.
+      - name: Log deploy context
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          KERNEL: ${{ job.workflow_repository }}@${{ job.workflow_sha }}
+          IN_VERSION_NAME: ${{ inputs.version-name }}
+          IN_PR: ${{ inputs.pr }}
+          IN_RETRY_UNTIL: ${{ inputs.retry-until }}
+          IN_DISPATCH_WF: ${{ inputs.dispatch-workflow }}
+        run: |
+          set -euo pipefail
+          printf '%-26s %s\n' \
+            'deploy started'            "$(date -u -Is)" \
+            'repo'                      "$REPO" \
+            'default branch'            "$DEFAULT" \
+            'event'                     "$EVENT" \
+            'ref'                       "$REF (${REF_TYPE:-branch})" \
+            'actor'                     "$ACTOR" \
+            'run'                       "$RUN_URL" \
+            'assemble.mjs'              "$KERNEL" \
+            'inputs.version-name'       "${IN_VERSION_NAME:-<empty> (pure durable gather)}" \
+            'inputs.pr'                 "${IN_PR:-<empty>}" \
+            'inputs.retry-until'        "${IN_RETRY_UNTIL:-<empty> (no auto-retry)}" \
+            'inputs.dispatch-workflow'  "$IN_DISPATCH_WF"
+
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
       # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
       - uses: actions/checkout@v7
@@ -136,8 +168,15 @@ jobs:
             -f state=success -f context=preview-approved \
             -f description="Fork docs preview approved"
 
+      # provenance.tsv is the deploy's audit trail: every gather step appends
+      # "<version>\t<source>\t<detail>", later lines superseding earlier ones for the
+      # same version (that ordering IS the priority chain). The summary step renders
+      # the last line per version as a table on the run page.
       - name: Create staging dirs
-        run: mkdir -p "$RUNNER_TEMP/site" "$RUNNER_TEMP/gather"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site" "$RUNNER_TEMP/gather"
+          : > "$RUNNER_TEMP/provenance.tsv"
 
       # The live Pages base URL, from the Pages API — respects a custom domain
       # (CNAME); falls back to the conventional github.io URL if the API call
@@ -148,31 +187,75 @@ jobs:
         run: |
           set -euo pipefail
           url=$(gh api "repos/$REPO/pages" -q .html_url 2>/dev/null || true)
+          src="Pages API (honours a custom domain)"
           if [ -z "$url" ]; then
             owner=$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
             url="https://$owner.github.io/${REPO#*/}"
+            src="fallback — the Pages API call failed or Pages is not configured"
           fi
           echo "PAGES_URL=${url%/}" >> "$GITHUB_ENV"
-          echo "Pages URL: ${url%/}"
+          echo "Pages URL: ${url%/}  [$src]"
 
       # Releases are permanent sources; the seed release (if present) stands in for the
       # default branch until _sources/ is established — store it as $DEFAULT.zip so the
       # priority-overwrite chain below can supersede it with a fresher source.
+      #
+      # Prints a decision per release. A release is selected by its docs.zip ASSET, so
+      # "published but no asset yet" silently drops that version from the deploy — the
+      # exact race the re-dispatch job now waits out. A recent one gets a loud warning
+      # here too, because this is the step whose log has to explain it.
       - name: Gather release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tags=$(gh api --paginate "repos/$REPO/releases" \
-            -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
-          for tag in $tags; do
-            case "$tag" in */*) continue ;; esac
-            [ "$tag" = "$DEFAULT" ] && continue
-            [ "$tag" = "$SEED_TAG" ] && dest="$DEFAULT" || dest="$tag"
-            gh release download "$tag" --repo "$REPO" -p docs.zip \
-              -O "$RUNNER_TEMP/gather/$dest.zip" \
-              || echo "::warning::release $tag download failed — skipping"
-          done
+          now=$(date +%s)
+          releases=$(gh api --paginate "repos/$REPO/releases" | jq -rs 'add // []')
+          echo "$(jq length <<<"$releases") release(s) listed at $(date -u -Is)"
+          printf '%-28s %-21s %-9s %s\n' TAG PUBLISHED DOCS.ZIP DECISION
+          while IFS=$'\t' read -r tag published has size; do
+            [ -n "$tag" ] || continue
+            dest=""; decision=""
+            case "$tag" in
+              */*)        decision="skip: '/' in tag (never built)" ;;
+              "$DEFAULT") decision="skip: same name as the default branch" ;;
+              "$SEED_TAG") dest="$DEFAULT" ;;
+              *)          dest="$tag" ;;
+            esac
+            if [ -z "$decision" ] && [ "$has" != true ]; then
+              decision="skip: no docs.zip asset"
+              dest=""
+              # Only a *recently* published one is the race; an old asset-less release
+              # (a source-only tag) is normal. An unparseable date warns about nothing.
+              pub_s=""
+              if [ "$published" != "-" ]; then pub_s=$(date -d "$published" +%s 2>/dev/null || true); fi
+              if [ -n "$pub_s" ] && [ "$(( now - pub_s ))" -lt 1800 ]; then
+                echo "::warning::release $tag was published $(( (now - pub_s) / 60 ))m ago and still \
+          has no docs.zip asset — it will be MISSING from this deploy. Its release job is \
+          probably still uploading; see publish.yml's re-dispatch job, which waits for the \
+          asset before dispatching a tag deploy."
+              fi
+            fi
+            if [ -n "$dest" ]; then
+              if gh release download "$tag" --repo "$REPO" -p docs.zip \
+                   -O "$RUNNER_TEMP/gather/$dest.zip"; then
+                decision="gathered → $dest.zip ($size B)"
+                printf '%s\trelease\t%s (asset %s B)\n' "$dest" "$tag" "$size" \
+                  >> "$RUNNER_TEMP/provenance.tsv"
+              else
+                decision="DOWNLOAD FAILED — skipped"
+                echo "::warning::release $tag download failed — skipping"
+              fi
+            fi
+            printf '%-28s %-21s %-9s %s\n' "$tag" "$published" "$has" "$decision"
+          # NB tab is IFS whitespace, so `read` COLLAPSES consecutive tabs — an empty
+          # field would shift every column after it. Never emit one: "-" for a null date.
+          done < <(jq -r '.[] | [
+              .tag_name,
+              (.published_at // "-"),
+              (any(.assets[]; .name=="docs.zip")),
+              ([.assets[] | select(.name=="docs.zip") | .size] | first // 0)
+            ] | @tsv' <<<"$releases")
 
       # Branch CI artifacts overwrite the seed (higher priority). Found via the
       # artifacts API by NAME (`docs` — the contract), never by workflow filename,
@@ -185,6 +268,11 @@ jobs:
       # only when the SHA carries a preview-approved status. No
       # $ARTIFACT_VERSION_NAME skip — the current build (staged next) overwrites
       # anything gathered here with the same name.
+      #
+      # The three ways this can come up empty are logged DISTINCTLY, because they need
+      # different fixes: no artifact (nothing built / it expired), a download failure
+      # (transient), and an artifact with no docs.zip inside (built by a docs.yml older
+      # than the docs.zip packing contract — re-run that PR's CI).
       - name: Gather branch CI artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -193,28 +281,53 @@ jobs:
           repo_id=$(gh api "repos/$REPO" -q .id)
           gather_artifact() {
             local filter="$1" dest="$2" label="$3"
-            local id; id=$(gh api --paginate \
+            local meta; meta=$(gh api --paginate \
               "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
-              | jq -rs "[.[].artifacts[] | select((.expired | not) and ($filter))] | sort_by(.created_at) | last | .id // empty")
-            [ -n "$id" ] || return 0
+              | jq -rs "[.[].artifacts[] | select((.expired | not) and ($filter))]
+                  | sort_by(.created_at) | last
+                  | select(. != null)
+                  | [.id, .created_at, .size_in_bytes, .workflow_run.id, .workflow_run.head_sha] | @tsv")
+            if [ -z "$meta" ]; then
+              echo "  $label → no non-expired 'docs' artifact matches — skipping"
+              return 0
+            fi
+            local id created size run sha
+            IFS=$'\t' read -r id created size run sha <<<"$meta"
+            echo "  $label → artifact $id ($size B, built $created) from \
+          $GITHUB_SERVER_URL/$REPO/actions/runs/$run @ ${sha:0:8}"
             # The API serves the artifact as a zip-of-the-artifact (docs.zip inside).
             local tmp; tmp=$(mktemp -d)
-            { gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" \
-                && unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" \
-                && mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip"; } \
-              || echo "::warning::$label artifact unavailable — skipping"
+            if ! gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip"; then
+              echo "::warning::$label: artifact $id download failed — skipping"
+            elif ! unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" >/dev/null 2>&1 \
+                 || [ ! -f "$tmp/docs.zip" ]; then
+              # The file test, NOT unzip's exit status, is the check: unzip exits 0 with
+              # only a "caution: filename not matched" note when the member is absent.
+              echo "::warning::$label: artifact $id contains no docs.zip — it predates the \
+          docs.zip packing contract (docs.yml packs one now). Re-run that build to refresh \
+          it. Skipping."
+            else
+              mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip"
+              printf '%s\tbranch CI\tartifact %s, run %s @ %s\n' "$dest" "$id" "$run" "${sha:0:8}" \
+                >> "$RUNNER_TEMP/provenance.tsv"
+            fi
             rm -rf "$tmp"
           }
+          echo "default branch:"
           gather_artifact ".workflow_run.head_branch == \"$DEFAULT\" and .workflow_run.head_repository_id == $repo_id" \
-            "$DEFAULT" "default-branch CI"
+            "$DEFAULT" "default-branch CI ($DEFAULT)"
           prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
             --json number,headRefOid,isCrossRepository -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+          echo "open PRs: $(grep -c . <<<"$prs" || true)"
           while IFS=$'\t' read -r num sha cross; do
             [ -z "$num" ] && continue
             if [ "$cross" = "true" ]; then
               approved=$(gh api "repos/$REPO/commits/$sha/statuses" \
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
-              [ "$approved" = "true" ] || continue
+              if [ "$approved" != "true" ]; then
+                echo "  PR #$num → fork PR, head ${sha:0:8} not preview-approved — skipping"
+                continue
+              fi
             fi
             gather_artifact ".workflow_run.head_sha == \"$sha\"" "pr-$num" "PR #$num"
           done <<< "$prs"
@@ -235,7 +348,11 @@ jobs:
           set -euo pipefail
           src="$RUNNER_TEMP/gather-current/docs.zip"
           [ -f "$src" ] || { echo "::error::in-run artifact not found at $src"; exit 1; }
+          size=$(stat -c%s "$src")
           mv "$src" "$RUNNER_TEMP/gather/$ARTIFACT_VERSION_NAME.zip"
+          echo "staged this run's build as $ARTIFACT_VERSION_NAME.zip ($size B) — overrides any same-named durable source"
+          printf '%s\tthis run\tin-run docs artifact (%s B)\n' "$ARTIFACT_VERSION_NAME" "$size" \
+            >> "$RUNNER_TEMP/provenance.tsv"
 
       # Final fallback: if no prior step provided $DEFAULT.zip, try the durable in-site
       # copy. Hard-fail if it isn't there — a deploy missing the default branch is a hole.
@@ -244,10 +361,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ] && exit 0
+          if [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ]; then
+            echo "$DEFAULT.zip already supplied by an earlier rung ($(stat -c%s "$RUNNER_TEMP/gather/$DEFAULT.zip") B) — see the provenance table in the job summary"
+            exit 0
+          fi
           if curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" \
               -o "$RUNNER_TEMP/gather/$DEFAULT.zip" 2>/dev/null; then
             echo "::notice::$DEFAULT restored from durable in-site copy ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip)"
+            printf '%s\t_sources\trestored from %s (%s B)\n' "$DEFAULT" \
+              "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" "$(stat -c%s "$RUNNER_TEMP/gather/$DEFAULT.zip")" \
+              >> "$RUNNER_TEMP/provenance.tsv"
           else
             echo "::error::$DEFAULT: not provided by current build, releases, branch CI, or durable in-site copy — deploy aborted"
             exit 1
@@ -268,6 +391,7 @@ jobs:
       - name: Extract artifacts into site
         run: |
           set -euo pipefail
+          echo "extracting $(ls -1 "$RUNNER_TEMP/gather"/*.zip 2>/dev/null | wc -l) gathered zip(s) into the site tree:"
           for f in "$RUNNER_TEMP/gather"/*.zip; do
             [ -f "$f" ] || continue
             name=$(basename "$f" .zip)
@@ -282,6 +406,7 @@ jobs:
             if [ "${#roots[@]}" -eq 1 ] && [ -d "${roots[0]}" ]; then
               rm -rf "$RUNNER_TEMP/site/$name"
               mv "${roots[0]}" "$RUNNER_TEMP/site/$name"
+              echo "  $name ← zip root '${roots[0]##*/}' ($(find "$RUNNER_TEMP/site/$name" -type f | wc -l) files, $(du -sh "$RUNNER_TEMP/site/$name" | cut -f1))"
             else
               found=$(printf '%s ' "${roots[@]##*/}")
               echo "::warning::$name: docs.zip must unzip to exactly one top-level directory — found [${found% }] — skipping"
@@ -300,9 +425,52 @@ jobs:
       - name: Generate switcher.json and stable alias
         run: |
           set -euo pipefail
+          # assemble.mjs puts its diagnostics (sorted versions, preferred, redirect target,
+          # stable source) on stderr and only the stable-alias dir on stdout. Tee stderr to
+          # a file so the summary step can reprint them on the run page.
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
-            --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT")
+            --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT" \
+            2>"$RUNNER_TEMP/generate.log")
+          cat "$RUNNER_TEMP/generate.log" >&2
           [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable" || true
+
+      # The single artifact a future post-mortem should need: what got deployed, where
+      # each version came from, and what the kernel decided — on the run's summary page,
+      # no log download. Sources come from provenance.tsv, last line per version winning
+      # (that ordering is the priority chain).
+      - name: Site inventory and job summary
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/site"
+          prov="$RUNNER_TEMP/provenance.tsv"
+          echo "── deployed tree ──"
+          ls -la "$site"
+          {
+            echo "## Versioned docs site"
+            echo
+            echo "| version | source | detail | size |"
+            echo "|---|---|---|---|"
+            for d in "$site"/*/; do
+              name=$(basename "$d")
+              case "$name" in "$SOURCES_DIR"|stable) continue ;; esac
+              src=$(awk -F'\t' -v v="$name" '$1==v {s=$2} END {print s}' "$prov")
+              det=$(awk -F'\t' -v v="$name" '$1==v {d=$3} END {print d}' "$prov")
+              printf '| `%s` | %s | %s | %s |\n' "$name" "${src:-unknown}" "${det:-—}" \
+                "$(du -sh "$d" | cut -f1)"
+            done
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/generate.log"
+            echo '```'
+            echo
+            echo "<details><summary>switcher.json</summary>"
+            echo
+            echo '```json'
+            cat "$site/switcher.json"
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
@@ -367,6 +535,13 @@ jobs:
               echo "::error::live switcher.json still does not match the assembled one after ${timeout_s}s — Pages origin likely stale/wedged"
               echo "--- origin headers (frozen etag/last-modified ⇒ wedged) ---"
               curl -sI "$url?cb=$(date +%s%N)" | grep -iE '^(HTTP/|etag|last-modified|age)' | tr -d '\r'
+              # Which versions actually differ — usually all you need to tell a stale
+              # origin (identical sets, different bytes) from a bad gather (missing entries).
+              a=$(jq -r '.[].version' <<<"$want" 2>/dev/null | sort || true)
+              b=$(jq -r '.[].version' <<<"$got" 2>/dev/null | sort || true)
+              echo "--- version diff ---"
+              echo "missing from live: $(comm -23 <(printf '%s\n' "$a") <(printf '%s\n' "$b") | tr '\n' ' ')"
+              echo "extra in live:     $(comm -13 <(printf '%s\n' "$a") <(printf '%s\n' "$b") | tr '\n' ' ')"
               echo "--- assembled ($local_json) ---"; printf '%s\n' "$want"
               echo "--- live ($url) ---"; printf '%s\n' "$got"
               exit 1
@@ -403,8 +578,9 @@ jobs:
           echo "::notice::origin wedged — dispatched a fresh retry (budget until $(date -d "@$RETRY_UNTIL" -Is))"
 
   # A tag can't deploy inline (same SHA as the default-branch push → Pages drops it
-  # unless the event is workflow_dispatch). Wait for the release, then re-dispatch the
-  # shim so the deploy runs on a workflow_dispatch event and re-serves.
+  # unless the event is workflow_dispatch). Wait for the tag's docs.zip to actually be
+  # attached to its release, then re-dispatch the shim so the deploy runs on a
+  # workflow_dispatch event and re-serves.
   re-dispatch:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
@@ -412,7 +588,7 @@ jobs:
       contents: read     # gh release view
       actions: write     # gh workflow run (re-dispatch the shim)
     steps:
-      - name: Wait for the release, then re-deploy via workflow_dispatch
+      - name: Wait for the tag's docs.zip, then re-deploy via workflow_dispatch
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -421,8 +597,28 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          # ci.yml's release job attaches the tag's docs.zip in parallel; the dispatched
-          # run gathers the tag from that asset, so don't dispatch until it exists.
+
+          # WAIT FOR THE ASSET, NOT THE RELEASE RECORD. The deploy's gather selects
+          # releases by their docs.zip ASSET; the release RECORD can exist long before
+          # that asset lands. Repos that publish a release from the GitHub UI create the
+          # record (and the tag, and therefore this run) *first* and let ci.yml's release
+          # job clobber the asset in minutes later — so waiting on the record is a no-op
+          # there, the deploy lists releases before the upload, and the tag silently drops
+          # out of its own deploy (observed on every blueapi release: each one shipped a
+          # site missing itself, healed only by the *next* release's deploy).
+          #
+          # Repos whose release is created by release.yml (draft → upload → publish) are
+          # immune — publishedAt already implies the assets — but they cost nothing here.
+
+          # Does this repo attach docs.zip to releases at all? If no release ever has,
+          # release assets aren't a source for it and there is nothing to wait for.
+          # (Anything other than a clean "false" — including a failed API call — falls
+          # through to waiting, because waiting is the safe default.)
+          expect_asset=$(gh api --paginate "repos/$REPO/releases" \
+            | jq -rs 'add // [] | any(.[]; any(.assets[]; .name=="docs.zip"))' || echo unknown)
+
+          # 1. The release RECORD (3 min) — a tag with no release at all is a failed
+          #    release job, and no amount of waiting fixes it.
           published_at=""
           for _ in $(seq 1 36); do
             published_at=$(gh release view "$TAG" --repo "$REPO" --json publishedAt -q .publishedAt 2>/dev/null) && break
@@ -430,9 +626,63 @@ jobs:
           done
           [ -n "$published_at" ] \
             || { echo "::error::release $TAG not found after 3 min — did the release job fail?"; exit 1; }
-          # Retry budget anchored on the release's publish time, not the commit's — a tag
-          # can be cut long after its commit was merged (this repo's own release flow
-          # allows it), so the commit's own timestamp would wrongly disqualify the exact
-          # same-SHA dedup wedge (deploy-pages#383) this budget exists to retry through.
-          retry_until=$(( $(date -d "$published_at" +%s) + 900 ))
+          echo "release $TAG published at $published_at"
+
+          # 2. The docs.zip ASSET (30 min) — the release job typically needs the full
+          #    test matrix, so the budget must cover a slow one, not just a fast build.
+          asset_ok=true
+          if [ "$expect_asset" = false ]; then
+            echo "::notice::no release in $REPO carries a docs.zip asset — not waiting for one"
+          else
+            t0=$(date +%s)
+            deadline=$(( t0 + 1800 ))
+            while :; do
+              assets=$(gh release view "$TAG" --repo "$REPO" --json assets \
+                -q '.assets[] | [.name, .size, .createdAt] | @tsv' 2>/dev/null || true)
+              if grep -q '^docs\.zip' <<<"$assets"; then
+                echo "docs.zip attached after $(( $(date +%s) - t0 ))s:"
+                printf '%s\n' "$assets"
+                break
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::release $TAG still has no docs.zip asset after 30 min — the \
+          release job either failed or does not attach one. Re-dispatching anyway so the \
+          rest of the site refreshes, but $TAG will be MISSING from the deployed switcher."
+                printf 'assets on %s:\n%s\n' "$TAG" "${assets:-<none>}"
+                asset_ok=false
+                break
+              fi
+              sleep 10
+            done
+          fi
+
+          # Retry budget for a wedged Pages origin, anchored on NOW — i.e. on the asset's
+          # arrival, the moment the deploy actually becomes possible. (It used to anchor
+          # on publishedAt, which a UI-published release sets before CI even starts, so a
+          # slow build could burn the whole budget before the first deploy attempt.) The
+          # commit's own timestamp is never the anchor: a tag can be cut long after its
+          # commit was merged, which would wrongly disqualify the exact same-SHA dedup
+          # wedge (deploy-pages#383) this budget exists to retry through.
+          retry_until=$(( $(date +%s) + 900 ))
+
+          before=$(gh run list --repo "$REPO" --workflow "$WF" --event workflow_dispatch \
+            --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
           gh workflow run "$WF" --repo "$REPO" --ref "$DEFAULT_BRANCH" -f retry-until="$retry_until"
+
+          # gh workflow run prints no run id — poll briefly so the log links the run it
+          # started, which is where the actual deploy (and any failure) will be.
+          id=""
+          for _ in $(seq 1 6); do
+            sleep 5
+            id=$(gh run list --repo "$REPO" --workflow "$WF" --event workflow_dispatch \
+              --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            if [ -n "$id" ] && [ "$id" != "$before" ]; then break; fi
+            id=""
+          done
+          msg="re-dispatched $WF for $TAG (retry budget until $(date -d "@$retry_until" -Is))"
+          if [ -n "$id" ]; then msg="$msg → $GITHUB_SERVER_URL/$REPO/actions/runs/$id"; fi
+          echo "::notice::$msg"
+
+          # Loud, not silent: the dispatch went out so the rest of the site refreshes, but
+          # this tag is not in it.
+          [ "$asset_ok" = true ] || exit 1

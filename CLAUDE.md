@@ -171,7 +171,7 @@ One entry workflow (`ci.yml`) that nests the privileged publish:
   "Self-referencing assemble.mjs" above — runs inline gather + extract steps then
   `assemble.mjs generate`, then `upload-pages-artifact` + `deploy-pages` + verify,
   carrying the `github-pages` environment + perms + `concurrency`), **re-dispatch**
-  (a tag — waits for the release,
+  (a tag — waits for the tag's `docs.zip` release asset,
   then `gh workflow run <dispatch-workflow>` in the consumer's repo with their token, so
   the deploy lands as a `workflow_dispatch` that re-serves; a same-SHA tag deploy is
   otherwise dropped — deploy-pages#383), and **warn** (a fork PR — read-only, posts the
@@ -209,7 +209,10 @@ PR/commit. **Tags** hit the wrapper's `re-dispatch`: a release tag shares the me
 commit's SHA, and GitHub Pages silently drops a second deploy of an already-deployed
 SHA *unless* the event is `workflow_dispatch`
 ([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)) —
-so it waits for the release, then `gh workflow run publish-dispatch.yml`
+so it waits for the tag's `docs.zip` release **asset** (waiting only for the release
+*record* races repos that publish the release from the UI before CI starts — the deploy
+then lists releases before the asset lands and the tag drops out of its own site), then
+`gh workflow run publish-dispatch.yml`
 (`workflow_dispatch`), which re-gathers from durable sources (incl. the new release)
 and deploys with the origin actually updating (the dispatched run carries the deploy
 status, not the tag's CI run). An **external fork PR** hits the wrapper's `warn` job

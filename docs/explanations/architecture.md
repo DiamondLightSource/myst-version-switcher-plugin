@@ -147,6 +147,30 @@ to re-fire).
 The post-deploy origin-verify step in `publish.yml` backstops any residual stale
 origin by failing the run instead of serving stale docs silently.
 
+#### The re-dispatch waits for the `docs.zip` **asset**, not the release
+
+The gather selects a release by its `docs.zip` **asset**, so "release exists" is the
+wrong thing to wait on. How much wrongness depends on how the consumer cuts releases:
+
+- **Release created by `release.yml`** (this repo): the release is created
+  draft → upload → publish in one step, so its publish time already implies the asset.
+  Waiting on the record happens to be correct.
+- **Release published from the GitHub UI** (the python-copier-template flow): publishing
+  the release *creates the tag*, which is what starts CI. The release record therefore
+  exists **before** the run that is supposed to wait for it, and `ci.yml`'s `release` job
+  won't attach `docs.zip` for another few minutes. Waiting on the record is a no-op, the
+  dispatched deploy lists releases before the upload lands, and **the tag drops out of
+  its own deploy** — silently, because a version that isn't gathered simply isn't there.
+  The site then stays one release behind until the *next* release's deploy carries the
+  previous one in.
+
+So `re-dispatch` polls the tag's assets and dispatches only once `docs.zip` is attached
+(30 min budget — the `release` job usually waits on a full test matrix). If no release in
+the repo has ever carried a `docs.zip` the wait is skipped entirely; if the asset never
+arrives, the job dispatches anyway (so the rest of the site refreshes) and then fails
+loudly rather than shipping a site missing the tag. The retry budget for a wedged origin
+is anchored on the asset's arrival for the same reason.
+
 ### Why the current build is *injected*
 
 Because the inline publish runs *inside* the build's own CI run, that run isn't a
