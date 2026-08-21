@@ -111,6 +111,13 @@ jobs:
       REPO: ${{ github.repository }}
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
+      # Site-size guard thresholds, both on the deployed artifact's scale. PROBE is the
+      # uncompressed size past which it is worth actually packing the tree to find out
+      # (the pack costs real seconds); WARN is the packed size that earns a warning,
+      # 700 MB against Pages' hard 1 GB. Overridable so the guard is testable and so a
+      # site with unusual compressibility can be tuned.
+      SIZE_PROBE_BYTES: "1610612736"
+      SIZE_WARN_BYTES: "734003200"
       # DEPRECATED: the in-site durable store. Nothing writes it any more (the default
       # branch's zip lives in the Actions cache); this is only still read as a one-shot
       # fallback for a site last deployed by an older publish.yml.
@@ -515,14 +522,28 @@ jobs:
           # failing — so warn while there is still room to act. `max-releases` is the
           # lever: it is unlimited by default, which is safe for a young project and a
           # slow-motion footgun for an old one.
+          #
+          # The cap is on the COMPRESSED artifact, which is nothing like the size of the
+          # tree: this repo's own site is 734 MiB on disk but packs to 223 MiB, because
+          # HTML and JS compress ~3x. Comparing `du` against 1 GB would cry wolf at a
+          # third of the real usage. So measure the tree cheaply, and only pay for an
+          # actual pack when the tree is big enough for the answer to matter.
+          #
+          # -h matches upload-pages-artifact's --dereference: the `stable/` symlink is
+          # inflated to a full copy of a release in the real artifact, so a measurement
+          # that stored it as a symlink would under-read by a whole version.
           bytes=$(du -sb "$RUNNER_TEMP/site" | cut -f1)
-          echo "assembled site: $(numfmt --to=iec --suffix=B "$bytes") across \
+          echo "assembled site: $(numfmt --to=iec --suffix=B "$bytes") uncompressed across \
           $(find "$RUNNER_TEMP/site" -mindepth 1 -maxdepth 1 -type d | wc -l) version dir(s)"
-          if [ "$bytes" -gt 734003200 ]; then
-            echo "::warning title=Docs site approaching the Pages 1 GB limit::The \
-          assembled site is $(numfmt --to=iec --suffix=B "$bytes"), against a hard 1 GB \
-          cap on the Pages artifact. Set publish.yml's \`max-releases\` input (in your \
-          publish-dispatch shim) to publish only the N most recent releases."
+          if [ "$bytes" -gt "$SIZE_PROBE_BYTES" ]; then
+            packed=$(tar -ch -C "$RUNNER_TEMP/site" . | gzip -1 -c | wc -c)
+            echo "packed artifact: ~$(numfmt --to=iec --suffix=B "$packed") (Pages rejects over 1 GB)"
+            if [ "$packed" -gt "$SIZE_WARN_BYTES" ]; then
+              echo "::warning title=Docs site approaching the Pages 1 GB limit::The \
+          deployed artifact is ~$(numfmt --to=iec --suffix=B "$packed"), against a hard \
+          1 GB cap. Set publish.yml's \`max-releases\` input (in your publish-dispatch \
+          shim) to publish only the N most recent releases."
+            fi
           fi
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the

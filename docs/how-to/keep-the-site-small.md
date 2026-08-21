@@ -4,6 +4,9 @@ Every deploy uploads the **whole** site as one artifact, and GitHub Pages reject
 artifact over **1 GB**. Nothing warns you as you approach it; deploys simply start
 failing once you arrive.
 
+The cap is on the **packed** artifact, not the directory tree — HTML and JS compress
+around 3×, so a site that is 734 MiB on disk deploys as about 223 MiB.
+
 A docs build is a few megabytes, so this only bites long-lived projects — but it bites
 them hard. [blueapi](https://github.com/DiamondLightSource/blueapi), with 131 released
 `docs.zip`s, was at **452 MB** and adding ~5 MB per release: a few years of headroom, and
@@ -11,10 +14,17 @@ no signal on the way.
 
 ## Check where you are
 
-Every deploy prints the assembled size, and warns past 700 MB:
+Every deploy prints the size of the tree it assembled:
 
 ```
-assembled site: 452MB across 138 version dir(s)
+assembled site: 734MB uncompressed across 31 version dir(s)
+```
+
+Once that passes 1.5 GiB it also packs the tree to measure what will really be
+uploaded, and warns past 700 MB of *packed* bytes:
+
+```
+packed artifact: ~712MB (Pages rejects over 1 GB)
 ```
 
 Or measure the released half directly:

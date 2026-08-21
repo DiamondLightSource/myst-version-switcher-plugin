@@ -164,6 +164,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the site size is reported", "assembled site:" in r.stdout, r.stdout)
     check("a small site does not trip the 1 GB warning",
           "approaching the Pages 1 GB limit" not in r.stdout)
+    check("a small site is not packed just to measure it",
+          "packed artifact:" not in r.stdout, r.stdout)
+
+# The guard's whole point is the warning, and it compares the PACKED size — measuring
+# the tree with du would cry wolf, since HTML/JS packs ~3x (this repo's own site is
+# 734 MiB on disk and 223 MiB deployed). Dial the thresholds down rather than build a
+# multi-gigabyte fixture.
+with tempfile.TemporaryDirectory() as tmp:
+    env, rt, data = setup(tmp, [], [], [])
+    ex = {"github.token": "t", "runner.temp": rt}
+    subprocess.run([f"{data}/mkzip.sh", f"{rt}/gather/main.zip", "main"], check=True)
+    env["SIZE_PROBE_BYTES"] = "1"        # always pack
+    env["SIZE_WARN_BYTES"] = "1"         # always warn
+    r = run("Extract artifacts into site", env, ex)
+    check("past the probe threshold the tree is actually packed",
+          "packed artifact:" in r.stdout, r.stdout)
+    check("past the warn threshold a warning is emitted",
+          "::warning title=Docs site approaching the Pages 1 GB limit" in r.stdout, r.stdout)
+    check("the warning names max-releases as the lever", "max-releases" in r.stdout, r.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    env, rt, data = setup(tmp, [], [], [])
+    ex = {"github.token": "t", "runner.temp": rt}
+    subprocess.run([f"{data}/mkzip.sh", f"{rt}/gather/main.zip", "main"], check=True)
+    env["SIZE_PROBE_BYTES"] = "1"        # pack it...
+    env["SIZE_WARN_BYTES"] = str(10**12)  # ...but it is nowhere near the cap
+    r = run("Extract artifacts into site", env, ex)
+    check("a packed site under the cap reports but does not warn",
+          "packed artifact:" in r.stdout and "approaching the Pages 1 GB limit" not in r.stdout,
+          r.stdout)
 
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'all harness checks passed'}")
 sys.exit(1 if fails else 0)

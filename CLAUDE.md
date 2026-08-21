@@ -74,7 +74,12 @@ from deploys simply failing, silently, with no warning on the way. `publish.yml`
 **`max-releases`** (default `0` = unlimited, so upgrading never silently deletes
 versions); the tutorial's shim ships `20`. Set it as a LITERAL in the shim's `with:`,
 not threaded from `ci.yml` — the shim is the single caller on every path, so a literal
-there can't be bypassed by a manual dispatch. Any deploy past 700 MB warns.
+there can't be bypassed by a manual dispatch. A deploy past 700 MB warns — measured on
+the PACKED artifact (the cap is on the gzipped tar; this repo's site is 734 MiB on disk
+and 223 MiB deployed, so `du` would cry wolf at a third of real usage). The tree is only
+packed to measure once it exceeds `SIZE_PROBE_BYTES`, since packing costs seconds; `tar
+-ch` matches upload-pages-artifact's `--dereference`, which inflates `stable/` into a
+full copy.
 
 Selection is `assemble.mjs`'s `selectReleases` (pure, unit-tested; it replaced an
 untested bash `case`), ranked by **`created_at`** — NOT `published_at`, which lies when

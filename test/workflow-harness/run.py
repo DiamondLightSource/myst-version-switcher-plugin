@@ -57,6 +57,9 @@ def setup(tmp, releases, artifacts, prs, *, approved=(), dlfail=(), artfail=(), 
         "GITHUB_SERVER_URL": "https://github.com",
         "REPO": "acme/widget", "DEFAULT": "main",
         "SEED_TAG": "pages-default-seed", "SOURCES_DIR": "_sources",
+        # Real defaults are 1.5 GiB / 700 MB; a test fixture that size is impractical,
+        # so the guard reads them from env and the size tests dial them down.
+        "SIZE_PROBE_BYTES": "1610612736", "SIZE_WARN_BYTES": "734003200",
     })
     open(env["GITHUB_OUTPUT"], "w").close()
     open(env["MOCK_CALLS"], "w").close()

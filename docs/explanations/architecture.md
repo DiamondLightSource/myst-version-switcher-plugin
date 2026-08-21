@@ -45,8 +45,9 @@ Two things follow.
 `publish.yml` takes a **`max-releases`** input: publish only the N most recent releases,
 ranked by the tagged commit's date. It defaults to `0` (unlimited), so upgrading never
 silently deletes versions from an existing site — but the paved path in the
-[tutorial](../tutorials/adding-to-a-fresh-repo.md) sets it, and any deploy whose assembled
-site passes 700 MB says so in a warning. Older releases keep their `docs.zip` assets and
+[tutorial](../tutorials/adding-to-a-fresh-repo.md) sets it, and a deploy whose *packed*
+artifact passes 700 MB says so in a warning. Packed, not the tree on disk: HTML and JS
+compress around 3×, so measuring the directory would cry wolf at a third of real usage. Older releases keep their `docs.zip` assets and
 come back the moment you raise the cap. See
 [keep-the-site-small](../how-to/keep-the-site-small.md).
 
