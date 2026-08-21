@@ -371,16 +371,15 @@ function cmdSelectReleases(rest) {
 	}
 
 	for (const row of rows) {
-		process.stdout.write(
-			[
-				field(row.tag),
-				field(row.dest),
-				field(row.date),
-				field(row.size),
-				field(row.assetId),
-				field(row.decision),
-			].join("\t") + "\n",
-		);
+		const cells = [
+			field(row.tag),
+			field(row.dest),
+			field(row.date),
+			field(row.size),
+			field(row.assetId),
+			field(row.decision),
+		];
+		process.stdout.write(`${cells.join("\t")}\n`);
 	}
 }
 
