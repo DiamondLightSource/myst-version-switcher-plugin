@@ -161,7 +161,8 @@ consumer's repo stays checked out at the root so `assemble.mjs`'s `git tag` list
 so a composite action could only be pinned to a literal tag — the `job` context is
 the only way to self-reference at the running ref.) Note: actionlint's `job`-context
 schema is stale and false-flags `job.workflow_sha`/`job.workflow_repository`; the
-GitHub docs confirm both. This repo lints with biome, not actionlint.
+GitHub docs confirm both, so `_lint.yml` runs actionlint with exactly those two
+suppressed (`-ignore 'property "workflow_(repository|sha)" is not defined'`).
 
 ### BASE_URL must be set before `myst build`
 ```yaml
@@ -256,7 +257,7 @@ PRs always, fork PRs only when the SHA carries that status.
 
 ```bash
 npm test                    # run the unit tests
-npm run test:workflows      # run publish.yml's gather steps against a mock gh (needs uv)
+npm run test:workflows      # gather steps against a mock gh + workflow shape asserts (needs uv)
 npm run docs                # build docs (same command CI uses)
 npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
 ```

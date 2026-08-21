@@ -132,17 +132,27 @@ jobs:
 
       # BUILT_BRANCH vs github.ref is the one thing a post-mortem here always trips over,
       # so state both up front rather than leaving someone to infer it from a cache miss.
+      #
+      # Every context value comes through `env:`, never interpolated into the script.
+      # That keeps arbitrary values out of the shell, and it avoids nesting quotes: an
+      # expression's string literals must be SINGLE-quoted, which cannot be written
+      # inside a single-quoted shell word.
       - name: Create staging dirs
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_REF: ${{ github.ref }}
+          GH_SHA: ${{ github.sha }}
+          TRIGGER_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/site" "$RUNNER_TEMP/gather"
           printf '%-16s %s\n' \
-            'event'         '${{ github.event_name }}' \
+            'event'         "$EVENT" \
             'built branch'  "$BUILT_BRANCH" \
             'default'       "$DEFAULT" \
-            'github.ref'    '${{ github.ref }} (always the default branch under workflow_run)' \
-            'github.sha'    '${{ github.sha }} (→ pages_build_version)' \
-            'triggered by'  '${{ github.event.workflow_run.html_url || "manual dispatch" }}'
+            'github.ref'    "$GH_REF (always the default branch under workflow_run)" \
+            'github.sha'    "$GH_SHA (→ pages_build_version)" \
+            'triggered by'  "${TRIGGER_URL:-manual dispatch}"
 
       # The live Pages base URL, from the Pages API — respects a custom domain
       # (CNAME); falls back to the conventional github.io URL if the API call
