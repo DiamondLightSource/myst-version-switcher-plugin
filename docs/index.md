@@ -7,7 +7,7 @@ site:
 :end-before: <!-- README only content
 ```
 
-obs3-marker-ALPHA
+obs3-marker-BRAVO
 
 The dropdown in the top-right corner of this page is the plugin itself. It also
 works in any page body:
