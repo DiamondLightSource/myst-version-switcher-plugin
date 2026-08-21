@@ -509,8 +509,8 @@ jobs:
             if [ "$packed" -gt "$SIZE_WARN_BYTES" ]; then
               echo "::warning title=Docs site approaching the Pages 1 GB limit::The \
           deployed artifact is ~$(numfmt --to=iec --suffix=B "$packed"), against a hard \
-          1 GB cap. Set publish.yml's \`max-releases\` input (in your publish-dispatch \
-          shim) to publish only the N most recent releases."
+          1 GB cap. Set the \`max-releases\` input in your publish.yml to publish only the \
+          N most recent releases."
             fi
           fi
 

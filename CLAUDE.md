@@ -10,15 +10,15 @@ to `publish.yml`, not a separately consumed action.
 
 ```
 plugins/version-switcher.mjs                   # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
-assemble/assemble.mjs                          # INTERNAL: dependency-free Node kernel for publish.yml's "Generate" step (the `generate` subcommand writes switcher.json + index.html)
+assemble/assemble.mjs                          # INTERNAL: dependency-free Node kernel for the engine's "Select releases" + "Generate" steps
 scripts/migrate.sh                             # operator gh-pages → durable-source migration (bash); two-phase: reversible cutover, then guarded --delete-gh-pages
 test/                                          # npm test suite (node, no framework) + test/workflow-harness/ (python: loads publish.yml's gather steps out of the YAML and runs them against a mock gh)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
-.github/workflows/publish.yml                  # PUBLIC reusable ENGINE (PRIVILEGED): branches on the event into 3 jobs — deploy (gather+extract inline bash + assemble.mjs@job.workflow_sha + Pages), tag-re-dispatch (re-fire the shim), fork-warn. workflow_call ONLY; reached via the publish-dispatch.yml shim
-.github/workflows/publish-dispatch.yml         # PUBLIC thin shim: workflow_call (ci.yml's publish, every event) + workflow_dispatch (tag re-dispatch + fork-PR opt-in + manual re-deploy) → forwards to publish.yml. The dispatchable file consumers copy (reusable workflows can't be dispatched cross-repo)
+.github/workflows/publish-gh-pages.yml         # PUBLIC reusable ENGINE (PRIVILEGED): ONE `deploy` job — gather+extract inline bash + assemble.mjs@job.workflow_sha + Pages + verify. workflow_call ONLY. No event branching left: the caller has already gated on success + non-fork
+.github/workflows/publish.yml                  # PUBLIC: the file each consumer carries. workflow_run (their CI completing, matched by NAME) + workflow_dispatch (fork-PR preview via `pr`, manual re-deploy) → publish-gh-pages.yml. The one place <tag> is pinned
 .github/workflows/release.yml                  # PUBLIC reusable: attach the run's build artifacts (docs.zip; + version-switcher.mjs via _test.yml) to the tag's GitHub Release via gh (create-or-upload, immutable-safe). Consumers `uses:` it directly
-.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / release, then ONE publish job nesting publish-dispatch.yml (shim) → publish.yml for every event (publish.yml branches: deploy / tag-re-dispatch / fork-warn)
+.github/workflows/ci.yml                       # this repo's own entry: _lint / _test / docs.yml / release. Does NOT publish — publish.yml picks the run up on workflow_run. Its `name: CI` is load-bearing (publish.yml matches on it)
 ```
 
 ## Two halves, different lifecycles
@@ -70,11 +70,11 @@ probe `_sources/<default>.zip`, which passed even while the content came from th
 ### The site has a hard size ceiling — cap the releases
 `upload-pages-artifact` tars the WHOLE site into one artifact and Pages rejects it over
 **1 GB**. blueapi at 131 released `docs.zip`s was at 452 MB, +~5 MB/release: a few years
-from deploys simply failing, silently, with no warning on the way. `publish.yml` takes
+from deploys simply failing, silently, with no warning on the way. The engine takes
 **`max-releases`** (default `0` = unlimited, so upgrading never silently deletes
-versions); the tutorial's shim ships `20`. Set it as a LITERAL in the shim's `with:`,
-not threaded from `ci.yml` — the shim is the single caller on every path, so a literal
-there can't be bypassed by a manual dispatch. A deploy past 700 MB warns — measured on
+versions); the tutorial ships `20`. Set it as a LITERAL in `publish.yml`'s `with:` —
+that is the single caller on every path, so a literal there can't be bypassed by a
+manual dispatch. A deploy past 700 MB warns — measured on
 the PACKED artifact (the cap is on the gzipped tar; this repo's site is 734 MiB on disk
 and 223 MiB deployed, so `du` would cry wolf at a third of real usage). The tree is only
 packed to measure once it exceeds `SIZE_PROBE_BYTES`, since packing costs seconds; `tar
@@ -108,50 +108,52 @@ gathered (a merged/closed PR, a deleted release) is correctly dropped — no
 `keep_files` drift. The **publish workflow** owns the Pages publish because
 `deploy-pages` is job-scoped.
 
-### Split build (unprivileged) from publish (privileged), but nest publish for visibility
-`ci.yml` builds + uploads the `docs` artifact for every event including fork PRs.
-It then nests a single privileged `publish` job (`uses: publish-dispatch.yml` shim →
-`publish.yml`) for **every** event in the canonical repo. `publish.yml` branches: an
-internal PR / main push deploys inline (status **visible on the PR/commit**); a fork PR
-hits a read-only **warn** job (untrusted fork-PR code never reaches a write token — the
-`deploy` job is `if`-excluded for forks and the token is read-only anyway); a **tag**
-hits the **re-dispatch** (a tag shares the merge commit's SHA and Pages drops a second
-same-SHA deploy unless it's a `workflow_dispatch` — deploy-pages#383 — so it
-re-dispatches the shim). One `publish` job, no ref/fork guards in `ci.yml`.
+### Split build (unprivileged) from publish (privileged); publish LISTENS
+`ci.yml` builds + uploads the `docs` artifact for every event including fork PRs, and
+never publishes. `publish.yml` (in each consumer's repo; this repo carries an identical
+one) triggers on **`workflow_run`** when their CI workflow completes — matched by its
+`name:`, not filename — and calls the `publish-gh-pages.yml` engine. It also takes
+`workflow_dispatch` for fork-PR previews (`pr`) and manual re-deploys.
 
-Because the inline publish runs **inside the build's own CI run**, the current build
-isn't a *completed* successful run the gather can discover (and for a main push the
-gather would find the *previous* build). So `ci.yml` passes `publish.yml` the build's
-version name (`needs.docs.outputs.version-name`); `publish.yml` downloads this run's
-`docs` artifact and stages it into the gather dir as the **highest-priority** source —
-overwriting any same-name zip gathered from durable sources. Everything else (other
-releases, other open PRs, the rest) still comes from durable sources.
+Publish used to be a job nested in `ci.yml`, for status visibility on the PR. That was
+wrong twice over: reconstructing the site is **O(the whole site)** and independent of the
+change, so it put a large constant on every PR's critical path (blueapi switched PR
+previews off one day after adopting, a 654s deploy on a 40s build); and a wedged Pages
+origin is not the PR author's to fix, so the red check was noise.
 
-`publish.yml`'s `deploy` job runs inline gather + extract steps, then calls
-`assemble.mjs` (checked out from this repo at `job.workflow_sha`, so the kernel
-matches the workflow's own ref) to generate + output the site dir, then
-`deploy-pages`. Operator note: because internal PRs/tags now deploy from their
-**own ref** (not only the default branch), the `github-pages` environment's
-deployment-branch policy must allow those refs (or be unrestricted) — this is the
-cost of nesting publish for visibility. Inline bash steps do the `gh`/`unzip`/`mv`
-IO (gather + extract); the JS kernel does the pure logic (`generate` + the folded-in
-`missingRequired` guard) and is unit-tested without git/network/fs. There is **no
-sanitisation**: version names are clean by construction — `main`, `pr-<number>`, or
-a tag without `/` (the `tags: ['*']` trigger never builds `/`-tags).
+**The trigger change was SUBTRACTION.** Proven live 2026-08-21 (see
+[[pages-origin-wedge]]): `workflow_run` forces a Pages re-serve at an already-deployed
+SHA exactly as `workflow_dispatch` does — four consecutive deploys at identical
+`pages_build_version b24237484c3b445469c2db4ef161410a185fcdbc` all updated the origin. So:
+- the **tag re-dispatch trampoline** is gone (a tag's deploy re-serves directly);
+- **`publish-dispatch.yml`** is gone — it existed ONLY because a reusable workflow can't
+  be `workflow_dispatch`'d cross-repo, so the trampoline needed a local file to re-fire;
+- the **`version-name` injection** is gone: `workflow_run` fires after the triggering run
+  COMPLETED, so its `docs` artifact is discoverable by the ordinary gather (verified — both
+  injection steps skipped and the site still assembled);
+- the **`warn` job**, `retry-until` and the wedged-origin retry-dispatch are gone, and the
+  engine no longer needs `actions: write`.
 
-The extract step's zip-shape rule is deliberately **name-agnostic**: a `docs.zip` must
-unzip to exactly one top-level directory, whose *contents* become `site/<version-name>`
-— the directory's *name* is ignored. `docs.yml` packs `html/`, but release assets are
-durable and may predate this pipeline (python-copier-template's `_release.yml` roots
-its zip at the tag name, and an immutable release can't be re-cut), so keying on
-`html/` silently dropped every such release from the switcher. Zero entries, several
-entries, or files loose at the zip root are malformed — warn and skip, never guess.
+### THE workflow_run TRAP: `github.ref` is always the default branch
+In a `workflow_run` run `GITHUB_SHA` and `github.ref` are **always the default branch's
+HEAD**, never the built commit (a PR-triggered deploy reports `refs/heads/main`). Anything
+asking "was this the default branch?" must read `github.event.workflow_run.head_branch`.
+Both cache-save steps got this wrong initially — gating on `github.ref` would have every
+PR-triggered deploy writing caches scoped to a PR nothing can read.
+
+`test/workflow-harness/test_shape.py` asserts this, plus the caller's two guards
+(`conclusion == 'success'`, `head_repository == this repo`). All three **fail OPEN**, and
+they live in `if:` expressions the gather harness can't reach.
+
+**The fork guard is not optional:** `workflow_run` runs with a WRITE token even when a
+fork's PR triggered it (pwn-request). Fork builds reach the site only via a maintainer
+dispatching `publish.yml` with `pr`, which pins approval to that head SHA.
 
 ### Self-referencing assemble.mjs (no separate action)
 `publish.yml` sparse-checks-out **this** repo's `assemble/` at `job.workflow_repository`
 + `job.workflow_sha` — the `job` context resolves to the file that defines the running
 job, i.e. the *reusable* workflow (unlike `github.workflow_*`, which resolve to the
-*caller's* entry workflow). So a consumer pinning `publish.yml@vX` gets
+*caller's* entry workflow). So a consumer pinning `publish-gh-pages.yml@vX` gets
 `assemble.mjs@vX` automatically, with no hardcoded repo and no release-time bump,
 and this repo's own publish job tests the working-tree script (no dogfood gap). The
 consumer's repo stays checked out at the root so `assemble.mjs`'s `git tag` lists
@@ -189,36 +191,28 @@ stable inventory URL for cross-project `objects.inv`. `switcher.json` has no
 
 ## CI structure
 
-One entry workflow (`ci.yml`) that nests the privileged publish:
+Two top-level workflows: `ci.yml` builds, `publish.yml` listens for it finishing.
 
-- `ci.yml` — **build + verify, then publish on internal events.** Triggers on
-  `pull_request` + push to `main`/tags (no other-branch pushes; `*` excludes
-  `/`-tags). Orchestrates `_lint` / `_test` / `docs` / `release`, runs for forks,
-  and uploads the `docs` artifact. It then nests a single `publish` job
-  (`uses: publish-dispatch.yml`) for **every** event in the canonical repo (the `if`
-  is just `repository == '…'`); grants `pages`/`id-token`/`statuses`/`actions:write`
-  perms to the call and passes `version-name: needs.docs.outputs.version-name`. No
-  ref/fork guards and no separate tag job — `publish.yml` does all the branching.
-- `publish-dispatch.yml` — **the thin shim** (the dispatchable file each repo carries).
-  `workflow_call` (ci.yml's `publish` job, every event) + `workflow_dispatch` (the tag
-  re-dispatch + fork-PR opt-in + manual re-deploy); both just `uses:
-  publish.yml`, threading `version-name`/`pr` + its own filename as `dispatch-workflow`.
-  It exists only because a reusable workflow can't be dispatched cross-repo, so the
-  re-dispatch job needs a local file to re-fire. This repo dogfoods the exact shim
-  consumers add (theirs pins `publish.yml@<tag>`; this one uses the local path).
-- `publish.yml` — **assemble + deploy ENGINE, privileged; owns the event branching.**
-  `workflow_call` ONLY (reached via the shim). Three jobs by originating event:
-  **deploy** (internal PR / default-branch push inline, or any dispatch → sparse-checks
-  out `assemble.mjs` at `job.workflow_sha` so it matches the pinned ref — see
-  "Self-referencing assemble.mjs" above — runs inline gather + extract steps then
-  `assemble.mjs generate`, then `upload-pages-artifact` + `deploy-pages` + verify,
-  carrying the `github-pages` environment + perms + `concurrency`), **re-dispatch**
-  (a tag — waits for the release,
-  then `gh workflow run <dispatch-workflow>` in the consumer's repo with their token, so
-  the deploy lands as a `workflow_dispatch` that re-serves; a same-SHA tag deploy is
-  otherwise dropped — deploy-pages#383), and **warn** (a fork PR — read-only, posts the
-  opt-in hint). No canonical guard (it lives upstream in ci.yml). `version-name` injects
-  the in-run build on the inline path. See the architecture explanation in docs/.
+- `ci.yml` — **build + verify only; never publishes.** Triggers on `pull_request` +
+  push to `main`/tags (no other-branch pushes; `*` excludes `/`-tags). Orchestrates
+  `_lint` / `_test` / `docs` / `release`, runs for forks, uploads the `docs` artifact.
+  Needs no elevated permissions. Its `name: CI` is **load-bearing** — `publish.yml`'s
+  `workflow_run` matches workflows by name, not filename, so renaming it silently stops
+  publishing.
+- `publish.yml` — **the file each consumer carries**, and the one place `<tag>` is
+  pinned. `workflow_run` (CI completing) + `workflow_dispatch` (fork-PR preview via `pr`,
+  manual re-deploy) → `publish-gh-pages.yml`. Its job `if:` carries the two guards that
+  fail open (`conclusion == 'success'`, `head_repository == this repo`) and a
+  `max-releases` literal. This repo's copy is identical to a consumer's but for the
+  `uses:` path (local vs pinned) and `max-releases: "0"` vs the tutorial's `"20"` — our
+  site is ~223 MB packed across 24 releases, a fifth of the cap.
+- `publish-gh-pages.yml` — **assemble + deploy ENGINE, privileged.** `workflow_call`
+  ONLY. **One** job, `deploy`: sparse-checks out `assemble.mjs` at `job.workflow_sha` so
+  it matches the pinned ref (see "Self-referencing assemble.mjs"), runs inline
+  gather + extract, then `assemble.mjs generate`, `upload-pages-artifact`,
+  `deploy-pages` and the origin verify — carrying the `github-pages` environment, perms,
+  and `concurrency: {group: pages, cancel-in-progress: true}`. No event branching: the
+  caller already established success + non-fork. Inputs are just `pr` and `max-releases`.
 
 Sub-workflows of `ci.yml`:
 - `_lint.yml` — biome
@@ -243,23 +237,18 @@ Sub-workflows of `ci.yml`:
   artifact, verbatim) + `version-switcher.mjs` (uploaded by `_test.yml` as an artifact,
   so the generic workflow needs no plugin-specific step). Consumers `uses:` it directly.
 
-**Publish flow.** The single `publish` job (→ `publish-dispatch.yml` shim → `publish.yml`)
-runs for every event and `publish.yml` branches. Internal PRs and `main` deploy inline as part of the
-same CI run once lint/test/docs pass (`publish.yml` injects this build + `assemble`
-gathers `main`, releases, and every other open PR → deploy), a visible check on the
-PR/commit. **Tags** hit the wrapper's `re-dispatch`: a release tag shares the merge
-commit's SHA, and GitHub Pages silently drops a second deploy of an already-deployed
-SHA *unless* the event is `workflow_dispatch`
-([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)) —
-so it waits for the release, then `gh workflow run publish-dispatch.yml`
-(`workflow_dispatch`), which re-gathers from durable sources (incl. the new release)
-and deploys with the origin actually updating (the dispatched run carries the deploy
-status, not the tag's CI run). An **external fork PR** hits the wrapper's `warn` job
-(read-only, no deploy); a maintainer dispatches `publish-dispatch.yml` with the PR
-number (`pr`), which sets a `preview-approved` commit status pinned to that **head
-SHA** and assembles — so a later push to the PR (new SHA) drops the preview until
-re-approved. `assemble` gathers an open PR's artifact via its head SHA; internal PRs
-always, fork PRs only when the SHA carries that status.
+**Publish flow.** `ci.yml` builds and stops. When that run *completes*, `publish.yml`
+fires on `workflow_run` and calls the engine, which gathers `main`, the newest
+`max-releases` releases, and every open PR's artifact from durable sources, then deploys
+the whole site. Same path for every event — a PR, a `main` push and a tag all just
+produce a completed CI run. A **tag** additionally has `release.yml` attach its
+`docs.zip` first, within that same CI run, so by the time publish gathers, the asset is
+already there (this is why the old tag/asset race is gone rather than fixed). An
+**external fork PR** is excluded by the caller's guard and never deploys; a maintainer
+dispatches `publish.yml` with the PR number (`pr`), which sets a `preview-approved`
+commit status pinned to that **head SHA** — so a later push to the PR drops the preview
+until re-approved. `assemble` gathers an open PR's artifact via its head SHA; internal
+PRs always, fork PRs only when the SHA carries that status.
 
 `mystmd` is pinned at `1.10.1` (not `latest`).
 
@@ -291,9 +280,11 @@ git push origin --tags   # or: git push origin vX.Y.Z to push just this tag
 ```
 
 CI runs lint + tests + docs build, then `release.yml` creates the GitHub Release with
-`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`), and the tag
-re-dispatch reconstructs + deploys the site including the new tag.
-The plugin URL and the `uses:` refs for `docs.yml`/`publish.yml` all resolve to the
+`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`). When that CI run
+completes, `publish.yml` fires on `workflow_run` and reconstructs + deploys the site
+including the new tag — the release asset is already attached by then, because
+`release.yml` ran inside the CI run publish is waiting on. The plugin URL and the
+`uses:` refs for `docs.yml`/`release.yml`/`publish-gh-pages.yml` all resolve to the
 same tag.
 
 ## Consuming this in another repo
@@ -318,8 +309,7 @@ site:
 :::
 ```
 
-Set the repo's **Pages source to "GitHub Actions"**, then add a `ci.yml` that calls
-the two shared reusable workflows by full path at `<tag>`:
+Set the repo's **Pages source to "GitHub Actions"**, then add a `ci.yml` that builds:
 
 ```yaml
 jobs:
@@ -327,34 +317,34 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       build-command: make docs        # or: tox -e docs / npx … myst build / npm ci && npm run docs
-  publish:                            # every event — publish.yml branches
+  release:                            # tag-only; attaches docs.zip to the Release
     needs: [docs]
-    if: github.repository == 'ORG/REPO'
-    uses: ./.github/workflows/publish-dispatch.yml   # your wrapper; it pins publish.yml@<tag>
-    with:
-      version-name: ${{ needs.docs.outputs.version-name }}
-    permissions: { pages: write, id-token: write, contents: read, actions: write, statuses: write }
+    if: github.ref_type == 'tag'
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@<tag>
+    permissions: { contents: write }
 ```
 
-Your `publish-dispatch.yml` wrapper's `workflow_dispatch` inputs must include `pr`
-**and `retry-until`**, forwarding both into `publish.yml`'s `with:` — copy the shim
-in [`docs/reference/workflows.md`](docs/reference/workflows.md) or the
-[tutorial](docs/tutorials/adding-to-a-fresh-repo.md) verbatim rather than
-hand-rolling it. `retry-until` is never set by a human; `publish.yml`'s
-`re-dispatch` job always passes it when re-firing the shim after a tag release, so
-a shim missing the input rejects that dispatch (breaking every tagged release's
-re-publish, not just the wedged-origin retry it exists for).
+…and a **separate** `publish.yml` that listens for it:
 
-Add a `release` job that `uses:` this repo's `release.yml@<tag>` (with `permissions:
-contents: write`) to attach each tag's built `docs.zip` (single `html/` root dir) as a
-Release asset so `assemble` can reconstruct released versions, and the
-`publish-dispatch.yml` wrapper around `publish.yml` — the single caller of the engine
-and the one place you pin `publish.yml@<tag>`. The wrapper owns all
-the branching: **deploy** (inline non-tag, or a dispatch), **re-dispatch** (a tag
-re-fires itself so the deploy is a `workflow_dispatch` — required for a release's
-same-SHA deploy to go live), and **warn** (a fork PR, read-only, posts the preview
-opt-in hint; a maintainer dispatches the wrapper with `pr` to actually preview). See the
-full how-to + snippets in `docs/`.
+```yaml
+on:
+  workflow_run: { workflows: [CI], types: [completed] }   # matches ci.yml's `name:`
+  workflow_dispatch: { inputs: { pr: { required: false, default: "" } } }
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>
+    with: { max-releases: "20" }
+    permissions: { pages: write, id-token: write, contents: read, actions: read, statuses: write }
+```
+
+`ci.yml` has **no** publish job. Copy `publish.yml` verbatim from the
+[tutorial](docs/tutorials/adding-to-a-fresh-repo.md) rather than hand-rolling it — both
+`if:` guards fail OPEN, and `workflows: [CI]` matches the entry workflow by NAME, so
+renaming it silently stops publishing.
 
 ## Upstreaming
 

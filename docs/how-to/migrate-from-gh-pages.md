@@ -92,7 +92,7 @@ stages `/<default>/` from the seed), and you can even rehearse the destructive f
 (`migrate.sh FORKORG/REPO --delete-gh-pages`) without risk — it only touches the fork.
 The `<tag>` pins still resolve to this project's upstream releases, so the reusable
 workflows behave identically. The only path it doesn't auto-cover is a release: push a
-tag to the fork if you also want to rehearse the tag re-dispatch.
+tag to the fork if you also want to rehearse a release.
 :::
 
 ## Before you start
