@@ -111,6 +111,9 @@ jobs:
       REPO: ${{ github.repository }}
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
+      # DEPRECATED: the in-site durable store. Nothing writes it any more (the default
+      # branch's zip lives in the Actions cache); this is only still read as a one-shot
+      # fallback for a site last deployed by an older publish.yml.
       SOURCES_DIR: _sources
     steps:
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
@@ -403,24 +406,77 @@ jobs:
           [ -f "$src" ] || { echo "::error::in-run artifact not found at $src"; exit 1; }
           mv "$src" "$RUNNER_TEMP/gather/$ARTIFACT_VERSION_NAME.zip"
 
-      # Final fallback: if no prior step provided $DEFAULT.zip, try the durable in-site
-      # copy. Hard-fail if it isn't there — a deploy missing the default branch is a hole.
+      # The default branch's last known-good docs.zip. Releases are durable and PRs are
+      # ephemeral by design, but the DEFAULT BRANCH has no permanent source: it is
+      # gathered from its latest CI artifact, which expires, after which it would drop
+      # out and the guard below would hard-fail.
+      #
+      # This used to be solved by publishing the zip into the site itself
+      # (`_sources/<default>.zip`) — permanent, but it shipped a multi-megabyte zip to
+      # every visitor's Pages artifact forever. The Actions cache holds it instead. The
+      # trade is real and deliberate: cache entries are evicted after 7 days without a
+      # read, and by LRU past 10 GB. A repo that goes quiet for over a week AND whose
+      # main CI artifact has expired loses this rung, where `_sources/` was forever.
+      #
+      # Key is a bare prefix so it never matches exactly; restore-keys then supplies the
+      # most recent entry.
+      - name: Restore the default branch's durable docs.zip
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/defaultcache
+          key: mvs-default-v1-
+          restore-keys: mvs-default-v1-
+
+      # Fallback chain for $DEFAULT.zip: current build → release/seed → branch CI (all
+      # above) → the cache → the deprecated in-site copy. Hard-fail if none of them
+      # produced it: a deploy missing the default branch publishes a hole.
       - name: Ensure default-branch zip
+        id: ensure-default
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ] && exit 0
-          if curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" \
-              -o "$RUNNER_TEMP/gather/$DEFAULT.zip" 2>/dev/null; then
-            echo "::notice::$DEFAULT restored from durable in-site copy ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip)"
+          cache="$RUNNER_TEMP/defaultcache"; mkdir -p "$cache"
+          zip="$RUNNER_TEMP/gather/$DEFAULT.zip"
+          if [ -f "$zip" ]; then
+            echo "$DEFAULT supplied by an earlier rung ($(stat -c%s "$zip") B)"
+          elif [ -s "$cache/default.zip" ]; then
+            cp "$cache/default.zip" "$zip"
+            echo "::notice::$DEFAULT restored from the Actions cache ($(stat -c%s "$zip") B) \
+          — its CI artifact has expired, so this deploy is serving the last cached build"
+          # DEPRECATED rung, kept so a site deployed by an older publish.yml still has a
+          # source on its first upgraded deploy. Nothing writes _sources/ any more, so it
+          # disappears from the site on that very deploy; this read is one-shot insurance.
+          elif curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" -o "$zip" 2>/dev/null; then
+            echo "::notice::$DEFAULT restored from the deprecated in-site copy \
+          ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip) — it will be cached from here on"
           else
-            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, or durable in-site copy — deploy aborted"
+            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, \
+          the Actions cache, or the deprecated in-site copy — deploy aborted"
             exit 1
           fi
+          # Re-save only when the bytes actually changed: cache entries are immutable, so
+          # a content-addressed key means an unchanged default branch adds no entry.
+          new=$(sha256sum "$zip" | cut -c1-32)
+          old=$(cat "$cache/default.sha" 2>/dev/null || true)
+          if [ "$new" != "$old" ]; then
+            cp "$zip" "$cache/default.zip"
+            printf '%s' "$new" > "$cache/default.sha"
+            echo "cache-key=mvs-default-v1-$new" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same rule as the release-zip cache: only the default branch writes, because a
+      # cache saved on a PR ref is scoped to that PR and no other run can read it.
+      - name: Save the default branch's durable docs.zip
+        if: >-
+          steps.ensure-default.outputs.cache-key != '' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/defaultcache
+          key: ${{ steps.ensure-default.outputs.cache-key }}
 
       # Unzip every gathered zip into SITE/<version-name>.
-      # Persist the default-branch zip into SITE/_sources/ for future recovery.
       #
       # THE ZIP-SHAPE CONTRACT: a docs.zip must unzip to exactly ONE top-level
       # directory, whose CONTENTS become site/<version-name>. The directory's NAME is
@@ -454,11 +510,6 @@ jobs:
             fi
             rm -rf "$tmp"
           done
-          dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
-          [ -d "$RUNNER_TEMP/site/$DEFAULT" ] && [ -f "$dzip" ] \
-            && { mkdir -p "$RUNNER_TEMP/site/$SOURCES_DIR"; cp "$dzip" "$RUNNER_TEMP/site/$SOURCES_DIR/$DEFAULT.zip"; } \
-            || true
-
           # upload-pages-artifact tars the whole site and GitHub Pages rejects the
           # artifact over 1 GB. That ceiling arrives silently — deploys just start
           # failing — so warn while there is still room to act. `max-releases` is the

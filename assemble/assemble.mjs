@@ -41,9 +41,11 @@ export const DOCS_ZIP = "docs.zip";
 export const SEED_TAG = "pages-default-seed";
 
 /**
- * The in-site durable store directory (`_sources/<default>.zip`) persisted by
- * publish.yml's extract step each deploy. Published with the site but NOT a
- * version, so version discovery skips it.
+ * The DEPRECATED in-site durable store (`_sources/<default>.zip`). publish.yml used
+ * to persist the default branch's docs.zip here every deploy; it now caches it
+ * instead, so newly assembled trees never contain this directory. The exclusion
+ * stays as insurance — it costs nothing, and a stray `_sources` dir must never be
+ * mistaken for a version.
  */
 export const SOURCES_DIR = "_sources";
 
