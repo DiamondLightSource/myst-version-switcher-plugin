@@ -89,8 +89,12 @@ jobs:
 
   # Internal PR / default-branch push (inline), or any workflow_dispatch → deploy.
   deploy:
+    # `workflow_run` is TEMPORARY — _probe-workflow-run.yml's experiment (delete both once
+    # it has answered). Its caller already gates on conclusion + non-fork; the deploy
+    # itself needs no other change, because version-name "" is an existing supported mode.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_run' ||
       (github.event_name == 'push' && github.ref_type != 'tag') ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)

@@ -44,9 +44,16 @@ jobs:
   # fork PR's token is read-only, so untrusted code never reaches a write token.
   # `actions: write` lets the re-dispatch job re-fire the shim; `version-name` is the
   # in-run build for the inline path (ignored by the re-dispatch/warn branches).
+  # TEMPORARILY DISABLED — _probe-workflow-run.yml's experiment needs the workflow_run path
+  # to be the ONLY deploy path, so the experiment has one variable. Tags are disabled here
+  # too, deliberately: the re-dispatch job would deploy via workflow_dispatch, which we
+  # already know re-serves, and that is precisely the confound observation 2 must avoid.
+  # RESTORE to:
+  #   if: github.repository == 'DiamondLightSource/myst-version-switcher-plugin'
+  # when the probe is deleted.
   publish:
     needs: [lint, test, docs]
-    if: github.repository == 'DiamondLightSource/myst-version-switcher-plugin'
+    if: false
     uses: ./.github/workflows/publish-dispatch.yml
     with:
       version-name: ${{ needs.docs.outputs.version-name }}
