@@ -262,7 +262,7 @@ jobs:
           while IFS=$'\t' read -r tag dest created size assetid decision; do
             [ "$dest" = "-" ] && continue
             if [ -f "$failed/$assetid" ]; then
-              echo "::warning::release $tag: docs.zip download failed — skipping. $(cat "$failed/$assetid.err" 2>/dev/null | head -1)"
+              echo "::warning::release $tag: docs.zip download failed — skipping. $(head -1 "$failed/$assetid.err" 2>/dev/null)"
             elif [ -s "$relcache/$assetid.zip" ]; then
               cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
             else
@@ -533,7 +533,11 @@ jobs:
           set -euo pipefail
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
             --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT")
-          [ -n "$stable_src" ] && ln -s "$stable_src" "$RUNNER_TEMP/site/stable" || true
+          # An `&& ln … || true` one-liner here would also swallow a FAILED symlink, not
+          # just the empty-stable_src case — and a missing stable/ alias is silent damage.
+          if [ -n "$stable_src" ]; then
+            ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
+          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
