@@ -12,7 +12,7 @@ publishes it **directly to GitHub Pages** via `actions/upload-pages-artifact` +
 `actions/deploy-pages`. There is **no `gh-pages` branch** — `deploy-pages` publishes
 one artifact as the *entire* site, which is a whole-site-replace. The four source
 kinds and their durability are in the
-[reference](../reference/workflows.md#what-publish-yml-gathers).
+[reference](../reference/workflows.md#what-the-engine-gathers).
 
 Releases are permanent, so old versions never vanish. PR previews come from CI
 artifacts and silently drop if the artifact expires and nothing rebuilds — fine for
@@ -42,7 +42,7 @@ with nothing on the way to say so.
 
 Two things follow.
 
-`publish.yml` takes a **`max-releases`** input: publish only the N most recent releases,
+The engine takes a **`max-releases`** input: publish only the N most recent releases,
 ranked by the tagged commit's date. It defaults to `0` (unlimited), so upgrading never
 silently deletes versions from an existing site — but the paved path in the
 [tutorial](../tutorials/adding-to-a-fresh-repo.md) sets it, and a deploy whose *packed*
@@ -121,84 +121,101 @@ The architecture makes that boundary structural by splitting build from publish:
 
 - **CI (unprivileged)** runs `myst build` and uploads the `docs` artifact for
   *every* event, forks included. It never holds a write token.
-- **`publish.yml` (privileged)** runs `assemble` + the Pages deploy. It runs only in
+- **`publish-gh-pages.yml` (privileged)** runs `assemble` + the Pages deploy. It runs only in
   the trusted upstream context.
 
 So a fork's build can never reach a write token; only trusted code deploys.
 
-### Why publish is *nested* in CI (for internal events)
+(why-publishing-listens-instead-of-being-called)=
+### Why publishing listens instead of being called
 
-The deploy is surfaced as a **job inside the CI run** (`ci.yml`'s `publish` job →
-`publish-dispatch.yml` shim → `publish.yml` via `workflow_call`) so its status and URL are
-visible on the PR / commit — rather than running invisibly after the fact. A single
-`publish` job runs for **every** event; `publish.yml` does the branching.
+Publishing is **not** a job in `ci.yml`. It is a separate `publish.yml` in the consumer's
+repo, triggered by `workflow_run` when their CI workflow completes, which then calls the
+`publish-gh-pages.yml` engine.
 
-`publish.yml` is the `workflow_call` **engine** and owns all the publish branching,
-reached only through a thin `publish-dispatch.yml` shim that exposes it as both
-`workflow_call` (the inline `publish` job) and `workflow_dispatch` (the tag
-re-dispatch, the fork-PR opt-in, manual re-deploys). It routes each event to one of three
-jobs: **deploy** (internal PR / default-branch push, or a dispatch), **re-dispatch** (a tag
-— below), or **warn** (a fork PR — read-only, never deploys, just posts the manual-opt-in
-hint; this replaced the old warning step in the build job). A fork PR can't reach a write
-token (its `GITHUB_TOKEN` is read-only and `deploy` is `if`-excluded for forks), so the
-security boundary holds while the hint lives next to the rest of the publish logic. The
-shim exists only because a reusable workflow can't be `workflow_dispatch`'d cross-repo, so
-the re-dispatch job needs a local file to re-fire — it `gh workflow run`s the shim by name
-(`dispatch-workflow`), which works because a called workflow runs with the *caller's* repo
-and token. This repo dogfoods the exact shim a consumer adds (theirs just pins
-`publish.yml@<tag>`).
+It used to be nested, deliberately, so the deploy's status and URL showed on the PR. Two
+things made that wrong.
 
-The cost of nesting is an environment-policy change: because internal PRs now deploy
-from **their own ref**, the `github-pages` environment's deployment-branch policy must
-allow those refs. The alternative — triggering publish via `workflow_run` after CI
-completes — keeps deploys on the default branch only, but at the price of the deploy
-being invisible on the PR. This project chose visibility. (Tags are the exception —
-they deploy from the default-branch ref via the re-dispatch below, not their own ref.)
+The first is cost. Reconstructing the site is **O(the whole site)** and completely
+independent of what changed — the same 24 releases, the same open PRs, the same upload,
+whichever PR triggered it. Nesting that put a large constant inside every PR's critical
+path. The first consumer to adopt this switched PR previews off one day later, because a
+650-second deploy had been bolted onto a 40-second docs build.
 
-### Why tags deploy via a `workflow_dispatch` re-dispatch
+The second is that the visibility was never the PR author's to act on. A red check for a
+wedged Pages origin, on a dependency-bump PR, is noise that trains people to ignore CI.
 
-A release tag is cut on the merge commit, so it shares the default branch's
-just-deployed SHA. `deploy-pages` stamps every deployment with
-`pages_build_version = GITHUB_SHA` — it has no input to change it, and the value is
-server-validated against the deploy OIDC token's commit claim, so a unique value
-can't be forced (it 404s; see [`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)).
-The Pages backend then silently **drops a second deploy of an already-deployed SHA**
-on a non-`workflow_dispatch` event — it reports success and flips the deployment
-record active, but the origin keeps serving the *first* artifact. So an inline tag
-deploy would "succeed" while the site stayed on the pre-tag build.
+`workflow_run` fixes both: the deploy runs afterwards on its own run, and a failure is
+visible where the people who can fix it are looking.
 
-The one documented escape hatch: a `workflow_dispatch` deploy of that same SHA
-*forces* a re-serve. So tags don't deploy inline — `publish.yml`'s `re-dispatch` job
-waits for `ci.yml`'s parallel `release` job to attach the new `docs.zip`, then
-`gh workflow run`s the shim as a `workflow_dispatch`; that run re-gathers from durable
-sources (now including the new release) and deploys, and because its event is
-`workflow_dispatch` the origin updates. `main` and internal-PR deploys are the *first* of
-their SHA, so they serve fine inline and keep their PR/commit visibility. This all lives
-in the shared engine — the consumer's only dispatch-related file is the thin shim (a
-reusable workflow can't be dispatched cross-repo, so the re-dispatch job needs a local file
-to re-fire).
-The post-deploy origin-verify step in `publish.yml` backstops any residual stale
-origin by failing the run instead of serving stale docs silently.
+### What listening deleted
 
-### Why the current build is *injected*
+The trigger change was mostly **subtraction**, because three separate pieces of machinery
+existed only to work around the old shape.
 
-Because the inline publish runs *inside* the build's own CI run, that run isn't a
-*completed* successful run yet — so `assemble`'s normal gather can't discover it. For
-a `main` push it would be worse than missing: the gather would find the **previous**
-successful run and publish a build behind by one commit. So `ci.yml` passes the
-build's version name to `publish.yml`, which downloads this run's `docs` artifact and
-stages it into the gather dir as the **highest-priority** source — overwriting any
-same-name zip gathered from durable sources. Everything else still comes from durable
-sources. The dispatch paths (the tag re-dispatch and the fork opt-in) pass no current
-build — they gather entirely from durable sources, the tag from its just-attached
-`docs.zip` Release asset and a fork from its approved head SHA's successful run.
+**The tag trampoline.** A release tag is cut on the merge commit, so it shares the default
+branch's just-deployed SHA, and `deploy-pages` stamps every deployment with
+`pages_build_version = GITHUB_SHA` — no input to change it, and the value is
+server-validated against the OIDC commit claim, so a unique one can't be forced (it 404s;
+see [`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383)).
+Pages silently drops a *second* deploy of an already-deployed SHA on some events: it
+reports success and flips the deployment record active, but the origin keeps serving the
+first artifact. A tag deploy would "succeed" while the site stayed on the pre-tag build.
+
+The old fix was a trampoline: tags re-fired a locally dispatchable shim so the deploy
+landed as a `workflow_dispatch`, which does force a re-serve.
+
+`workflow_run` forces a re-serve too. That was established by experiment rather than
+inference, because the documented rule does not predict it — on 2026-08-21 four
+consecutive deploys at the *identical* build version
+`b24237484c3b445469c2db4ef161410a185fcdbc` (a push to `main`, a tag cut on that same
+commit, and two pushes to one PR) each updated the live origin. So a tag's deploy re-serves
+directly, and the trampoline is gone.
+
+**The shim.** `publish-dispatch.yml` existed *only* because a reusable workflow cannot be
+`workflow_dispatch`'d cross-repo, so the trampoline needed a local file to re-fire. No
+trampoline, no shim. What consumers carry now is one `publish.yml` that calls the engine.
+
+**The in-run artifact injection.** A nested publish runs *inside* the build's own run, so
+that run is not yet a completed success and the gather cannot discover it — worse, on a
+`main` push the gather would find the *previous* run and publish a build one commit behind.
+So the build's version name was threaded through `ci.yml` and the shim, and its artifact
+staged as the highest-priority source. `workflow_run` fires *after* the triggering run
+completes, so the ordinary gather finds it. Nothing to inject, nothing to thread.
+
+The read-only `warn` job went the same way: a fork's CI never reaches the engine, because
+the caller excludes it.
+
+### The trap `workflow_run` brings with it
+
+In a `workflow_run` run, `GITHUB_SHA` and `github.ref` are **always the default branch's
+HEAD** — never the commit that was built. A PR-triggered deploy reports `refs/heads/main`.
+
+That is mostly harmless (it is why the same-SHA question mattered at all), but it silently
+breaks anything that asks "was this the default branch?". Both of the engine's cache-save
+steps did exactly that, and gating on `github.ref` would have had every PR-triggered deploy
+writing caches scoped to a PR that nothing else can read. They test
+`github.event.workflow_run.head_branch` instead.
+
+Because that lives in an `if:` expression rather than a shell script, the gather harness
+cannot reach it; `test/workflow-harness/test_shape.py` asserts it structurally, along with
+the caller's two guards — all of which fail *open*, and so would never announce themselves.
+
+### Fork PRs still cannot deploy themselves
+
+`workflow_run` runs with a **write token even when a fork's pull request triggered it** —
+the classic pwn-request shape, and a real hazard rather than a theoretical one. The caller
+therefore requires `head_repository.full_name == github.repository`, so a fork's build
+never reaches the engine automatically. A maintainer publishes a preview by dispatching
+`publish.yml` with the PR number, which records approval against that exact head SHA; a
+later push to the PR drops the preview until re-approved.
 
 ## The inline-bash / JS split inside `assemble`
 
-The `assemble` logic is split between `publish.yml` inline steps and `assemble.mjs`
-(sparse-checked-out at `job.workflow_sha`):
+The `assemble` logic is split between `publish-gh-pages.yml` inline steps and
+`assemble.mjs` (sparse-checked-out at `job.workflow_sha`):
 
-- **`publish.yml`'s gather and extract steps** do the IO plumbing — `gh` downloads,
+- **the engine's gather and extract steps** do the IO plumbing — `gh` downloads,
   `unzip`, `mv`, the `stable/` symlink — as inline bash. The steps are individually
   named so each one's timing and failures are visible in the GH Actions UI.
 - **`assemble.mjs`** is the pure-ish kernel: ordering, prerelease detection,
@@ -210,8 +227,8 @@ Pure bash is ruled out — semver ordering, prerelease detection and JSON render
 are not unit-testable in bash. Bash never parses JSON itself: every extraction uses
 `gh`'s built-in `-q`/`--jq` (it embeds real jq), never a piped standalone `jq` — a
 `gh … | jq` pipe would mask an API failure as empty output. Gather order encodes
-priority — releases first, then branch CI overwrites them, then the current build
-overwrites those; all version-ordering and prerelease logic lives in `generate`.
+priority — releases first, then branch CI overwrites them; all version-ordering and
+prerelease logic lives in `generate`.
 
 ## Fork-PR previews: per-commit maintainer opt-in
 
@@ -284,30 +301,37 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
   following a digit, PEP 440 style — parity with the release workflow; a tag that
   merely contains those letters, like `release-1.0`, is not a prerelease), but still
   listed in the switcher if gathered.
-- **Concurrency:** `concurrency: { group: pages, cancel-in-progress: false }` makes
-  deploys last-writer-wins; reconstructing from durable sources keeps that mostly
-  self-healing.
+- **Concurrency:** `concurrency: { group: pages, cancel-in-progress: true }`. Cancelling
+  a superseded deploy is safe *because* every deploy reconstructs the whole site — the
+  one that replaces it gathers everything the cancelled one would have. This was unsafe
+  while publish was nested in CI, where cancelling marked an unrelated PR's run cancelled.
 
-## Deferred: a release-layer cache
+## The release-layer cache
 
-Re-downloading and unzipping every release's `docs.zip` on every deploy is the one
-recurring cost that scales with the number of releases. A GitHub Actions cache of the
-immutable released-tags layer could skip those re-downloads, but it is **deliberately
-not built yet** — the dominant cost (N sequential `gh` round-trips) is already
-addressed by one paginated releases call, and the benefit is zero at adoption. The
-full analysis and an implementation sketch are tracked as future work in
-[issue #6](https://github.com/DiamondLightSource/myst-version-switcher-plugin/issues/6).
+Re-downloading and unzipping every release's `docs.zip` on every deploy was the one
+recurring cost that scaled with the number of releases, and it stopped being theoretical
+once a consumer reached 131 of them: 114 seconds per deploy, on every event, fetching the
+same immutable bytes.
+
+The engine now caches them (`actions/cache`, keyed on the exact set of asset ids it
+intends to publish, files named by **asset id** so a re-cut release cannot be served from
+a stale entry, and pruned to the published set so a capped site keeps a capped cache).
+Steady state is a total hit; cutting a release downloads exactly one zip.
+
+Caches are written only when the **default branch** was what got built — one saved while
+a PR is the trigger is scoped to that PR and unreadable by anything else, so saving there
+would only churn the 10 GB repo quota.
 
 ## Key resolved decisions
 
-- **No action wrapper — `publish.yml` runs `assemble/` directly** (self-checked-out
+- **No action wrapper — the engine runs `assemble/` directly** (self-checked-out
   at `job.workflow_sha`, so the scripts match the workflow's own ref). The build half
   (`docs.yml`) computes the clean token inline and uploads the `docs` artifact.
 - **Direct Pages publish, no `gh-pages` branch** (`upload-pages-artifact` +
   `deploy-pages`), requiring the repo's Pages source set to "GitHub Actions".
 - **JS core + inline-bash glue.** Pure functions (and their node tests) live in
   `assemble.mjs`; the `gh`/`unzip`/`mv` IO lives as inline bash steps in
-  `publish.yml` — individually named so step timing and failures are visible in
+  `publish-gh-pages.yml` — individually named so step timing and failures are visible in
   the GH Actions UI. Python was a contender (the team is Python-heavy) but loses
   on a second toolchain in a JS-only repo.
 - **`release.yml` attaches `docs.zip`** (it downloads the run's artifacts and

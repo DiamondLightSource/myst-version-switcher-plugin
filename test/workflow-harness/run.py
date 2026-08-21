@@ -1,5 +1,5 @@
 """
-Harness for the bash inside publish.yml's `deploy` job.
+Harness for the bash inside publish-gh-pages.yml's `deploy` job.
 
 The gather steps are the workflow's most intricate logic — release selection,
 an asset cache, a SHA-indexed artifact lookup, parallel downloads, and four
@@ -13,7 +13,7 @@ Run with `npm run test:workflows`.
 import yaml, re, subprocess, os, sys, json, shutil, pathlib
 H = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(os.path.dirname(H))
-d = yaml.safe_load(open(f"{REPO_DIR}/.github/workflows/publish.yml"))
+d = yaml.safe_load(open(f"{REPO_DIR}/.github/workflows/publish-gh-pages.yml"))
 steps = {s.get("name"): s for s in d["jobs"]["deploy"]["steps"] if s.get("run")}
 
 WANT = ["Select releases to publish", "Gather release artifacts", "Gather branch CI artifacts"]

@@ -1,31 +1,43 @@
 # Reference: the reusable workflows + contracts
 
-The public interface is two reusable workflows consumed by `uses:` at a `<tag>` —
-`docs.yml` directly from `ci.yml`, and `publish.yml` via a local `publish-dispatch.yml`
-shim (one per repo — see the [tutorial](../tutorials/adding-to-a-fresh-repo.md)):
+The public interface is two reusable workflows consumed by `uses:` at a `<tag>`, from two
+different files in your repo:
 
 ```yaml
+# ci.yml — builds, never publishes
 jobs:
   docs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/docs.yml@<tag>
     with:
       build-command: make docs
+```
+
+```yaml
+# publish.yml — a separate workflow, triggered by ci.yml FINISHING
+on:
+  workflow_run: { workflows: [CI], types: [completed] }
+  workflow_dispatch: { inputs: { pr: { required: false, default: "" } } }
+jobs:
   publish:
-    needs: [docs]
-    if: github.repository == 'ORG/REPO'
-    uses: ./.github/workflows/publish-dispatch.yml
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>
     with:
-      version-name: ${{ needs.docs.outputs.version-name }}
+      max-releases: "20"
     permissions:
       pages: write
       id-token: write
       contents: read
-      actions: write
+      actions: read
       statuses: write
 ```
 
-The site-reconstruction logic (`assemble/`) is **internal** — `publish.yml` runs it
-directly; it is not a separately consumed action.
+The full copy-paste versions are in the
+[tutorial](../tutorials/adding-to-a-fresh-repo.md). The site-reconstruction logic
+(`assemble/`) is **internal** — `publish-gh-pages.yml` runs it directly; it is not a
+separately consumed action.
 
 ## `docs.yml` — build (unprivileged)
 
@@ -36,70 +48,15 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 
 | input | required | default | meaning |
 |---|---|---|---|
-| `build-command` | **yes** | — | Command that builds the HTML site into `html-dir` at `$BASE_URL`. Fold any project setup (`cp CONFIG`, `npm ci`, apt deps) behind it. |
-| `html-dir` | no | `docs/_build/html` | Directory the build writes the site to; staged into `docs.zip` as its single root directory, `html/`. |
+| `pr` | no | `""` | Fork PR number to approve (pins its head SHA as `preview-approved`) and preview. Set on the caller's `workflow_dispatch` path. |
+| `max-releases` | no | `"0"` | Publish only the N most recent releases, ranked by the tagged commit's date (`created_at`); `0` = all of them. The site deploys as **one** Pages artifact against a hard **1 GB** cap, which a long-lived project will eventually hit. Set it as a **literal** in `publish.yml`'s `with:` block so it applies on every path. See [keep-the-site-small](../how-to/keep-the-site-small.md). |
 
-| output | meaning |
-|---|---|
-| `version-name` | The version this build was served at (`pr-<n>` \| default-branch \| `<tag>`) — pass to `publish.yml`. |
-
-`build-command` runs with two env vars set: **`BASE_URL`**
-(`/REPO/<version-name>` — the sub-path the build is served at) and
-**`VERSION_NAME`** (the bare version token — for builds that need it directly,
-e.g. a Sphinx `conf.py` setting the pydata theme's switcher `version_match`; see
-[how-to: use with Sphinx](../how-to/use-with-sphinx.md)).
-
-## `publish.yml` — the engine, owns the branching (privileged)
-
-Reconstructs the whole site and deploys it to Pages, routing each event to one of three
-jobs. The `deploy` job carries the `github-pages` environment, `concurrency: pages`, and
-`pages`/`id-token`/`statuses` write. Reached only via the `publish-dispatch.yml` shim
-(below); the canonical-repo guard lives upstream (in `ci.yml`), so the engine stays
-generic.
-
-- **`deploy`** — internal PR / default-branch push (inline), or any `workflow_dispatch`.
-  Self-checks-out `assemble.mjs` at `job.workflow_sha` / `job.workflow_repository`
-  (the `job` context resolves to the reusable file, not the caller), so the kernel
-  matches the `<tag>` the consumer pinned — no version bump; the consumer's repo stays
-  checked out at the root so `assemble.mjs`'s `git tag` lists *their* versions. The
-  inline path injects the in-run build via `version-name`; the dispatch paths pure-gather.
-- **`re-dispatch`** — a tag push. Waits for the release, then re-fires the shim
-  (`dispatch-workflow`, a file in the consumer's repo — a `workflow_call` run executes with
-  the caller's token, so it can dispatch it) so the deploy lands as a `workflow_dispatch`
-  and re-serves.
-- **`warn`** — a fork PR. Read-only, never deploys; just posts the manual-opt-in hint.
-
-**Tags must deploy via `workflow_dispatch`**: GitHub Pages silently drops a second deploy
-of an already-deployed SHA (a release tag shares the merge commit's SHA) unless the event
-is `workflow_dispatch`
-([`actions/deploy-pages#383`](https://github.com/actions/deploy-pages/issues/383); see the
-[architecture explanation](../explanations/architecture.md)).
-
-## `publish-dispatch.yml` — the thin shim (one per repo)
-
-The only thing that calls `publish.yml`, the single place you pin `publish.yml@<tag>`, and
-the **dispatchable file** the re-dispatch job re-fires. It just forwards to the engine via
-`workflow_call` (ci.yml's `publish`, every event) and `workflow_dispatch` (the tag
-re-dispatch, a fork-PR preview, a manual re-deploy). A reusable workflow can't be
-`workflow_dispatch`'d cross-repo, which is why this file lives in each repo.
-
-### `publish.yml` inputs (threaded through by the shim)
-
-| input | required | default | meaning |
-|---|---|---|---|
-| `version-name` | no | `""` | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Set by `ci.yml`'s inline publish (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather (the dispatch paths). |
-| `pr` | no | `""` | Fork PR number to approve (pins its head SHA as `preview-approved`) and preview. Set on the shim's `workflow_dispatch` path. |
-| `max-releases` | no | `"0"` | Publish only the N most recent releases, ranked by the tagged commit's date (`created_at`); `0` = all of them. The site deploys as **one** Pages artifact against a hard **1 GB** cap, which a long-lived project will eventually hit. Set it as a **literal in the shim's `with:` block**, not threaded from `ci.yml`, so it applies on every path. See [keep-the-site-small](../how-to/keep-the-site-small.md). |
-| `dispatch-workflow` | no | `publish-dispatch.yml` | Filename of the shim in the consumer's repo, re-fired by the `re-dispatch` job. Override only if you renamed the shim. |
-| `retry-until` | no | `""` | Internal — epoch-seconds deadline for auto-retrying a wedged Pages origin. Set only by the `re-dispatch` job (from the release's publish time) when it re-fires the shim; carried unchanged through any retries. **The shim must declare + forward this input** (`workflow_dispatch` + the `with:` block below) even though consumers never set it themselves — `re-dispatch` always passes it, and a shim missing the input rejects the dispatch. Don't set manually. |
-
-## What `publish.yml` gathers
+## What the engine gathers
 
 Every deploy rebuilds the complete tree from authoritative inputs:
 
 | version kind | source | durability |
 |---|---|---|
-| current build | this run's `docs` artifact, staged via `version-name` (highest priority — overwrites any same-name gathered source) | n/a (just built) |
 | default branch (e.g. `main`) | newest `docs` artifact built from that branch → the **Actions cache** copy (hard-fail if neither exists) | cached — re-saved on each default-branch deploy; evicted after 7 days unread |
 | released tags | the `docs.zip` asset attached to each **GitHub Release**, newest `max-releases` of them (the migration seed release, if present, seeds the default-branch zip and is never capped) | permanent |
 | open PRs (`pr-<n>`) | each PR's `docs` artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |

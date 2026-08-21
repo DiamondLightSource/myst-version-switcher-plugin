@@ -62,25 +62,15 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@__LATEST_TAG__
     permissions:
       contents: write
-
-  publish:
-    needs: [docs]
-    if: github.repository == 'ORG/REPO'
-    uses: ./.github/workflows/publish-dispatch.yml
-    with:
-      version-name: ${{ needs.docs.outputs.version-name }}
-    permissions:
-      contents: read
-      actions: write
-      pages: write
-      id-token: write
-      statuses: write
 ```
 
+`ci.yml` has no publish job: `publish.yml` picks the run up on `workflow_run` once CI
+completes.
+
 `uv` is preinstalled by `docs.yml` (honouring a committed `.python-version`), so
-`build-command` can equally be `uv run sphinx-build …`. Add the
-`publish-dispatch.yml` shim and set the Pages source / environment policy exactly as
-the [tutorial](../tutorials/adding-to-a-fresh-repo.md) describes — none of that is
+`build-command` can equally be `uv run sphinx-build …`. Add `publish.yml` and set the
+Pages source / environment policy exactly as the
+[tutorial](../tutorials/adding-to-a-fresh-repo.md) describes — none of that is
 MyST-specific.
 
 ## 3. Intersphinx via the `stable/` alias

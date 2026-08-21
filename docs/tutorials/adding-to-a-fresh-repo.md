@@ -61,14 +61,16 @@ It is recommended that you use the structure below.
 
 ### `ci.yml`
 
-This is the entry point, it defines three jobs:
+This is the entry point, it defines two jobs:
 
 - **`docs`** — `docs.yml` builds your site at the versioned `BASE_URL` and uploads the
   `docs` artifact, for every event (fork PRs included).
 - **`release`** — a small tag-only job that attaches the built `docs.zip` to the GitHub
   Release.
-- **`publish`** — calls your `publish-dispatch.yml` wrapper which publishes the complete
-  built site (with all versions) to GitHub Pages.
+
+It does *not* publish. `publish.yml` (below) picks this run up once it completes, which
+keeps the site's reconstruction cost off your PRs and stops a Pages failure showing as a
+red check against an author who cannot act on it.
 
 ```yaml
 # .github/workflows/ci.yml
@@ -93,78 +95,61 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/release.yml@__LATEST_TAG__
     permissions:
       contents: write                       # create the Release + attach assets
-
-  publish:
-    needs: [docs]
-    # don't publish a pages site in the fork's org
-    if: github.repository == 'ORG/REPO'
-    uses: ./.github/workflows/publish-dispatch.yml   # your workflow (below)
-    with:
-      version-name: ${{ needs.docs.outputs.version-name }}
-    permissions:
-      contents: read
-      actions: write
-      pages: write
-      id-token: write
-      statuses: write
 ```
 
-### `publish-dispatch.yml`
+`ci.yml` has no publish job at all — publishing is a separate workflow that picks this
+run up once it finishes.
 
-`publish.yml` is the engine and owns all the branching; this is a thin **shim** — the
-only thing that calls it, and the one place you pin `@__LATEST_TAG__`. It has to exist as a file
-in your repo (not just be `uses:`'d) because the tag re-dispatch re-fires it as a
-`workflow_dispatch`, and a reusable workflow can't be dispatched cross-repo. Copy it
-verbatim; the only thing to keep current is the `publish.yml` pin, already set to
-`__LATEST_TAG__`:
+### `publish.yml`
+
+The one file you carry, and the one place you pin `@__LATEST_TAG__`. It calls the engine
+(`publish-gh-pages.yml`) when CI completes. Copy it verbatim:
 
 ```yaml
-# .github/workflows/publish-dispatch.yml
-name: Publish (dispatch)
+# .github/workflows/publish.yml
+name: Publish
 on:
-  workflow_call:                    # ci.yml's `publish` job, for every event
-    inputs:
-      version-name: { required: false, default: "", type: string }
-  # tag re-dispatch + fork-PR preview + manual re-deploy
+  # Matches your CI workflow by its `name:`, NOT its filename. Rename that and you must
+  # change it here too, or publishing silently stops.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  # Fork-PR previews and manual re-deploys.
   workflow_dispatch:
     inputs:
       pr:
-        description: "Fork PR to approve + preview (empty = re-deploy)"
+        description: "Fork PR to approve + preview (empty = plain re-deploy)"
         required: false
         default: ""
-      retry-until:
-        description: "Internal — epoch-seconds retry deadline. Don't set manually."
-        required: false
-        default: ""
+
 jobs:
   publish:
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@__LATEST_TAG__
+    # Both guards matter. `conclusion` because workflow_run fires on failed runs too, and
+    # a failed run has no usable docs artifact. `head_repository` because workflow_run
+    # gets a WRITE token even when a fork's PR triggered it — without this, untrusted
+    # code reaches your live site. Both fail OPEN if removed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@__LATEST_TAG__
     with:
-      # "" on dispatch → pure durable gather
-      version-name: ${{ inputs.version-name }}
-      # Publish only the N most recent releases. A LITERAL, not an input threaded from
-      # ci.yml, so it applies on every path — the site deploys as one Pages artifact
-      # against a hard 1 GB cap. 0 = unlimited. See docs/how-to/keep-the-site-small.md.
-      max-releases: "20"
-      # set (dispatch) → pin that fork head SHA
       pr: ${{ inputs.pr }}
-      # the file the tag re-dispatch re-fires
-      dispatch-workflow: publish-dispatch.yml
-      # forwarded so the re-dispatch job's auto-retry can re-fire this shim
-      retry-until: ${{ inputs.retry-until }}
+      # Publish only the N most recent releases; 0 = all. A LITERAL, so it holds on every
+      # path — the site deploys as one Pages artifact against a hard 1 GB cap. See
+      # docs/how-to/keep-the-site-small.md.
+      max-releases: "20"
     permissions:
       contents: read
-      actions: write
+      actions: read
       pages: write
       id-token: write
       statuses: write
 ```
 
-`publish.yml` then routes each event: **deploy** (internal PR / `main` push, or any
-dispatch), **re-dispatch** (a tag → re-fires this shim so the deploy runs as a
-`workflow_dispatch` — [why](../explanations/architecture.md)), or **warn** (a fork PR,
-read-only, never deploys). A maintainer publishes a fork preview by running this workflow
-from the Actions tab with the `pr` number.
+That is the whole publish setup: no job in `ci.yml`, no shim, nothing to thread through.
+A maintainer publishes a fork preview by running this workflow from the Actions tab with
+the `pr` number.
 
 ## 4. Push your branch and open a PR
 
@@ -173,27 +158,28 @@ see:
 
 - **`docs / build`** go green — it builds your docs at the versioned `BASE_URL` and
   uploads the `docs` artifact. This runs for every PR, forks included.
-- **`publish / deploy`** runs for an *internal* PR (a branch in your own repo) and
-  deploys a preview of just this PR at `https://ORG.github.io/REPO/pr-<n>/`, linked from
-  the PR's checks/Deployments. A **fork** PR instead gets **`publish / warn`** (a
-  read-only hint — forks never auto-publish); a maintainer dispatches the wrapper with
-  the `pr` number to preview one.
+Then, once CI finishes, a **`Publish`** run appears under the **Actions** tab — not as a
+check on the PR — and deploys a preview of this PR at
+`https://ORG.github.io/REPO/pr-<n>/`. A **fork** PR is skipped: forks never auto-publish,
+because that run would hold a write token. A maintainer previews one by dispatching
+`publish.yml` with the `pr` number.
 
 :::{note} First-time exception
-On a brand-new repo the `publish` check is **red on this setup PR** — there's no
-`main` build yet for the versioned site to anchor on, and the default-branch guard
-refuses to publish a site missing it. It clears the moment you merge (step 6). Every
-PR after that previews normally.
+On a brand-new repo that first `Publish` run **fails** — there's no `main` build yet for
+the versioned site to anchor on, and the default-branch guard refuses to publish a site
+missing it. It clears the moment you merge (step 6). Every PR after that previews
+normally. Because publishing is its own run, this failure does not mark your setup PR
+red.
 :::
 
 ## 5. Merge to main — your first deploy
 
-Merging pushes to `main`, which builds `main` and runs `publish`: it assembles a
+Merging pushes to `main`, which builds `main`; the `Publish` run that follows assembles a
 single-entry `switcher.json` and an `index.html` redirecting to `main/`, and deploys.
 Visit `https://ORG.github.io/REPO/` — the redirect lands you on `main/` with the
 switcher showing one entry. (The single-entry first deploy is graceful by design; no
 release required.) From here on, every push to `main` redeploys and every internal PR
-gets its own `/pr-<n>/` preview.
+gets its own `/pr-<n>/` preview — each one a separate `Publish` run in the Actions tab.
 
 ## 6. Cut your first release
 
@@ -228,7 +214,7 @@ URL for cross-project `objects.inv` references.
 
 - The [architecture explanation](../explanations/architecture.md) — why it works
   this way.
-- The [workflow reference](../reference/workflows.md) — the `docs.yml`/`publish.yml`
+- The [workflow reference](../reference/workflows.md) — the `docs.yml`/`publish-gh-pages.yml`
   inputs and the `docs.zip` contract.
 - Migrating an existing site? See
   [how-to: migrate from `gh-pages`](../how-to/migrate-from-gh-pages.md).

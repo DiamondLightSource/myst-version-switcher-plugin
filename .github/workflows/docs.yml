@@ -123,6 +123,7 @@ jobs:
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
 
-      # NOTE: the fork-PR "preview not published" hint lives in publish.yml's `warn`
-      # job (reached via the publish-dispatch.yml shim), which runs for fork PRs too —
-      # so this build job stays purely about building + uploading the docs artifact.
+      # NOTE: nothing here tells a fork PR that its docs will not be published. There is
+      # no longer anywhere sensible to say it: publish.yml excludes forks before the
+      # engine is reached, so no job runs in that case at all. This build job stays
+      # purely about building + uploading the docs artifact.

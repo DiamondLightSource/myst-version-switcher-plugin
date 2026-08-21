@@ -36,26 +36,21 @@ gh api --paginate repos/ORG/REPO/releases \
 
 ## Cap the number of published releases
 
-Set `max-releases` in your `publish-dispatch.yml` shim, in the `with:` block:
+Set `max-releases` in your `publish.yml`, in the `with:` block:
 
 ```yaml
 jobs:
   publish:
-    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish.yml@<tag>
+    uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>
     with:
-      version-name: ${{ inputs.version-name }}
       max-releases: "20"        # ← publish only the 20 most recent releases
       pr: ${{ inputs.pr }}
-      dispatch-workflow: publish-dispatch.yml
-      retry-until: ${{ inputs.retry-until }}
 ```
 
 :::{important}
-Set it in the **shim**, not in `ci.yml`. The shim is the single caller of the engine on
-every path — inline publish, tag re-dispatch, fork preview and manual re-deploy alike —
-so a literal there is the one place the policy cannot be bypassed. Threading it as an
-input from `ci.yml` would leave manual dispatches publishing a different number of
-versions from ordinary CI.
+A **literal**, not an input threaded in from elsewhere. `publish.yml` is the single caller
+of the engine on every path — the `workflow_run` deploy, a fork preview, a manual
+re-deploy — so a literal here is the one place the policy cannot be bypassed.
 :::
 
 The default is `0`, meaning unlimited, so upgrading the pinned tag never removes versions
