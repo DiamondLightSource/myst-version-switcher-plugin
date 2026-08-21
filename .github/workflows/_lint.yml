@@ -13,3 +13,24 @@ jobs:
       - name: Run hooks on all files
         run: npx prek run --all-files --show-diff-on-failure
 
+      # Workflow EXPRESSIONS are validated only by GitHub, and a bad one rejects the
+      # whole workflow before any job starts — no logs, no annotations, no failing step.
+      # That is how `|| "manual dispatch"` (expressions take single-quoted literals only)
+      # took the site's deploy down after it had passed YAML parsing, `bash -n`, and the
+      # workflow harness. actionlint catches exactly that class.
+      #
+      # Two errors are suppressed: actionlint's `job` context schema is stale and does not
+      # know `job.workflow_repository` / `job.workflow_sha`, both of which are real and
+      # documented, and which publish-gh-pages.yml depends on to version-match assemble.mjs.
+      - name: Lint workflow files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver=$(gh api repos/rhysd/actionlint/releases/latest --jq .tag_name | tr -d v)
+          gh release download "v$ver" --repo rhysd/actionlint \
+            -p "actionlint_${ver}_linux_amd64.tar.gz" -O "$RUNNER_TEMP/al.tgz"
+          tar xzf "$RUNNER_TEMP/al.tgz" --no-same-owner -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color \
+            -ignore 'property "workflow_(repository|sha)" is not defined'
+
