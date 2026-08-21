@@ -12,7 +12,7 @@
 		"test": "node test/test-url-logic.mjs && node test/test-assemble.mjs",
 		"docs": "cd docs && myst build --html --strict",
 		"docs-dev": "cd docs && myst start",
-		"test:workflows": "uv run --quiet --with pyyaml python3 test/workflow-harness/test_gather.py"
+		"test:workflows": "uv run --quiet --with pyyaml python3 test/workflow-harness/test_gather.py && uv run --quiet --with pyyaml python3 test/workflow-harness/test_shape.py"
 	},
 	"files": [
 		"plugins/version-switcher.mjs",

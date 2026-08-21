@@ -1,4 +1,4 @@
-"""Behaviour tests for publish.yml's gather steps. See run.py for how they load."""
+"""Behaviour tests for publish-gh-pages.yml's gather steps. See run.py for how they load."""
 
 import os, sys, tempfile
 
