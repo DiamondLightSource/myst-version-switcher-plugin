@@ -36,6 +36,11 @@ jobs:
     uses: ./.github/workflows/publish.yml
     with:
       version-name: ${{ inputs.version-name }}          # "" on dispatch → pure durable gather
+      # Site-size policy, so it applies on EVERY path (call and dispatch alike) — hence a
+      # literal here rather than another input threaded down from ci.yml. 0 = unlimited;
+      # raise or set it once the site nears the Pages 1 GB artifact cap. See
+      # docs/how-to/keep-the-site-small.md.
+      max-releases: "0"
       pr: ${{ inputs.pr }}                               # set (dispatch only) → pin that fork head SHA
       dispatch-workflow: publish-dispatch.yml            # the file the tag re-dispatch re-fires
       retry-until: ${{ inputs.retry-until }}              # "" on workflow_call/no-retry dispatch → no auto-retry

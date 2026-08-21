@@ -11,7 +11,8 @@
 	"scripts": {
 		"test": "node test/test-url-logic.mjs && node test/test-assemble.mjs",
 		"docs": "cd docs && myst build --html --strict",
-		"docs-dev": "cd docs && myst start"
+		"docs-dev": "cd docs && myst start",
+		"test:workflows": "uv run --quiet --with pyyaml python3 test/workflow-harness/test_gather.py"
 	},
 	"files": [
 		"plugins/version-switcher.mjs",
