@@ -10,7 +10,7 @@ between**:
    Pages source to Actions + open the environment policy. *Uploads and flips only — no
    deploy.*
 2. **Open + merge your pipeline PR** — its CI runs the first publish, which reads the
-   seed and persists the default branch durably into the site.
+   seed to stage the default branch, and then builds the branch's own docs.
 3. **`migrate.sh ORG/REPO --delete-gh-pages`** — verify the live site, then delete
    `gh-pages` + the seed release.
 
@@ -23,7 +23,7 @@ durability** — and the safety of the migration hinges on that difference (see 
 | version | source under the new model | durable? |
 |---|---|---|
 | released tags | a `docs.zip` asset on each **GitHub Release** | **yes, permanent** — but only once attached |
-| default branch (`main`) | persisted each deploy into the site at `_sources/<branch>.zip` | **yes** — once one deploy has captured it (seeded in run 1) |
+| default branch (`main`) | its own CI `docs` artifact, with a copy kept in the Actions cache | **yes** — once the branch builds its own docs (seeded in run 1 until then) |
 | open PRs (`pr-<n>`) | each PR's build artifact | no — drops on merge/close |
 
 Two consequences drive the procedure:
@@ -38,22 +38,23 @@ Two consequences drive the procedure:
    the extract takes the zip's single root directory whatever it is named, so
    python-copier-template's tag-name-rooted zips (`1.2.3/` rather than `html/`) need no
    re-cutting, which matters because an immutable release cannot be re-cut anyway.
-2. **The default branch has no permanent source until a publish captures it.** Each
-   deploy persists the branch's `docs.zip` into the site (`_sources/<branch>.zip`) and
-   restores from there when the CI artifact expires — but before the *first* publish
-   there is nothing in the site. So run 1 **seeds** it: it captures the gh-pages
+2. **The default branch has no source until it builds docs itself.** Each deploy
+   gathers it from its own CI artifact, keeping a copy in the Actions cache for when
+   that artifact expires — but before the branch has ever built under the new pipeline
+   there is nothing to gather. So run 1 **seeds** it: it captures the gh-pages
    `<default>/` tree as a published seed release, which the first publish reads and
-   persists to `_sources/<branch>.zip`. After that the in-site copy carries `/<default>/`
-   — *before* the default branch ever builds docs itself.
+   stages as `/<default>/` — *before* the default branch ever builds docs itself. The
+   seed carries it until the branch's own build takes over.
 
 For *why* this ordering is safe — the non-destructive source flip and the
 seed-before-publish rule — see the [architecture explanation](../explanations/architecture.md#migrating-from-gh-pages).
 
 :::{important} The one rule that matters
-*Keep `gh-pages` until `_sources/<default>.zip` is live in the deployed site.* Run 1's
-seed gets you there on the first publish; the `--delete-gh-pages` guard probes exactly
-this. Deleting `gh-pages` is the **separate, gated final run** — never part of run 1 —
-and it removes the seed release too.
+*Keep `gh-pages` until the default branch builds its own docs under the new pipeline.*
+Until then the seed — and `gh-pages` behind it — is the only copy there is. The
+`--delete-gh-pages` guard checks exactly that, and will not delete before it holds.
+Deleting `gh-pages` is the **separate, gated final run**, never part of run 1, and it
+removes the seed release too.
 :::
 
 ## Optional: rehearse on a fork first
@@ -87,7 +88,7 @@ every version, and it deploys to *your* `github.io`, never upstream's.
 
 :::{note} What the fork trial does and doesn't cover
 It exercises the full prepare → publish path (backfill, seed, the first deploy that
-persists `_sources/<default>.zip`), and you can even rehearse the destructive finalize
+stages `/<default>/` from the seed), and you can even rehearse the destructive finalize
 (`migrate.sh FORKORG/REPO --delete-gh-pages`) without risk — it only touches the fork.
 The `<tag>` pins still resolve to this project's upstream releases, so the reusable
 workflows behave identically. The only path it doesn't auto-cover is a release: push a
@@ -132,7 +133,7 @@ It does the following, then **stops with `gh-pages` intact and still serving**:
    (flagged prerelease for `a`/`b`/`rc` tags). Tags containing `/` are skipped.
 2. **Seed the default branch.** Capture the gh-pages `<default>/` tree (or the
    `--seed-from <dir>` directory, if the old site published it under another name) as
-   the published `pages-default-seed` release, so the default branch is durable before
+   the published `pages-default-seed` release, so the default branch has a source before
    any publish.
 3. **Flip the Pages source → GitHub Actions** and **open the `github-pages` environment's
    `deployment_branch_policy`** to "no restriction" (so deploys from PR/tag refs — which
@@ -149,31 +150,38 @@ Prepare the new pipeline + `myst.yml` changes from the
 after run 1 has seeded the default branch** (so its first publish is safe). Then open
 and merge it: its CI runs the first **publish** — with the source on Actions, the seed
 present, and the env policy open, it reconstructs the whole site
-(default branch from the seed, the backfilled releases, any open PRs) and deploys it,
-**persisting `_sources/<default>.zip`** into the published site. Merging then has the
-default branch build its own docs, so `_sources/<default>.zip` refreshes with real
-content and the seed becomes redundant.
+(default branch from the seed, the backfilled releases, any open PRs) and deploys it.
+Merging then has the default branch build its own docs, which supersede the seed and make
+it redundant.
 
 Confirm the site is live on the new model (visit `https://ORG.github.io/REPO/` and the
 switcher) before finalizing.
 
 ## Step 4 — finalize (irreversible)
 
-Once the publish has deployed and `_sources/<default>.zip` is live:
+Once the publish has deployed **and the default branch has built its own docs**:
 
 ```bash
 scripts/migrate.sh ORG/REPO --delete-gh-pages
 ```
 
-(Or run it right after merging with `--wait`: the guard then polls until the durable
-copy goes live — up to 30 minutes — instead of failing immediately.)
+(Or run it right after merging with `--wait`: the guard then polls until it passes — up
+to 30 minutes — instead of failing immediately.)
 
-This **guards** the deletion: it refuses unless
-`https://ORG.github.io/REPO/_sources/<default>.zip` returns `200` — i.e. the deployed
-site holds a durable copy of the default branch, so the new model can reconstruct
-`/<default>/` without `gh-pages`. It then verifies the live site, asks you to type the
-repo name, deletes `gh-pages`, **and deletes the seed release** (the in-site `_sources`
-copy supersedes it). After this, the rollback is gone.
+This **guards** the deletion. It refuses unless both hold:
+
+1. `https://ORG.github.io/REPO/<default>/` returns `200` — the default branch is live in
+   the new Actions-deployed site; and
+2. a non-expired `docs` artifact exists for the default branch — its CI really builds
+   `docs.zip` now.
+
+Condition 1 alone is not enough: it is satisfied while `/<default>/` is still coming from
+the migration seed, which is precisely the state where `gh-pages` remains the only real
+copy. Only once the branch builds its own docs is `gh-pages` genuinely redundant.
+
+The guard then verifies the live site, asks you to type the repo name, deletes
+`gh-pages`, **and deletes the seed release** (the branch's own build supersedes it).
+After this, the rollback is gone.
 
 :::{warning} Old pages that reference `gh-pages` at runtime
 Docs built under the old model sometimes embed a hardcoded version switcher that reads
@@ -199,8 +207,8 @@ lost. That is exactly why the deletion is a separate, gated run.
 | flag | effect |
 |---|---|
 | `--dry-run` | Print the backfill + seed plan and the drop report + probe the current site only; upload nothing; skip the flip. |
-| `--delete-gh-pages` | **The only mode that deletes.** Guard that `_sources/<default>.zip` is live (`200`), verify the live site, then delete `gh-pages` **and the seed release**. |
+| `--delete-gh-pages` | **The only mode that deletes.** Guard that the default branch is live *and* builds its own `docs` artifact, verify the live site, then delete `gh-pages` **and the seed release**. |
 | `--pages-ref <ref>` | `gh-pages` ref to read (default `origin/gh-pages`). |
 | `--seed-from <dir>` | `gh-pages` directory to seed the default branch from, when the old site published it under a different name (e.g. `latest/`). |
 | `--yes` | Skip the typed confirmation before deleting `gh-pages` (with `--delete-gh-pages`; use with care). |
-| `--wait` | With `--delete-gh-pages`: poll (up to 30 min) until `_sources/<default>.zip` goes live instead of failing the guard immediately — lets you finalize right after merging the pipeline PR. |
+| `--wait` | With `--delete-gh-pages`: poll (up to 30 min) until the guard passes instead of failing immediately — lets you finalize right after merging the pipeline PR. |
