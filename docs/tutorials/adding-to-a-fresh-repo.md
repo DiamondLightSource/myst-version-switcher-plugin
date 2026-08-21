@@ -142,6 +142,10 @@ jobs:
     with:
       # "" on dispatch → pure durable gather
       version-name: ${{ inputs.version-name }}
+      # Publish only the N most recent releases. A LITERAL, not an input threaded from
+      # ci.yml, so it applies on every path — the site deploys as one Pages artifact
+      # against a hard 1 GB cap. 0 = unlimited. See docs/how-to/keep-the-site-small.md.
+      max-releases: "20"
       # set (dispatch) → pin that fork head SHA
       pr: ${{ inputs.pr }}
       # the file the tag re-dispatch re-fires

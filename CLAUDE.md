@@ -12,7 +12,7 @@ to `publish.yml`, not a separately consumed action.
 plugins/version-switcher.mjs                   # MyST directive + anywidget runtime (single file, no README — docs are in docs/)
 assemble/assemble.mjs                          # INTERNAL: dependency-free Node kernel for publish.yml's "Generate" step (the `generate` subcommand writes switcher.json + index.html)
 scripts/migrate.sh                             # operator gh-pages → durable-source migration (bash); two-phase: reversible cutover, then guarded --delete-gh-pages
-test/                                          # npm test suite (node, no framework)
+test/                                          # npm test suite (node, no framework) + test/workflow-harness/ (python: loads publish.yml's gather steps out of the YAML and runs them against a mock gh)
 docs/                                          # this repo's own docs (dogfoods the plugin)
 .github/workflows/docs.yml                     # PUBLIC reusable: build at the versioned BASE_URL → pack docs.zip → upload `docs` artifact (workflow_call; build-command input)
 .github/workflows/publish.yml                  # PUBLIC reusable ENGINE (PRIVILEGED): branches on the event into 3 jobs — deploy (gather+extract inline bash + assemble.mjs@job.workflow_sha + Pages), tag-re-dispatch (re-fire the shim), fork-warn. workflow_call ONLY; reached via the publish-dispatch.yml shim
@@ -39,23 +39,65 @@ public action.
 See [`docs/explanations/architecture.md`](docs/explanations/architecture.md) for the
 full rationale. In short:
 
-### The default branch is self-durable in the site (`_sources/`)
+### The default branch's durable copy lives in the Actions cache
 Releases are durable (Release `docs.zip` assets) and PRs are ephemeral by design, but
-the **default branch** had no permanent source — gathered from its latest CI artifact,
-which expires, after which it drops out and the guard hard-fails. So each deploy
-persists the default branch's `docs.zip` (the one it arrived as — current build,
-gathered run, or the fallback — copied verbatim) into the published site at
-`_sources/<branch>.zip` (excluded from version discovery), and a deploy whose fresh
-artifact is gone restores the branch from that durable in-site copy (fetched from
-`$PAGES_URL` — the live Pages URL resolved from the Pages API, so custom domains
-work, falling back to `https://<owner>.github.io/<repo>`; the same URL roots the
-`switcher.json` entries). Before the branch ever builds
-docs (mid gh-pages migration) a final rung reads a **published seed release**
-(`pages-default-seed`, created by `scripts/migrate.sh` from the old gh-pages `<default>/`
-tree) and persists it to `_sources` on that deploy — so a repo can cut over to the
-reusable workflow in one PR, before `docs→main`. Drafts can't be used: a `contents:read`
-deploy token can't read them (verified), so the seed is a published release on a
-sentinel tag, deleted at finalize once `_sources/<default>.zip` is live.
+the **default branch** has no permanent source — gathered from its latest CI artifact,
+which expires, after which it drops out and the guard hard-fails. So each
+default-branch deploy keeps a copy of its `docs.zip` in the Actions cache
+(content-addressed key `mvs-default-v1-<sha>`, so an unchanged branch adds no entry),
+and a deploy whose fresh artifact is gone restores from there.
+
+This used to be published *into the site* at `_sources/<branch>.zip`. That was
+permanent, but it shipped a multi-megabyte zip inside every Pages artifact forever on a
+site already pressing the 1 GB cap (see "The site has a hard size ceiling"). The cache
+is evicted after 7 days unread and by LRU past 10 GB, so a repo quiet for >1 week whose
+main artifact ALSO expired loses the rung and hard-fails loudly — accepted trade.
+`_sources` is no longer written; the READ survives as a deprecated one-shot rung so a
+site last deployed by an older `publish.yml` still has a source on its first upgraded
+deploy (fetched from `$PAGES_URL` — the live Pages URL from the Pages API, so custom
+domains work; the same URL roots the `switcher.json` entries).
+
+Before the branch ever builds docs (mid gh-pages migration) a final rung reads a
+**published seed release** (`pages-default-seed`, created by `scripts/migrate.sh` from
+the old gh-pages `<default>/` tree) — so a repo can cut over to the reusable workflow in
+one PR, before `docs→main`. Drafts can't be used: a `contents:read` deploy token can't
+read them (verified), so the seed is a published release on a sentinel tag, deleted at
+finalize. `migrate.sh --delete-gh-pages`'s guard now requires the default branch to be
+live in the new site AND to have a non-expired `docs` artifact of its own (it used to
+probe `_sources/<default>.zip`, which passed even while the content came from the seed
+— i.e. while gh-pages was still the only real copy).
+
+### The site has a hard size ceiling — cap the releases
+`upload-pages-artifact` tars the WHOLE site into one artifact and Pages rejects it over
+**1 GB**. blueapi at 131 released `docs.zip`s was at 452 MB, +~5 MB/release: a few years
+from deploys simply failing, silently, with no warning on the way. `publish.yml` takes
+**`max-releases`** (default `0` = unlimited, so upgrading never silently deletes
+versions); the tutorial's shim ships `20`. Set it as a LITERAL in the shim's `with:`,
+not threaded from `ci.yml` — the shim is the single caller on every path, so a literal
+there can't be bypassed by a manual dispatch. A deploy past 700 MB warns — measured on
+the PACKED artifact (the cap is on the gzipped tar; this repo's site is 734 MiB on disk
+and 223 MiB deployed, so `du` would cry wolf at a third of real usage). The tree is only
+packed to measure once it exceeds `SIZE_PROBE_BYTES`, since packing costs seconds; `tar
+-ch` matches upload-pages-artifact's `--dereference`, which inflates `stable/` into a
+full copy.
+
+Selection is `assemble.mjs`'s `selectReleases` (pure, unit-tested; it replaced an
+untested bash `case`), ranked by **`created_at`** — NOT `published_at`, which lies when
+an old release is re-published (blueapi's `1.3.2-a9`: created 2025-10, published
+2026-07, and under `published_at` it outranked the newer `1.11.3`). No version-number
+parsing: tags are too inconsistent across repos. The seed release is exempt from the cap.
+`getSortedTags()`/`orderVersions()` are untouched — that's switcher DISPLAY order, a
+separate concern.
+
+### The gather is cached, indexed and parallel
+The deploy's cost is O(whole site), not O(the change) — identical work whatever fired
+it. On blueapi that was 654 s against a 27–45 s docs build. Fixed by: an `actions/cache`
+entry of release zips keyed on the exact set of asset ids to publish (assets are
+immutable; files named by ASSET ID so a re-cut release can't serve stale bytes; pruned to
+the published set), the artifacts API paginated ONCE and indexed newest-per-head-SHA
+(it was re-paginated per open PR — 27× for blueapi, ~175 s), and parallel downloads
+(`xargs -P 8`). **Caches are saved only on the default branch**: a cache written on a PR
+ref is scoped to that PR and unreadable elsewhere.
 
 ### Reconstruct from durable sources, publish the whole tree
 Every deploy rebuilds the **complete** site from authoritative inputs — `main`'s
@@ -224,7 +266,8 @@ always, fork PRs only when the SHA carries that status.
 ## Developing
 
 ```bash
-npm test                    # run the test suite
+npm test                    # run the unit tests
+npm run test:workflows      # run publish.yml's gather steps against a mock gh (needs uv)
 npm run docs                # build docs (same command CI uses)
 npm run docs-dev            # live-preview docs with the plugin loaded from local plugins/
 ```

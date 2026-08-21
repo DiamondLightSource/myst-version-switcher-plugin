@@ -89,6 +89,7 @@ re-dispatch, a fork-PR preview, a manual re-deploy). A reusable workflow can't b
 |---|---|---|---|
 | `version-name` | no | `""` | Version name of **this run's** `docs` artifact to stage directly, instead of gathering it from durable sources. Set by `ci.yml`'s inline publish (the run isn't a completed success yet, so the gather can't discover it — or would find a stale previous build). Empty → pure durable gather (the dispatch paths). |
 | `pr` | no | `""` | Fork PR number to approve (pins its head SHA as `preview-approved`) and preview. Set on the shim's `workflow_dispatch` path. |
+| `max-releases` | no | `"0"` | Publish only the N most recent releases, ranked by the tagged commit's date (`created_at`); `0` = all of them. The site deploys as **one** Pages artifact against a hard **1 GB** cap, which a long-lived project will eventually hit. Set it as a **literal in the shim's `with:` block**, not threaded from `ci.yml`, so it applies on every path. See [keep-the-site-small](../how-to/keep-the-site-small.md). |
 | `dispatch-workflow` | no | `publish-dispatch.yml` | Filename of the shim in the consumer's repo, re-fired by the `re-dispatch` job. Override only if you renamed the shim. |
 | `retry-until` | no | `""` | Internal — epoch-seconds deadline for auto-retrying a wedged Pages origin. Set only by the `re-dispatch` job (from the release's publish time) when it re-fires the shim; carried unchanged through any retries. **The shim must declare + forward this input** (`workflow_dispatch` + the `with:` block below) even though consumers never set it themselves — `re-dispatch` always passes it, and a shim missing the input rejects the dispatch. Don't set manually. |
 
@@ -99,15 +100,20 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 | version kind | source | durability |
 |---|---|---|
 | current build | this run's `docs` artifact, staged via `version-name` (highest priority — overwrites any same-name gathered source) | n/a (just built) |
-| default branch (e.g. `main`) | newest `docs` artifact built from that branch → durable `_sources/<branch>.zip` in the live site (hard-fail if neither exists) | durable — re-persisted into the site each deploy |
-| released tags | the `docs.zip` asset attached to each **GitHub Release** (the migration seed release, if present, seeds the default-branch zip) | permanent |
+| default branch (e.g. `main`) | newest `docs` artifact built from that branch → the **Actions cache** copy (hard-fail if neither exists) | cached — re-saved on each default-branch deploy; evicted after 7 days unread |
+| released tags | the `docs.zip` asset attached to each **GitHub Release**, newest `max-releases` of them (the migration seed release, if present, seeds the default-branch zip and is never capped) | permanent |
 | open PRs (`pr-<n>`) | each PR's `docs` artifact, keyed by current head SHA — internal always, fork PRs only when the SHA carries a `preview-approved` status | ephemeral — drops when the PR merges/closes |
 
 Branch and PR artifacts are found via the **artifacts API by name** (`docs` — the
 artifact name is the contract), not by workflow filename, so the consumer's entry
-workflow can be called anything. The URLs baked into `switcher.json` (and the
-`_sources` restore) use the site's live Pages URL from the **Pages API**, so a
-custom domain (CNAME) works.
+workflow can be called anything. The URLs baked into `switcher.json` use the site's
+live Pages URL from the **Pages API**, so a custom domain (CNAME) works.
+
+Release assets are immutable, so the gather caches them (`actions/cache`, keyed on the
+exact set of asset ids it intends to publish) and downloads only what it has not seen;
+downloads run in parallel, and the artifacts API is paginated **once** and indexed by
+head SHA rather than re-queried per PR. Caches are written only from the default branch,
+because a cache saved on a PR ref is scoped to that PR and unreadable by any other run.
 
 A version no longer gathered (a merged/closed PR, a deleted release) is correctly
 dropped, because `deploy-pages` replaces the *entire* site. Sources are gathered in

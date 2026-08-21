@@ -18,6 +18,7 @@ import {
 	preferredVersion,
 	renderRedirect,
 	renderSwitcher,
+	selectReleases,
 	stablePlan,
 	switcherStruct,
 } from "../assemble/assemble.mjs";
@@ -214,5 +215,121 @@ ok("renderRedirect emits a relative refresh to stable/");
 const toMain = renderRedirect("main");
 assert.match(toMain, /url=\.\/main\/index\.html/);
 ok("renderRedirect targets the fallback dir before the first release");
+
+// --- selectReleases: which releases become site dirs, and why -----------------
+// Shaped like the raw `GET /repos/{repo}/releases` payload publish.yml pipes in.
+const rel = (tag, created, { docsZip = true, size = 100 } = {}) => ({
+	tag_name: tag,
+	created_at: created,
+	// Deliberately NOT the ranking key: re-publishing an old release stamps a fresh
+	// published_at, which is why selectReleases ranks on created_at instead.
+	published_at: "2026-07-30T16:07:14Z",
+	assets: docsZip ? [{ name: "docs.zip", id: `id-${tag}`, size }] : [],
+});
+
+// Deliberately NOT in date order, to prove the cap ranks by date rather than by
+// the order the API happened to return. Every one shares a published_at, so any
+// test that passes here is ranking on created_at.
+const releases = [
+	rel("1.0", "2026-01-01T00:00:00Z"),
+	rel("3.0", "2026-03-01T00:00:00Z"),
+	rel("2.0", "2026-02-01T00:00:00Z"),
+];
+const gatheredOf = (rows) =>
+	rows.filter((r) => r.dest !== null).map((r) => r.dest);
+
+assert.deepEqual(
+	gatheredOf(selectReleases(releases, { defaultBranch: "main" })),
+	["1.0", "3.0", "2.0"],
+);
+ok("selectReleases gathers every release when max-releases is unlimited");
+
+// A row per listed release either way — the decision table must account for all.
+assert.equal(selectReleases(releases, { defaultBranch: "main" }).length, 3);
+ok("selectReleases returns one row per listed release");
+
+const capped = selectReleases(releases, {
+	defaultBranch: "main",
+	maxReleases: 2,
+});
+assert.deepEqual(gatheredOf(capped).sort(), ["2.0", "3.0"]);
+assert.match(
+	capped.find((r) => r.tag === "1.0").decision,
+	/beyond max-releases=2 \(dated 2026-01-01/,
+);
+ok(
+	"selectReleases keeps the newest max-releases by created_at, not published_at",
+);
+
+assert.deepEqual(
+	gatheredOf(
+		selectReleases(releases, { defaultBranch: "main", maxReleases: 0 }),
+	),
+	["1.0", "3.0", "2.0"],
+);
+ok("selectReleases treats max-releases 0 as unlimited");
+
+assert.deepEqual(
+	gatheredOf(
+		selectReleases(releases, { defaultBranch: "main", maxReleases: 9 }),
+	),
+	["1.0", "3.0", "2.0"],
+);
+ok("selectReleases is a no-op when there are fewer releases than the cap");
+
+// The seed release stands in for the default branch, so it is not a version and
+// must never lose its slot to the cap — even when it is the oldest release there is.
+const withSeed = selectReleases(
+	[rel("pages-default-seed", "2020-01-01T00:00:00Z"), ...releases],
+	{ defaultBranch: "main", maxReleases: 1 },
+);
+assert.deepEqual(gatheredOf(withSeed).sort(), ["3.0", "main"]);
+ok("selectReleases exempts the seed release from the cap");
+
+// Skipped releases must not consume a cap slot either.
+const withJunk = selectReleases(
+	[
+		rel("release/1.0", "2026-04-01T00:00:00Z"),
+		rel("4.0", "2026-04-02T00:00:00Z"),
+		...releases,
+	],
+	{ defaultBranch: "main", maxReleases: 2 },
+);
+assert.deepEqual(gatheredOf(withJunk).sort(), ["3.0", "4.0"]);
+ok("selectReleases does not spend a cap slot on a skipped release");
+
+const skips = selectReleases(
+	[
+		rel("release/1.0", "2026-01-01T00:00:00Z"),
+		rel("main", "2026-01-02T00:00:00Z"),
+		rel("5.0", "2026-01-03T00:00:00Z", { docsZip: false }),
+	],
+	{ defaultBranch: "main" },
+);
+assert.deepEqual(gatheredOf(skips), []);
+assert.match(skips[0].decision, /'\/' in tag/);
+assert.match(skips[1].decision, /same name as the default branch/);
+assert.match(skips[2].decision, /no docs.zip asset/);
+ok(
+	"selectReleases skips '/'-tags, default-branch-named tags and asset-less releases",
+);
+
+// The asset id rides along so publish.yml can key its download cache on it.
+assert.equal(
+	selectReleases(releases, { defaultBranch: "main" })[0].assetId,
+	"id-1.0",
+);
+ok("selectReleases carries the docs.zip asset id through for cache keying");
+
+// A release with no created_at at all must not win the cap, and must not throw.
+const undated = selectReleases(
+	[
+		{ tag_name: "9.9", assets: [{ name: "docs.zip", id: "id-9.9", size: 1 }] },
+		rel("3.0", "2026-03-01T00:00:00Z"),
+	],
+	{ defaultBranch: "main", maxReleases: 1 },
+);
+assert.deepEqual(gatheredOf(undated), ["3.0"]);
+ok("selectReleases sorts undated releases last rather than failing");
 
 console.log(`\nAll ${passed} checks passed.`);

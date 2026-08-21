@@ -44,6 +44,16 @@ on:
         required: false
         default: ""
         type: string
+      max-releases:
+        description: >-
+          Publish only the N most recent releases (by the tagged commit's date), or 0 for
+          all of them. The site is deployed as ONE Pages artifact and Pages caps that at
+          1 GB, so an old project with hundreds of released docs.zips will eventually
+          fail to deploy at all — a repo with 131 of them was already at 452 MB. Set this
+          in your publish-dispatch shim's `with:` block so it applies on every path.
+        required: false
+        default: "0"
+        type: string
       dispatch-workflow:
         description: >-
           Filename of the publish-dispatch shim in the consumer's repo, re-fired by
@@ -101,6 +111,16 @@ jobs:
       REPO: ${{ github.repository }}
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
+      # Site-size guard thresholds, both on the deployed artifact's scale. PROBE is the
+      # uncompressed size past which it is worth actually packing the tree to find out
+      # (the pack costs real seconds); WARN is the packed size that earns a warning,
+      # 700 MB against Pages' hard 1 GB. Overridable so the guard is testable and so a
+      # site with unusual compressibility can be tuned.
+      SIZE_PROBE_BYTES: "1610612736"
+      SIZE_WARN_BYTES: "734003200"
+      # DEPRECATED: the in-site durable store. Nothing writes it any more (the default
+      # branch's zip lives in the Actions cache); this is only still read as a one-shot
+      # fallback for a site last deployed by an older publish.yml.
       SOURCES_DIR: _sources
     steps:
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
@@ -155,24 +175,125 @@ jobs:
           echo "PAGES_URL=${url%/}" >> "$GITHUB_ENV"
           echo "Pages URL: ${url%/}"
 
+      # ── Which releases, and which of their zips do we already have? ─────────
+      #
+      # Selection is assemble.mjs's job (pure, unit-tested); this step only does IO.
+      # It runs BEFORE any download so the gather fetches only what will actually be
+      # published, and so the cache key describes exactly that set.
+      #
+      # Cached zips are named by ASSET ID, not by tag: an asset id identifies its bytes
+      # unambiguously, so a re-cut release can never be served from a stale cache entry.
+      - name: Select releases to publish
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_RELEASES: ${{ inputs.max-releases }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/releases" | jq -rs 'add // []' > "$RUNNER_TEMP/releases.json"
+          node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" select-releases \
+            --default-branch "$DEFAULT" --seed-tag "$SEED_TAG" \
+            --max-releases "${MAX_RELEASES:-0}" \
+            < "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/releases.tsv"
+          # Key on the exact set of asset ids we intend to publish, so any change to
+          # that set misses and re-saves. restore-keys then falls back to the previous
+          # set, which shares nearly every zip — only the new release is downloaded.
+          digest=$(awk -F'\t' '$2 != "-" {print $5}' "$RUNNER_TEMP/releases.tsv" \
+            | sort | sha256sum | cut -c1-32)
+          echo "cache-key=mvs-relzips-v1-$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached release zips
+        id: relcache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/relcache
+          key: ${{ steps.releases.outputs.cache-key }}
+          restore-keys: mvs-relzips-v1-
+
       # Releases are permanent sources; the seed release (if present) stands in for the
-      # default branch until _sources/ is established — store it as $DEFAULT.zip so the
-      # priority-overwrite chain below can supersede it with a fresher source.
+      # default branch until the durable copy is established — store it as $DEFAULT.zip
+      # so the priority-overwrite chain below can supersede it with a fresher source.
+      #
+      # Prints a decision for every release the API listed, so a version missing from
+      # the site can be explained from this log alone. Downloads run in parallel: a repo
+      # with a hundred releases spent minutes here doing them one at a time.
       - name: Gather release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tags=$(gh api --paginate "repos/$REPO/releases" \
-            -q '.[] | select(any(.assets[]; .name=="docs.zip")) | .tag_name')
-          for tag in $tags; do
-            case "$tag" in */*) continue ;; esac
-            [ "$tag" = "$DEFAULT" ] && continue
-            [ "$tag" = "$SEED_TAG" ] && dest="$DEFAULT" || dest="$tag"
-            gh release download "$tag" --repo "$REPO" -p docs.zip \
-              -O "$RUNNER_TEMP/gather/$dest.zip" \
-              || echo "::warning::release $tag download failed — skipping"
+          relcache="$RUNNER_TEMP/relcache"; mkdir -p "$relcache"
+          todo="$RUNNER_TEMP/relcache-todo"; : > "$todo"
+          failed="$RUNNER_TEMP/relcache-failed"; mkdir -p "$failed"
+
+          # Pass 1 — account for every release, and queue the cache misses.
+          printf '%-28s %-21s %-9s %s\n' TAG CREATED SIZE DECISION
+          while IFS=$'\t' read -r tag dest created size assetid decision; do
+            [ -n "$tag" ] || continue
+            if [ "$dest" != "-" ]; then
+              if [ -s "$relcache/$assetid.zip" ]; then
+                decision="$decision (cache hit)"
+              else
+                # Space-separated is safe: a git refname can never contain a space.
+                echo "$tag $assetid" >> "$todo"
+                decision="$decision (downloading)"
+              fi
+            fi
+            printf '%-28s %-21s %-9s %s\n' "$tag" "$created" "$size" "$decision"
+          # NB tab is IFS whitespace, so `read` COLLAPSES consecutive tabs — an empty
+          # field would shift every column after it. assemble.mjs emits "-", never "".
+          done < "$RUNNER_TEMP/releases.tsv"
+
+          # Pass 2 — fetch the misses in parallel. Each worker is independent and
+          # records its own failure, so one bad asset cannot abort the rest.
+          n=$(grep -c . "$todo" || true)
+          echo "release zips: $(( $(awk -F'\t' '$2 != "-"' "$RUNNER_TEMP/releases.tsv" | wc -l) - n )) cached, $n to download"
+          if [ "$n" -gt 0 ]; then
+            export REPO relcache failed
+            # shellcheck disable=SC2016
+            xargs -a "$todo" -P 8 -n 2 bash -c '
+              set -uo pipefail
+              tag="$1"; assetid="$2"
+              if ! gh release download "$tag" --repo "$REPO" -p docs.zip \
+                     -O "$relcache/$assetid.zip" 2>"$failed/$assetid.err"; then
+                rm -f "$relcache/$assetid.zip"
+                touch "$failed/$assetid"
+              fi
+            ' _
+          fi
+
+          # Pass 3 — stage into the gather dir, in the TSV's order so the log is
+          # deterministic whatever order the downloads finished in.
+          while IFS=$'\t' read -r tag dest created size assetid decision; do
+            [ "$dest" = "-" ] && continue
+            if [ -f "$failed/$assetid" ]; then
+              echo "::warning::release $tag: docs.zip download failed — skipping. $(cat "$failed/$assetid.err" 2>/dev/null | head -1)"
+            elif [ -s "$relcache/$assetid.zip" ]; then
+              cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
+            else
+              echo "::warning::release $tag: docs.zip missing after download — skipping"
+            fi
+          done < "$RUNNER_TEMP/releases.tsv"
+
+          # Prune anything no longer selected, so a capped cache stays capped.
+          keep=$(awk -F'\t' '$2 != "-" {print $5 ".zip"}' "$RUNNER_TEMP/releases.tsv" | sort -u)
+          for f in "$relcache"/*.zip; do
+            [ -f "$f" ] || continue
+            grep -qxF "$(basename "$f")" <<<"$keep" || rm -f "$f"
           done
+
+      # Save only from the default branch. A cache written on a PR ref is scoped to that
+      # PR and never reused by anything else, so saving there would just churn the 10 GB
+      # repo quota. Skipped on an exact key hit — the entry is already there and cache
+      # entries are immutable.
+      - name: Save release zips to the cache
+        if: >-
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          steps.relcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/relcache
+          key: ${{ steps.releases.outputs.cache-key }}
 
       # Branch CI artifacts overwrite the seed (higher priority). Found via the
       # artifacts API by NAME (`docs` — the contract), never by workflow filename,
@@ -185,39 +306,94 @@ jobs:
       # only when the SHA carries a preview-approved status. No
       # $ARTIFACT_VERSION_NAME skip — the current build (staged next) overwrites
       # anything gathered here with the same name.
+      #
+      # The artifact list is paginated ONCE and indexed by head SHA. It used to be
+      # re-paginated per open PR, which on a busy repo (26 open PRs, thousands of
+      # artifacts) was ~175 s of identical API calls.
       - name: Gather branch CI artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo_id=$(gh api "repos/$REPO" -q .id)
-          gather_artifact() {
-            local filter="$1" dest="$2" label="$3"
-            local id; id=$(gh api --paginate \
-              "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
-              | jq -rs "[.[].artifacts[] | select((.expired | not) and ($filter))] | sort_by(.created_at) | last | .id // empty")
-            [ -n "$id" ] || return 0
-            # The API serves the artifact as a zip-of-the-artifact (docs.zip inside).
-            local tmp; tmp=$(mktemp -d)
-            { gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" \
-                && unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" \
-                && mv "$tmp/docs.zip" "$RUNNER_TEMP/gather/$dest.zip"; } \
-              || echo "::warning::$label artifact unavailable — skipping"
-            rm -rf "$tmp"
+          arts="$RUNNER_TEMP/artifacts.json"
+          gh api --paginate "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
+            | jq -rs '[.[].artifacts[] | select(.expired | not)]' > "$arts"
+          echo "$(jq length "$arts") non-expired 'docs' artifact(s) indexed"
+
+          # Ascending by created_at so the last write per SHA is the newest artifact.
+          declare -A BY_SHA
+          while IFS=$'\t' read -r sha id created size run; do
+            [ -n "$sha" ] && BY_SHA["$sha"]="$id"$'\t'"$created"$'\t'"$size"$'\t'"$run"
+          done < <(jq -r 'sort_by(.created_at) | .[]
+            | [.workflow_run.head_sha, .id, .created_at, .size_in_bytes, .workflow_run.id] | @tsv' "$arts")
+
+          # want.tsv: dest <TAB> artifact-id <TAB> label — resolved before any download,
+          # so the downloads can all run at once.
+          want="$RUNNER_TEMP/artifact-want.tsv"; : > "$want"
+          queue() {
+            local dest="$1" sha="$2" label="$3" meta="${BY_SHA[$2]:-}"
+            if [ -z "$meta" ]; then
+              echo "  $label → no non-expired 'docs' artifact for ${sha:0:8} — skipping"
+              return 0
+            fi
+            local id created size run
+            IFS=$'\t' read -r id created size run <<<"$meta"
+            echo "  $label → artifact $id ($size B, built $created) from $GITHUB_SERVER_URL/$REPO/actions/runs/$run @ ${sha:0:8}"
+            printf '%s\t%s\t%s\n' "$dest" "$id" "$label" >> "$want"
           }
-          gather_artifact ".workflow_run.head_branch == \"$DEFAULT\" and .workflow_run.head_repository_id == $repo_id" \
-            "$DEFAULT" "default-branch CI"
+
+          echo "default branch:"
+          dsha=$(jq -r --arg b "$DEFAULT" --argjson r "$repo_id" '
+            [.[] | select(.workflow_run.head_branch == $b and .workflow_run.head_repository_id == $r)]
+            | sort_by(.created_at) | last | .workflow_run.head_sha // empty' "$arts")
+          if [ -n "$dsha" ]; then
+            queue "$DEFAULT" "$dsha" "default-branch CI ($DEFAULT)"
+          else
+            echo "  default-branch CI ($DEFAULT) → no non-expired 'docs' artifact — skipping"
+          fi
+
           prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
             --json number,headRefOid,isCrossRepository -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+          echo "open PRs: $(grep -c . <<<"$prs" || true)"
           while IFS=$'\t' read -r num sha cross; do
             [ -z "$num" ] && continue
             if [ "$cross" = "true" ]; then
               approved=$(gh api "repos/$REPO/commits/$sha/statuses" \
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
-              [ "$approved" = "true" ] || continue
+              if [ "$approved" != "true" ]; then
+                echo "  PR #$num → fork PR, head ${sha:0:8} not preview-approved — skipping"
+                continue
+              fi
             fi
-            gather_artifact ".workflow_run.head_sha == \"$sha\"" "pr-$num" "PR #$num"
+            queue "pr-$num" "$sha" "PR #$num"
           done <<< "$prs"
+
+          # The API serves an artifact as a zip-of-the-artifact, with docs.zip inside.
+          # Three failure modes are reported distinctly because they need different
+          # fixes: download failure (transient), no docs.zip inside (an artifact built
+          # by a docs.yml older than the packing contract — re-run that build), and the
+          # not-found case already handled above.
+          if [ -s "$want" ]; then
+            export REPO
+            gather_dir="$RUNNER_TEMP/gather"; export gather_dir
+            # shellcheck disable=SC2016
+            xargs -a "$want" -P 8 -d '\n' -I{} bash -c '
+              set -uo pipefail
+              IFS=$'"'"'\t'"'"' read -r dest id label <<<"{}"
+              tmp=$(mktemp -d)
+              if ! gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" 2>/dev/null; then
+                echo "::warning::$label: artifact $id download failed — skipping"
+              elif ! unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" >/dev/null 2>&1 || [ ! -f "$tmp/docs.zip" ]; then
+                # The FILE test, not unzip'"'"'s exit status: unzip exits 0 with only a
+                # "caution: filename not matched" note when the member is absent.
+                echo "::warning::$label: artifact $id contains no docs.zip — it predates the docs.zip packing contract. Re-run that build to refresh it. Skipping."
+              else
+                mv "$tmp/docs.zip" "$gather_dir/$dest.zip"
+              fi
+              rm -rf "$tmp"
+            '
+          fi
 
       # Highest priority: the current build overwrites anything gathered above.
       # Skipped on the dispatch paths (version-name is ""), which gather purely from durable sources.
@@ -237,24 +413,77 @@ jobs:
           [ -f "$src" ] || { echo "::error::in-run artifact not found at $src"; exit 1; }
           mv "$src" "$RUNNER_TEMP/gather/$ARTIFACT_VERSION_NAME.zip"
 
-      # Final fallback: if no prior step provided $DEFAULT.zip, try the durable in-site
-      # copy. Hard-fail if it isn't there — a deploy missing the default branch is a hole.
+      # The default branch's last known-good docs.zip. Releases are durable and PRs are
+      # ephemeral by design, but the DEFAULT BRANCH has no permanent source: it is
+      # gathered from its latest CI artifact, which expires, after which it would drop
+      # out and the guard below would hard-fail.
+      #
+      # This used to be solved by publishing the zip into the site itself
+      # (`_sources/<default>.zip`) — permanent, but it shipped a multi-megabyte zip to
+      # every visitor's Pages artifact forever. The Actions cache holds it instead. The
+      # trade is real and deliberate: cache entries are evicted after 7 days without a
+      # read, and by LRU past 10 GB. A repo that goes quiet for over a week AND whose
+      # main CI artifact has expired loses this rung, where `_sources/` was forever.
+      #
+      # Key is a bare prefix so it never matches exactly; restore-keys then supplies the
+      # most recent entry.
+      - name: Restore the default branch's durable docs.zip
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/defaultcache
+          key: mvs-default-v1-
+          restore-keys: mvs-default-v1-
+
+      # Fallback chain for $DEFAULT.zip: current build → release/seed → branch CI (all
+      # above) → the cache → the deprecated in-site copy. Hard-fail if none of them
+      # produced it: a deploy missing the default branch publishes a hole.
       - name: Ensure default-branch zip
+        id: ensure-default
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [ -f "$RUNNER_TEMP/gather/$DEFAULT.zip" ] && exit 0
-          if curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" \
-              -o "$RUNNER_TEMP/gather/$DEFAULT.zip" 2>/dev/null; then
-            echo "::notice::$DEFAULT restored from durable in-site copy ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip)"
+          cache="$RUNNER_TEMP/defaultcache"; mkdir -p "$cache"
+          zip="$RUNNER_TEMP/gather/$DEFAULT.zip"
+          if [ -f "$zip" ]; then
+            echo "$DEFAULT supplied by an earlier rung ($(stat -c%s "$zip") B)"
+          elif [ -s "$cache/default.zip" ]; then
+            cp "$cache/default.zip" "$zip"
+            echo "::notice::$DEFAULT restored from the Actions cache ($(stat -c%s "$zip") B) \
+          — its CI artifact has expired, so this deploy is serving the last cached build"
+          # DEPRECATED rung, kept so a site deployed by an older publish.yml still has a
+          # source on its first upgraded deploy. Nothing writes _sources/ any more, so it
+          # disappears from the site on that very deploy; this read is one-shot insurance.
+          elif curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" -o "$zip" 2>/dev/null; then
+            echo "::notice::$DEFAULT restored from the deprecated in-site copy \
+          ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip) — it will be cached from here on"
           else
-            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, or durable in-site copy — deploy aborted"
+            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, \
+          the Actions cache, or the deprecated in-site copy — deploy aborted"
             exit 1
           fi
+          # Re-save only when the bytes actually changed: cache entries are immutable, so
+          # a content-addressed key means an unchanged default branch adds no entry.
+          new=$(sha256sum "$zip" | cut -c1-32)
+          old=$(cat "$cache/default.sha" 2>/dev/null || true)
+          if [ "$new" != "$old" ]; then
+            cp "$zip" "$cache/default.zip"
+            printf '%s' "$new" > "$cache/default.sha"
+            echo "cache-key=mvs-default-v1-$new" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same rule as the release-zip cache: only the default branch writes, because a
+      # cache saved on a PR ref is scoped to that PR and no other run can read it.
+      - name: Save the default branch's durable docs.zip
+        if: >-
+          steps.ensure-default.outputs.cache-key != '' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/defaultcache
+          key: ${{ steps.ensure-default.outputs.cache-key }}
 
       # Unzip every gathered zip into SITE/<version-name>.
-      # Persist the default-branch zip into SITE/_sources/ for future recovery.
       #
       # THE ZIP-SHAPE CONTRACT: a docs.zip must unzip to exactly ONE top-level
       # directory, whose CONTENTS become site/<version-name>. The directory's NAME is
@@ -288,10 +517,34 @@ jobs:
             fi
             rm -rf "$tmp"
           done
-          dzip="$RUNNER_TEMP/gather/$DEFAULT.zip"
-          [ -d "$RUNNER_TEMP/site/$DEFAULT" ] && [ -f "$dzip" ] \
-            && { mkdir -p "$RUNNER_TEMP/site/$SOURCES_DIR"; cp "$dzip" "$RUNNER_TEMP/site/$SOURCES_DIR/$DEFAULT.zip"; } \
-            || true
+          # upload-pages-artifact tars the whole site and GitHub Pages rejects the
+          # artifact over 1 GB. That ceiling arrives silently — deploys just start
+          # failing — so warn while there is still room to act. `max-releases` is the
+          # lever: it is unlimited by default, which is safe for a young project and a
+          # slow-motion footgun for an old one.
+          #
+          # The cap is on the COMPRESSED artifact, which is nothing like the size of the
+          # tree: this repo's own site is 734 MiB on disk but packs to 223 MiB, because
+          # HTML and JS compress ~3x. Comparing `du` against 1 GB would cry wolf at a
+          # third of the real usage. So measure the tree cheaply, and only pay for an
+          # actual pack when the tree is big enough for the answer to matter.
+          #
+          # -h matches upload-pages-artifact's --dereference: the `stable/` symlink is
+          # inflated to a full copy of a release in the real artifact, so a measurement
+          # that stored it as a symlink would under-read by a whole version.
+          bytes=$(du -sb "$RUNNER_TEMP/site" | cut -f1)
+          echo "assembled site: $(numfmt --to=iec --suffix=B "$bytes") uncompressed across \
+          $(find "$RUNNER_TEMP/site" -mindepth 1 -maxdepth 1 -type d | wc -l) version dir(s)"
+          if [ "$bytes" -gt "$SIZE_PROBE_BYTES" ]; then
+            packed=$(tar -ch -C "$RUNNER_TEMP/site" . | gzip -1 -c | wc -c)
+            echo "packed artifact: ~$(numfmt --to=iec --suffix=B "$packed") (Pages rejects over 1 GB)"
+            if [ "$packed" -gt "$SIZE_WARN_BYTES" ]; then
+              echo "::warning title=Docs site approaching the Pages 1 GB limit::The \
+          deployed artifact is ~$(numfmt --to=iec --suffix=B "$packed"), against a hard \
+          1 GB cap. Set publish.yml's \`max-releases\` input (in your publish-dispatch \
+          shim) to publish only the N most recent releases."
+            fi
+          fi
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.

@@ -36,6 +36,14 @@ jobs:
     uses: ./.github/workflows/publish.yml
     with:
       version-name: ${{ inputs.version-name }}          # "" on dispatch → pure durable gather
+      # Site-size policy, so it applies on EVERY path (call and dispatch alike) — hence a
+      # literal here rather than another input threaded down from ci.yml.
+      # This repo deliberately differs from the value the tutorial ships ("20"): our own
+      # site is ~223 MB packed across 24 releases, a fifth of the Pages cap, so capping
+      # would drop old versions for no gain. The capped path is covered by the unit tests
+      # and the workflow harness rather than by our own deploys. Set a real number here
+      # once a site nears the cap — see docs/how-to/keep-the-site-small.md.
+      max-releases: "0"
       pr: ${{ inputs.pr }}                               # set (dispatch only) → pin that fork head SHA
       dispatch-workflow: publish-dispatch.yml            # the file the tag re-dispatch re-fires
       retry-until: ${{ inputs.retry-until }}              # "" on workflow_call/no-retry dispatch → no auto-retry

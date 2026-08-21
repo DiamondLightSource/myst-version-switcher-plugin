@@ -5,7 +5,13 @@
  * dir, then the extract step unzips them all into the site tree. This file is
  * the final step: given the populated site tree it orders the versions, writes
  * switcher.json + index.html, and prints the stable-alias source dir on stdout.
- * Exposed as one subcommand:
+ * Exposed as two subcommands, one at each end of the gather:
+ *
+ *   node assemble.mjs select-releases --default-branch <name> [--seed-tag <tag>]
+ *                                     [--max-releases <n>] < releases.json
+ *       → one TSV row per listed release deciding whether (and where) it lands in
+ *         the site. Runs BEFORE the gather, so publish.yml downloads only what it
+ *         will actually publish.
  *
  *   node assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
@@ -17,17 +23,29 @@
  * `generate` file writes touch IO.
  */
 import { execFileSync } from "node:child_process";
-import { readdirSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 /** The `stable/` alias directory name (a fixed convention; see docs/ explanation). */
 export const STABLE_ALIAS = "stable";
 
+/** The release asset every gathered version arrives as (the docs.yml contract). */
+export const DOCS_ZIP = "docs.zip";
+
 /**
- * The in-site durable store directory (`_sources/<default>.zip`) persisted by
- * publish.yml's extract step each deploy. Published with the site but NOT a
- * version, so version discovery skips it.
+ * The sentinel tag carrying the pre-migration default-branch docs, published by
+ * scripts/migrate.sh so a repo can cut over before `docs→main` ever builds. Not a
+ * version: it stands in for the default branch, so it is exempt from `max-releases`.
+ */
+export const SEED_TAG = "pages-default-seed";
+
+/**
+ * The DEPRECATED in-site durable store (`_sources/<default>.zip`). publish.yml used
+ * to persist the default branch's docs.zip here every deploy; it now caches it
+ * instead, so newly assembled trees never contain this directory. The exclusion
+ * stays as insurance — it costs nothing, and a stray `_sources` dir must never be
+ * mistaken for a version.
  */
 export const SOURCES_DIR = "_sources";
 
@@ -89,6 +107,95 @@ export function orderVersions(builds, tags) {
 		),
 	);
 	return versions;
+}
+
+/**
+ * Newest first. Releases with no date sort last, and ties break on tag name so
+ * the selection is deterministic (two releases can share a timestamp).
+ */
+function byDateDesc(a, b) {
+	const ta = a.date ? Date.parse(a.date) : Number.NEGATIVE_INFINITY;
+	const tb = b.date ? Date.parse(b.date) : Number.NEGATIVE_INFINITY;
+	if (ta !== tb) return tb - ta;
+	return a.tag.localeCompare(b.tag);
+}
+
+/**
+ * Decide which releases contribute a version to the site, and why.
+ *
+ * Pure: takes the raw `GET /repos/{repo}/releases` array and returns one row per
+ * release in input order, so publish.yml can print a decision table that accounts
+ * for every release it listed. `dest` is the `site/<dir>` the release's docs.zip
+ * becomes, or null when skipped.
+ *
+ * Selection is by release METADATA, newest first — never by parsing the version
+ * number. Tags are wildly inconsistent across repos and a misparse silently drops
+ * a release; the API already knows the order.
+ *
+ * The key is `created_at` (the tagged commit's date), NOT `published_at`.
+ * `published_at` records when the release record was last published, so
+ * re-publishing an old release makes it look new: blueapi has `1.3.2-a9` created
+ * 2025-10-01 but published 2026-07-30, which under `published_at` outranks the
+ * genuinely newer `1.11.3`. `created_at` is immune to that.
+ *
+ * `maxReleases` caps how many releases the site publishes. It exists because the
+ * deploy uploads the WHOLE site as one artifact and GitHub Pages caps that at 1 GB:
+ * a repo with 131 released docs.zips was at 452 MB and climbing ~5 MB per release.
+ * 0 means unlimited. The seed release is never capped — it is not a version, it
+ * stands in for the default branch.
+ *
+ * @param {object[]} releases raw release objects
+ * @param {{defaultBranch: string, seedTag?: string, maxReleases?: number}} opts
+ * @returns {{tag: string, dest: string|null, date: string|null,
+ *            assetId: number|null, size: number, decision: string}[]}
+ */
+export function selectReleases(
+	releases = [],
+	{ defaultBranch, seedTag = SEED_TAG, maxReleases = 0 } = {},
+) {
+	const cap = Number(maxReleases) > 0 ? Number(maxReleases) : 0;
+
+	const rows = releases.map((release) => {
+		const tag = release?.tag_name ?? "";
+		const asset = (release?.assets ?? []).find((a) => a?.name === DOCS_ZIP);
+		const row = {
+			tag,
+			dest: null,
+			date: release?.created_at ?? release?.published_at ?? null,
+			assetId: asset?.id ?? null,
+			size: asset?.size ?? 0,
+			decision: "",
+		};
+		// Order matters: report the most fundamental reason a release is unusable.
+		// A `/`-tag is never built (the `tags: ['*']` trigger excludes it), so it has
+		// no BASE_URL-correct build and would nest a dir inside the site tree.
+		if (!tag) row.decision = "skip: release has no tag name";
+		else if (tag.includes("/")) row.decision = "skip: '/' in tag (never built)";
+		else if (tag === defaultBranch)
+			row.decision = "skip: same name as the default branch";
+		else if (!asset) row.decision = `skip: no ${DOCS_ZIP} asset`;
+		else if (tag === seedTag) {
+			row.dest = defaultBranch;
+			row.decision = `seed release → ${defaultBranch}`;
+		} else {
+			row.dest = tag;
+			row.decision = "gather";
+		}
+		return row;
+	});
+
+	if (cap > 0) {
+		// Rank only the rows that would otherwise be gathered, so a skipped release
+		// never consumes a slot. Everything past the cap is demoted in place.
+		const ranked = rows
+			.filter((row) => row.dest !== null && row.tag !== seedTag)
+			.sort(byDateDesc);
+		for (const row of ranked.slice(cap)) {
+			row.dest = null;
+			row.decision = `skip: beyond max-releases=${cap} (dated ${row.date ?? "unknown"})`;
+		}
+	}
+	return rows;
 }
 
 /**
@@ -204,6 +311,81 @@ function csv(value) {
 }
 
 /**
+ * A TSV field that is never empty. `read` treats tab as IFS whitespace and
+ * COLLAPSES runs of it, so one empty field would shift every column after it in
+ * the consuming bash loop. "-" is the empty marker on the wire.
+ */
+function field(value) {
+	const s = value === null || value === undefined ? "" : String(value);
+	return s === "" ? "-" : s;
+}
+
+/**
+ * `select-releases --default-branch <name> [--seed-tag <tag>] [--max-releases <n>]`
+ * — read the releases JSON (as `gh api --paginate .../releases | jq -rs 'add'`
+ * gives it) on stdin, write one TSV row per release on stdout:
+ *
+ *     tag <TAB> dest <TAB> date <TAB> size <TAB> assetId <TAB> decision
+ *
+ * `dest` is "-" for a release that contributes nothing. Every listed release gets
+ * a row, so publish.yml's decision table accounts for all of them.
+ */
+function cmdSelectReleases(rest) {
+	const { values } = parseArgs({
+		args: rest,
+		options: {
+			"default-branch": { type: "string" },
+			"seed-tag": { type: "string" },
+			"max-releases": { type: "string" },
+		},
+	});
+	const defaultBranch = values["default-branch"];
+	if (!defaultBranch) {
+		throw new Error(
+			"usage: assemble.mjs select-releases --default-branch <name> [--seed-tag <tag>] [--max-releases <n>] < releases.json",
+		);
+	}
+	const raw = readFileSync(0, "utf8").trim();
+	const releases = raw ? JSON.parse(raw) : [];
+	const cap = Number(values["max-releases"] ?? 0) || 0;
+
+	const rows = selectReleases(releases, {
+		defaultBranch,
+		seedTag: values["seed-tag"] || SEED_TAG,
+		maxReleases: cap,
+	});
+	const gathered = rows.filter((row) => row.dest !== null);
+
+	console.error(
+		`${rows.length} release(s) listed, ${gathered.length} selected` +
+			(cap > 0 ? ` (max-releases=${cap})` : " (max-releases unlimited)"),
+	);
+	if (cap > 0 && rows.length - gathered.length > 0) {
+		const dropped = rows.filter((row) =>
+			row.decision.startsWith("skip: beyond"),
+		);
+		if (dropped.length > 0) {
+			console.error(
+				`${dropped.length} release(s) dropped by the cap — oldest kept: ` +
+					`${gathered.map((r) => r.tag).slice(-1)[0] ?? "(none)"}`,
+			);
+		}
+	}
+
+	for (const row of rows) {
+		const cells = [
+			field(row.tag),
+			field(row.dest),
+			field(row.date),
+			field(row.size),
+			field(row.assetId),
+			field(row.decision),
+		];
+		process.stdout.write(`${cells.join("\t")}\n`);
+	}
+}
+
+/**
  * `generate --site-dir --base-url [--required <csv>]` — write switcher.json +
  * index.html and emit the stable-alias source. Runs after all gathering, so it
  * also hard-fails (exit 1) if a `--required` branch is absent from the site.
@@ -273,8 +455,10 @@ export function main(argv = process.argv.slice(2)) {
 	switch (cmd) {
 		case "generate":
 			return cmdGenerate(rest);
+		case "select-releases":
+			return cmdSelectReleases(rest);
 		default:
-			throw new Error("usage: assemble.mjs generate ...");
+			throw new Error("usage: assemble.mjs generate|select-releases ...");
 	}
 }
 

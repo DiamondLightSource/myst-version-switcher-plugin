@@ -27,6 +27,8 @@ project:
     - file: how-to.md
       children:
         - file: how-to/migrate-from-gh-pages.md
+        - file: how-to/choose-publish-events.md
+        - file: how-to/keep-the-site-small.md
         - file: how-to/use-with-sphinx.md
         - file: how-to/contribute.md
     - file: explanations.md

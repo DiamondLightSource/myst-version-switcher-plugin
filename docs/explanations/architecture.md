@@ -16,15 +16,49 @@ kinds and their durability are in the
 
 Releases are permanent, so old versions never vanish. PR previews come from CI
 artifacts and silently drop if the artifact expires and nothing rebuilds — fine for
-*optional* preview docs. The **default branch** used to be the one fragile required
-version (artifact-only, yet guarded — `assemble` hard-fails rather than publish a
-site missing it). It is now self-durable: once it has built docs at least once, each
-deploy persists its `docs.zip` into the published site at `_sources/<branch>.zip`, and
-a deploy whose fresh artifact has expired restores the branch from that in-site copy —
-removing the artifact-expiry hole. (A gh-pages migration still keeps its old `/main/`
-content only until the default branch itself builds docs under the new pipeline; from
-that point the in-site copy is its durable source — see
-[migrate-from-gh-pages](../how-to/migrate-from-gh-pages.md).)
+*optional* preview docs. The **default branch** is the one fragile *required* version
+(artifact-only, yet guarded — `assemble` hard-fails rather than publish a site missing
+it), so each deploy keeps a copy of its `docs.zip` in the **Actions cache**; a deploy
+whose fresh artifact has expired restores the branch from there.
+
+That copy used to be published into the site itself, at `_sources/<branch>.zip`. That
+was permanent, which the cache is not — but it also shipped a multi-megabyte zip inside
+every Pages artifact, forever, on a site already pressing against a hard 1 GB ceiling
+(see [below](#why-the-site-has-a-size-limit)). The cache is evicted after 7 days without
+a read, and by LRU past 10 GB, so a repo that goes quiet for over a week *and* whose
+default-branch CI artifact has also expired loses the rung and the deploy hard-fails —
+loudly, and fixed by one push. That is the accepted trade. (A gh-pages migration keeps
+its old `/main/` content only until the default branch builds docs under the new
+pipeline — see [migrate-from-gh-pages](../how-to/migrate-from-gh-pages.md).)
+
+(why-the-site-has-a-size-limit)=
+### Why the site has a size limit
+
+Reconstructing everything has one cost that grows without bound: `upload-pages-artifact`
+tars the **whole** site into a single artifact, and GitHub Pages rejects that artifact
+over **1 GB**. A long-lived project reaches it. blueapi, at 131 released `docs.zip`s, was
+already at 452 MB and adding ~5 MB per release — a few years from deploys simply failing,
+with nothing on the way to say so.
+
+Two things follow.
+
+`publish.yml` takes a **`max-releases`** input: publish only the N most recent releases,
+ranked by the tagged commit's date. It defaults to `0` (unlimited), so upgrading never
+silently deletes versions from an existing site — but the paved path in the
+[tutorial](../tutorials/adding-to-a-fresh-repo.md) sets it, and a deploy whose *packed*
+artifact passes 700 MB says so in a warning. Packed, not the tree on disk: HTML and JS
+compress around 3×, so measuring the directory would cry wolf at a third of real usage. Older releases keep their `docs.zip` assets and
+come back the moment you raise the cap. See
+[keep-the-site-small](../how-to/keep-the-site-small.md).
+
+Ranking is on the release's `created_at`, never on parsing the version number: tags are
+too inconsistent across repos for a parser to be safe, and `published_at` lies whenever an
+old release is re-published (blueapi has a `1.3.2-a9` created in 2025 and published in
+2026, which under `published_at` outranks the genuinely newer `1.11.3`).
+
+The same pressure is why the default branch's durable copy moved out of the site and into
+the Actions cache, and why the gather caches release assets rather than re-downloading
+~450 MB of immutable zips on every event.
 
 ### Why this replaced the `gh-pages` + `keep_files` model
 
@@ -58,9 +92,8 @@ ordering:
   supersedes it ([community
   discussion #158055](https://github.com/orgs/community/discussions/158055)) — so the
   source can be flipped up front, with no downtime and no blank window.
-- **A publish replaces the *whole* site, so the default branch must be durable before
-  any publish runs.** A publish that runs before `_sources/<default>.zip` exists would
-  drop `/<default>/`. The migration therefore *seeds* the default branch (a published
+- **A publish replaces the *whole* site, so the default branch must have a source before
+  any publish runs.** A publish with nothing to stage at `/<default>/` would drop it. The migration therefore *seeds* the default branch (a published
   `pages-default-seed` release captured from the old gh-pages tree) before the first
   publish — which is the pipeline PR's own CI. This makes that first publish safe even
   when the repo already serves Pages from Actions (where a publish deploys live
@@ -241,9 +274,9 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
   asset packed by another pipeline (python-copier-template's `_release.yml` roots
   its zip at the tag name, not `html/`) still deploys. A zip with *no* single root
   directory is malformed → warning, skipped.
-- **Default branch missing**: if `main` has no recent successful CI artifact, no durable
-  `_sources/main.zip` in the live site, and no migration seed release, the deploy
-  **hard-fails** rather than publish a site missing it.
+- **Default branch missing**: if `main` has no recent successful CI artifact, no cached
+  copy, and no migration seed release, the deploy **hard-fails** rather than publish a
+  site missing it.
 - **PR build not yet green / SHA moved:** an open PR whose current head SHA has no
   successful CI run is skipped; its preview appears once the build passes.
 - **Merged/closed PR:** drops from the gather (open-PRs only) on the next deploy.

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Mock gh for the publish.yml gather harness. Records every call.
+set -uo pipefail
+echo "gh $*" >> "$MOCK_CALLS"
+case "$*" in
+  "api --paginate repos/$REPO/releases")   cat "$MOCK_DATA/releases.json" ;;
+  "api repos/$REPO -q .id")                echo 12345 ;;
+  "api --paginate repos/$REPO/actions/artifacts?name=docs&per_page=100")
+                                           cat "$MOCK_DATA/artifacts.json" ;;
+  "pr list --repo $REPO --state open --limit 200 --json number,headRefOid,isCrossRepository -q .[] | [.number, .headRefOid, .isCrossRepository] | @tsv")
+                                           cat "$MOCK_DATA/prs.tsv" ;;
+esac
+case "$1$2" in
+  releasedownload)
+    tag="$3"; out=""
+    while [ $# -gt 0 ]; do [ "$1" = "-O" ] && out="$2"; shift; done
+    if grep -qxF "$tag" "$MOCK_DATA/download-fails" 2>/dev/null; then
+      echo "HTTP 404: not found" >&2; exit 1
+    fi
+    "$MOCK_DATA/mkzip.sh" "$out" "release-$tag"; exit 0 ;;
+esac
+if [[ "$*" == api*actions/artifacts/*/zip ]]; then
+  id=$(sed 's#.*artifacts/\([0-9]*\)/zip.*#\1#' <<<"$*")
+  if grep -qxF "$id" "$MOCK_DATA/artifact-fails" 2>/dev/null; then exit 1; fi
+  if grep -qxF "$id" "$MOCK_DATA/artifact-nodocs" 2>/dev/null; then
+    "$MOCK_DATA/mkartifact.sh" /dev/stdout "$id" nodocs; exit 0
+  fi
+  "$MOCK_DATA/mkartifact.sh" /dev/stdout "$id" ok; exit 0
+fi
+if [[ "$*" == api*commits/*/statuses* ]]; then
+  sha=$(sed 's#.*commits/\([^/]*\)/statuses.*#\1#' <<<"$*")
+  grep -qxF "$sha" "$MOCK_DATA/approved" 2>/dev/null && echo true || echo false
+  exit 0
+fi
+exit 0
