@@ -61,6 +61,9 @@ def setup(tmp, releases, artifacts, prs, *, approved=(), dlfail=(), artfail=(), 
         "GITHUB_OUTPUT": os.path.join(tmp, "out.txt"),
         "GITHUB_SERVER_URL": "https://github.com",
         "REPO": "acme/widget", "DEFAULT": "main",
+        # Job-level env in the real workflow: the branch that was actually BUILT, which
+        # under workflow_run is NOT github.ref. Tests override it to exercise the others.
+        "BUILT_BRANCH": "main",
         "SEED_TAG": "pages-default-seed",
     })
     open(env["GITHUB_OUTPUT"], "w").close()

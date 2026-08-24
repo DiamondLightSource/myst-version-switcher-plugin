@@ -104,15 +104,19 @@ jobs:
       # drops the preview until re-approved. Gated on `pr` alone, which the caller
       # threads in from its workflow_dispatch input.
       - name: Approve fork PR head SHA
+        id: approve
         if: inputs.pr != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
-          sha=$(gh pr view "${{ inputs.pr }}" --repo "$REPO" --json headRefOid -q .headRefOid)
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
           gh api --method POST "repos/$REPO/statuses/$sha" \
             -f state=success -f context=preview-approved \
             -f description="Fork docs preview approved"
+          # Reused below to link the published preview back to this same commit.
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       # BUILT_BRANCH vs github.ref is the thing a post-mortem here always trips over, so
       # state both up front rather than leaving someone to infer it from a cache miss.
@@ -504,3 +508,47 @@ jobs:
             fi
             sleep 5
           done
+
+      # Link the published docs from the commit that produced them, so a PR carries a
+      # preview URL without carrying the deploy's failure modes.
+      #
+      # Deliberately success()-only and state=success only. Publishing moved off the PR's
+      # critical path precisely because a wedged Pages origin is not the author's to fix;
+      # a status that could go red would put that right back. A missing status means "not
+      # published (yet)", which is the honest signal and costs the author nothing.
+      #
+      # Fails closed: if the version dir is not in the tree we just deployed — a fork PR
+      # whose number we cannot resolve, a payload without `pull_requests` — say so and
+      # post nothing, rather than publish a link that 404s.
+      - name: Link the published docs from the triggering commit
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_INPUT: ${{ inputs.pr }}
+          APPROVED_SHA: ${{ steps.approve.outputs.sha }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPROVED_SHA:-}" ]; then
+            # Fork preview: the maintainer named the PR, and we pinned its head SHA.
+            sha="$APPROVED_SHA"; dest="pr-$PR_INPUT"
+          elif [ "${TRIGGER_EVENT:-}" = pull_request ] && [ -n "${TRIGGER_PR:-}" ]; then
+            sha="$TRIGGER_SHA"; dest="pr-$TRIGGER_PR"
+          elif [ -n "${TRIGGER_SHA:-}" ]; then
+            # A branch or tag build: BUILT_BRANCH is the version name it was served at.
+            sha="$TRIGGER_SHA"; dest="$BUILT_BRANCH"
+          else
+            echo "manual re-deploy — no triggering commit to link"; exit 0
+          fi
+          if [ ! -d "$RUNNER_TEMP/site/$dest" ]; then
+            echo "::notice::no $dest/ in the deployed site — not linking ${sha:0:8}"
+            exit 0
+          fi
+          url="${PAGE_URL%/}/$dest/"
+          gh api --method POST "repos/$REPO/statuses/$sha" \
+            -f state=success -f context=docs-preview \
+            -f target_url="$url" -f description="Docs published at $dest/"
+          echo "linked ${sha:0:8} → $url"

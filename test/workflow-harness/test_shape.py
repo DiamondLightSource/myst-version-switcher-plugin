@@ -59,6 +59,18 @@ for s in saves:
     check(f"{s['name']!r} gates on the branch that was built",
           "workflow_run.head_branch" in cond, cond)
 
+# The PR-visible status must never be able to go red: publishing lives off the PR's
+# critical path because a wedged Pages origin is not the author's to fix, and a status
+# that could fail would hand that back to them.
+link = next((s for s in steps if s.get("name", "").startswith("Link the published")), None)
+check("there is a step linking the docs back to the triggering commit", link is not None)
+if link:
+    check("it only runs when the deploy succeeded", "success()" in str(link.get("if", "")),
+          link.get("if"))
+    check("it can only ever post a success state",
+          "state=success" in link["run"] and "state=failure" not in link["run"]
+          and "state=error" not in link["run"])
+
 check("deploy cancels superseded runs",
       engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is True,
       engine["jobs"]["deploy"]["concurrency"])

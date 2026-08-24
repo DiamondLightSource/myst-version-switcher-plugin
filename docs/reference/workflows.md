@@ -70,6 +70,20 @@ Both caps exist because the site deploys as **one** Pages artifact against a har
 in `publish.yml`'s `with:` block so they apply on every path. See
 [keep-the-site-small](../how-to/keep-the-site-small.md).
 
+## What it reports back
+
+On a successful deploy the engine posts a `docs-preview` commit status on the commit that
+triggered it, with the published URL as its target — so a PR carries a link to its own
+preview, and a default-branch or tag build links the version it produced.
+
+It is posted **only on success, and only ever as a success**. Publishing runs off the PR's
+critical path because a wedged Pages origin is not the author's to fix; a status that could
+turn red would hand that straight back to them. A missing status means "not published
+(yet)". If the version directory is not in the deployed tree — a fork PR whose number
+cannot be resolved, say — nothing is posted rather than a link that 404s.
+
+Requires `statuses: write`, which the caller already grants for fork-preview approval.
+
 ## What the engine gathers
 
 Every deploy rebuilds the complete tree from authoritative inputs:

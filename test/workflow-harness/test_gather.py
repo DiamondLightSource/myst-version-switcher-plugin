@@ -306,5 +306,58 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a two-root zip warns", "exactly one top-level directory" in r.stdout, r.stdout)
     check("the assembled size is reported", "assembled site:" in r.stdout, r.stdout)
 
+print("\n-- linking the published docs back to the triggering commit --")
+def link(tmp, *, dirs=(), built_branch="main", **exprs):
+    env, rt, data = setup(tmp, [], [], [])
+    env["BUILT_BRANCH"] = built_branch
+    for d in dirs:
+        os.makedirs(f"{rt}/site/{d}", exist_ok=True)
+    ex = {"github.token": "t", "runner.temp": rt,
+          "steps.deployment.outputs.page_url": "https://acme.github.io/widget/"}
+    ex.update(exprs)
+    r = run("Link the published docs from the triggering commit", env, ex)
+    return r, open(env["MOCK_CALLS"]).read()
+
+with tempfile.TemporaryDirectory() as tmp:
+    r, calls = link(tmp, dirs=["pr-7"],
+                    **{"github.event.workflow_run.event": "pull_request",
+                       "github.event.workflow_run.head_sha": "deadbeef",
+                       "github.event.workflow_run.pull_requests[0].number": "7"})
+    check("a PR build is linked at its own version dir",
+          "statuses/deadbeef" in calls and "https://acme.github.io/widget/pr-7/" in calls,
+          calls)
+    check("the status is a success, never a failure",
+          "state=success" in calls and "state=failure" not in calls, calls)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A payload with no pull_requests falls through to the branch name, which is not a
+    # version dir — post nothing rather than a link that 404s.
+    r, calls = link(tmp, dirs=["pr-7"], built_branch="feature/x",
+                    **{"github.event.workflow_run.event": "pull_request",
+                       "github.event.workflow_run.head_sha": "deadbeef"})
+    check("an unresolvable PR posts no status at all",
+          r.returncode == 0 and "statuses/" not in calls, calls + log(r))
+    check("and says why", "not linking" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    r, calls = link(tmp, dirs=["main"],
+                    **{"github.event.workflow_run.event": "push",
+                       "github.event.workflow_run.head_sha": "cafe1234"})
+    check("a default-branch build is linked too",
+          "statuses/cafe1234" in calls and "widget/main/" in calls, calls)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A manual re-deploy has no triggering commit to hang a status on.
+    r, calls = link(tmp, dirs=["main"])
+    check("a manual re-deploy posts nothing and still succeeds",
+          r.returncode == 0 and "statuses/" not in calls, calls + log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Fork preview: the maintainer named the PR, so inputs.pr and the pinned SHA win.
+    r, calls = link(tmp, dirs=["pr-42"],
+                    **{"inputs.pr": "42", "steps.approve.outputs.sha": "f0rk5haa"})
+    check("a dispatched fork preview is linked at the approved SHA",
+          "statuses/f0rk5haa" in calls and "widget/pr-42/" in calls, calls)
+
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'all harness checks passed'}")
 sys.exit(1 if fails else 0)

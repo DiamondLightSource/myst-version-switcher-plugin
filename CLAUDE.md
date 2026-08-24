@@ -181,6 +181,15 @@ the repo's `default_branch`). Nothing is threaded between them — `docs.yml` ha
 `version-name` output any more (it existed only for the deleted injection step). The two
 rules must change together.
 
+### The PR gets a link, never a red check
+A successful deploy posts a `docs-preview` commit status on
+`workflow_run.head_sha` (or, for a dispatched fork preview, the SHA the Approve step
+pinned) with the published URL as `target_url`. `if: success()` plus `state=success` only:
+the whole reason publishing moved off the PR's critical path is that a wedged Pages origin
+is not the author's to fix, so a status that could go red would undo it. The step also
+fails CLOSED — no `site/<dest>` dir, no status — rather than posting a 404 link.
+`test_shape.py` asserts both properties.
+
 ### THE workflow_run TRAP: `github.ref` is always the default branch
 In a `workflow_run` run `GITHUB_SHA` and `github.ref` are **always the default branch's
 HEAD**, never the built commit (a PR-triggered deploy reports `refs/heads/main`). Anything
