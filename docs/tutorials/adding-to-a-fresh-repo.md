@@ -135,10 +135,14 @@ jobs:
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@__LATEST_TAG__
     with:
       pr: ${{ inputs.pr }}
-      # Publish only the N most recent releases; 0 = all. A LITERAL, so it holds on every
-      # path — the site deploys as one Pages artifact against a hard 1 GB cap. See
-      # docs/how-to/keep-the-site-small.md.
-      max-releases: "20"
+      # The whole site deploys as ONE Pages artifact, and Pages rejects it over 1 GB.
+      # Every release and every open PR is a full copy of the docs, so these cap what
+      # gets published (0 = no limit). LITERALS, so the policy holds on every path into
+      # the engine — including a manual dispatch. If a deploy ever warns that the
+      # uploaded artifact exceeds 1 GB, lower these and re-run it: nothing is deleted,
+      # and raising them again brings the old versions back.
+      max-releases: "30"
+      max-prs: "20"
     permissions:
       contents: read
       actions: read

@@ -9,9 +9,9 @@ jobs:
       - name: Unit tests (widget logic + make-switcher parity)
         run: npm test
 
-      # publish.yml's gather steps are the most intricate code in the repo and used to
-      # be verifiable only by merging and watching a real deploy. The harness loads them
-      # out of the YAML and runs them against a mock gh, so they cannot drift.
+      # publish.yml's gather steps are the most intricate code in the repo, and a real
+      # deploy is the only other way to exercise them. The harness loads them out of the
+      # YAML and runs them against a mock gh, so the tests cannot drift from the workflow.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.2.0   # full version: setup-uv uses immutable releases
         with:

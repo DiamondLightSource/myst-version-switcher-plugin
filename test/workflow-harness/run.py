@@ -1,31 +1,36 @@
 """
-Harness for the bash inside publish-gh-pages.yml's `deploy` job.
+Harness for the bash inside the publish workflows.
 
-The gather steps are the workflow's most intricate logic — release selection,
-an asset cache, a SHA-indexed artifact lookup, parallel downloads, and four
-distinct failure modes — and they used to be testable only by merging and
-watching a real deploy. This loads the steps straight out of the YAML (so the
-tests cannot drift from the workflow), substitutes the ${{ }} expressions, and
-runs them against a mock `gh` and synthetic release/artifact payloads.
+The gather steps are the most intricate logic in the repo — release selection, an asset
+cache, a SHA-indexed artifact lookup, parallel downloads, and several distinct failure
+modes — and a real deploy is the only other way to exercise them. This loads the steps
+straight out of the YAML (so the tests cannot drift from the workflow), substitutes the
+${{ }} expressions, and runs them against a mock `gh` and synthetic payloads.
 
 Run with `npm run test:workflows`.
 """
 import yaml, re, subprocess, os, sys, json, shutil, pathlib
 H = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(os.path.dirname(H))
-d = yaml.safe_load(open(f"{REPO_DIR}/.github/workflows/publish-gh-pages.yml"))
-steps = {s.get("name"): s for s in d["jobs"]["deploy"]["steps"] if s.get("run")}
+WF = f"{REPO_DIR}/.github/workflows"
 
-WANT = ["Select releases to publish", "Gather release artifacts", "Gather branch CI artifacts"]
+EXPR = re.compile(r"\$\{\{\s*([^}]*?)\s*\}\}")
 
-def run(step_name, env, exprs):
-    script = steps[step_name]["run"]
-    script = re.sub(r"\$\{\{\s*([^}]*?)\s*\}\}", lambda m: exprs.get(m.group(1), ""), script)
+def steps_of(workflow, job):
+    """Every `run:` step of one job, by name."""
+    d = yaml.safe_load(open(f"{WF}/{workflow}"))
+    return {s.get("name"): s for s in d["jobs"][job]["steps"] if s.get("run")}
+
+steps = steps_of("publish-gh-pages.yml", "deploy")
+
+def run(step_name, env, exprs, *, from_steps=None):
+    step = (from_steps or steps)[step_name]
+    sub = lambda text: EXPR.sub(lambda m: exprs.get(m.group(1), ""), text)
     # step-level env: from the step's own `env:` block, after expression substitution
     senv = dict(env)
-    for k, v in (steps[step_name].get("env") or {}).items():
-        senv[k] = re.sub(r"\$\{\{\s*([^}]*?)\s*\}\}", lambda m: exprs.get(m.group(1), ""), str(v))
-    p = subprocess.run(["bash", "-c", script], env=senv, capture_output=True, text=True)
+    for k, v in (step.get("env") or {}).items():
+        senv[k] = sub(str(v))
+    p = subprocess.run(["bash", "-c", sub(step["run"])], env=senv, capture_output=True, text=True)
     return p
 
 def setup(tmp, releases, artifacts, prs, *, approved=(), dlfail=(), artfail=(), artnodocs=()):
@@ -56,10 +61,10 @@ def setup(tmp, releases, artifacts, prs, *, approved=(), dlfail=(), artfail=(), 
         "GITHUB_OUTPUT": os.path.join(tmp, "out.txt"),
         "GITHUB_SERVER_URL": "https://github.com",
         "REPO": "acme/widget", "DEFAULT": "main",
-        "SEED_TAG": "pages-default-seed", "SOURCES_DIR": "_sources",
-        # Real defaults are 1.5 GiB / 700 MB; a test fixture that size is impractical,
-        # so the guard reads them from env and the size tests dial them down.
-        "SIZE_PROBE_BYTES": "1610612736", "SIZE_WARN_BYTES": "734003200",
+        # Job-level env in the real workflow: the branch that was actually BUILT, which
+        # under workflow_run is NOT github.ref. Tests override it to exercise the others.
+        "BUILT_BRANCH": "main",
+        "SEED_TAG": "pages-default-seed",
     })
     open(env["GITHUB_OUTPUT"], "w").close()
     open(env["MOCK_CALLS"], "w").close()

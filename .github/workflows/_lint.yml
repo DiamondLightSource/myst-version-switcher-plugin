@@ -14,10 +14,8 @@ jobs:
         run: npx prek run --all-files --show-diff-on-failure
 
       # Workflow EXPRESSIONS are validated only by GitHub, and a bad one rejects the
-      # whole workflow before any job starts — no logs, no annotations, no failing step.
-      # That is how `|| "manual dispatch"` (expressions take single-quoted literals only)
-      # took the site's deploy down after it had passed YAML parsing, `bash -n`, and the
-      # workflow harness. actionlint catches exactly that class.
+      # whole workflow before any job starts — no logs, no annotations, no failing step,
+      # so nothing local catches it. actionlint does.
       #
       # Two errors are suppressed: actionlint's `job` context schema is stale and does not
       # know `job.workflow_repository` / `job.workflow_sha`, both of which are real and

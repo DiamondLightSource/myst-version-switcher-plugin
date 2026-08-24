@@ -281,11 +281,9 @@ verify() {
 #      repo — i.e. its CI really produces docs.zip now.
 #
 # (1) alone is not enough: it is still satisfied while /<default>/ is coming from the
-# migration seed, which is exactly the state where gh-pages is still the only real
-# copy. This guard used to probe the in-site `_sources/<default>.zip` instead; that
-# file is no longer published (the default branch's durable copy lives in the Actions
-# cache, which has no public URL to probe and is evictable), so the guard now waits for
-# the stronger and more honest condition it always should have used.
+# migration seed, which is exactly the state where gh-pages is still the only real copy.
+# (2) is what rules that out. The default branch's durable copy lives in the Actions
+# cache, which has no public URL to probe, so the artifact is the thing to check.
 guard_default_durable() {
   local default url code repo_id arts deadline
   default=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)

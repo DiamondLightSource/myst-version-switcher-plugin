@@ -1,24 +1,15 @@
 name: Publish
 
 # The one file each consuming repo carries, and the single place they pin <tag>. It does
-# nothing but call the engine (publish-gh-pages.yml) when CI finishes.
-#
-# This repo's copy is IDENTICAL to a consumer's but for the `uses:` path — theirs pins
+# nothing but call the engine (publish-gh-pages.yml) when CI finishes. This repo's copy is
+# IDENTICAL to a consumer's but for the `uses:` path — theirs pins
 # DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>,
 # this one uses the local file so the working tree is what gets tested.
 #
-# WHY workflow_run rather than a job in ci.yml. Publishing is O(the whole site) — it
-# reconstructs every version on every run — so nesting it in CI put a constant, sizeable
-# cost inside every PR's critical path, which is exactly why the first consumer switched
-# PR previews off a day after adopting. On workflow_run it runs after CI, on its own time,
-# and a failed deploy no longer shows up as a red check against an author who has no
-# control over the Pages infrastructure.
-#
-# It also DELETED machinery rather than adding any: because workflow_run fires once the
-# triggering run has COMPLETED, that run's `docs` artifact is discoverable by the ordinary
-# gather, so there is no in-run artifact to inject; and because a tag's deploy re-serves
-# on this event (see the engine's header), there is no trampoline and so no need for a
-# separately dispatchable shim.
+# Publishing lives here rather than as a job in ci.yml because it is O(the whole site) and
+# independent of the change, so nesting it put a large constant on every PR's critical
+# path; and because a wedged Pages origin is not the PR author's to fix, so its red check
+# was noise on their PR.
 on:
   # `workflows:` matches the entry workflow by its `name:`, NOT its filename — if you
   # rename your CI workflow, change it here too or publishing silently stops.
@@ -51,7 +42,7 @@ jobs:
     #   head SHA — so a later push to the PR drops the preview until re-approved.
     #
     # A manual dispatch has no `workflow_run` payload, so both terms are empty and the
-    # first clause carries it.
+    # first clause carries it. Removing either guard fails OPEN.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -60,15 +51,13 @@ jobs:
     with:
       # Set (dispatch only) → approve and preview that fork PR's head SHA.
       pr: ${{ inputs.pr }}
-      # Publish only the N most recent releases; 0 = all of them. A literal, because this
-      # is site-size policy and must hold on every path. The site deploys as ONE Pages
-      # artifact against a hard 1 GB cap — see docs/how-to/keep-the-site-small.md.
-      #
-      # This repo deliberately differs from the "20" the tutorial ships: our own site is
-      # ~223 MB packed across 24 releases, a fifth of the cap, so capping would drop old
-      # versions for no gain. The capped path is covered by the unit tests and the
-      # workflow harness instead.
-      max-releases: "0"
+      # The site deploys as ONE Pages artifact against a hard 1 GB cap, and every release
+      # and open PR is a full copy of the docs. These cap what gets published; 0 = no
+      # limit. Both are LITERALS because this is site-size policy and must hold on every
+      # path — this workflow is the engine's single caller, so a literal here cannot be
+      # bypassed by a manual dispatch. See docs/how-to/keep-the-site-small.md.
+      max-releases: "30"
+      max-prs: "20"
     permissions:
       contents: read
       actions: read      # gather cross-run docs artifacts

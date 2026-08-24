@@ -33,8 +33,10 @@ git push origin --tags
 (`--tags` pushes every local tag; on a clean clone that's just the new one. Use
 `git push origin vX.Y.Z` to push only that tag.)
 
-CI runs lint + tests + the docs build; `release.yml` creates the GitHub Release with
-`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`); and the nested
-publish (tag re-dispatch) reconstructs + deploys the site including the new tag. The plugin URL
-and the `uses:` refs for the reusable workflows all resolve to the same tag, so one
-tag versions both halves.
+CI runs lint + tests + the docs build, and `release.yml` creates the GitHub Release with
+`version-switcher.mjs` + the tag's `docs.zip` attached (via `gh`). When that CI run
+completes, `publish.yml` picks it up on `workflow_run` and reconstructs + deploys the site
+including the new tag — the release asset is already attached by then, because
+`release.yml` ran inside the run publish is waiting on. The plugin URL and the `uses:`
+refs for the reusable workflows all resolve to the same tag, so one tag versions both
+halves.

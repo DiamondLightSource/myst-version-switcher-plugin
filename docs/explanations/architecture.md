@@ -21,11 +21,11 @@ artifacts and silently drop if the artifact expires and nothing rebuilds — fin
 it), so each deploy keeps a copy of its `docs.zip` in the **Actions cache**; a deploy
 whose fresh artifact has expired restores the branch from there.
 
-That copy used to be published into the site itself, at `_sources/<branch>.zip`. That
-was permanent, which the cache is not — but it also shipped a multi-megabyte zip inside
-every Pages artifact, forever, on a site already pressing against a hard 1 GB ceiling
-(see [below](#why-the-site-has-a-size-limit)). The cache is evicted after 7 days without
-a read, and by LRU past 10 GB, so a repo that goes quiet for over a week *and* whose
+The alternative — publishing that zip into the site itself — is permanent, which the
+cache is not, but it ships a multi-megabyte zip inside every Pages artifact forever, on
+a site already pressing against a hard 1 GB ceiling (see
+[below](#why-the-site-has-a-size-limit)). The cache is evicted after 7 days without a
+read, and by LRU past 10 GB, so a repo that goes quiet for over a week *and* whose
 default-branch CI artifact has also expired loses the rung and the deploy hard-fails —
 loudly, and fixed by one push. That is the accepted trade. (A gh-pages migration keeps
 its old `/main/` content only until the default branch builds docs under the new
@@ -42,23 +42,25 @@ with nothing on the way to say so.
 
 Two things follow.
 
-The engine takes a **`max-releases`** input: publish only the N most recent releases,
-ranked by the tagged commit's date. It defaults to `0` (unlimited), so upgrading never
-silently deletes versions from an existing site — but the paved path in the
-[tutorial](../tutorials/adding-to-a-fresh-repo.md) sets it, and a deploy whose *packed*
-artifact passes 700 MB says so in a warning. Packed, not the tree on disk: HTML and JS
-compress around 3×, so measuring the directory would cry wolf at a third of real usage. Older releases keep their `docs.zip` assets and
-come back the moment you raise the cap. See
-[keep-the-site-small](../how-to/keep-the-site-small.md).
+The engine takes **`max-releases`** and **`max-prs`** inputs: publish only the N most
+recent releases (ranked by the tagged commit's date) and the N most recently built open
+PRs. Both default to `0` (unlimited), so upgrading never silently deletes versions from
+an existing site — but the paved path in the
+[tutorial](../tutorials/adding-to-a-fresh-repo.md) sets them. `actions/deploy-pages`
+warns when the uploaded artifact exceeds the limit, and the fix is not destructive:
+older releases keep their `docs.zip` assets and come back the moment you raise the cap.
+See [keep-the-site-small](../how-to/keep-the-site-small.md).
 
 Ranking is on the release's `created_at`, never on parsing the version number: tags are
 too inconsistent across repos for a parser to be safe, and `published_at` lies whenever an
 old release is re-published (blueapi has a `1.3.2-a9` created in 2025 and published in
 2026, which under `published_at` outranks the genuinely newer `1.11.3`).
 
-The same pressure is why the default branch's durable copy moved out of the site and into
-the Actions cache, and why the gather caches release assets rather than re-downloading
-~450 MB of immutable zips on every event.
+The same pressure is why the default branch's durable copy lives in the Actions cache
+rather than in the site, and why the gather caches release assets rather than
+re-downloading ~450 MB of immutable zips on every event. The caps bound that cache too:
+its entry is as large as the published release set, and it competes with the repo's
+build caches for a 10 GB quota.
 
 ### Why this replaced the `gh-pages` + `keep_files` model
 
@@ -193,8 +195,8 @@ HEAD** — never the commit that was built. A PR-triggered deploy reports `refs/
 
 That is mostly harmless (it is why the same-SHA question mattered at all), but it silently
 breaks anything that asks "was this the default branch?". Both of the engine's cache-save
-steps did exactly that, and gating on `github.ref` would have had every PR-triggered deploy
-writing caches scoped to a PR that nothing else can read. They test
+steps ask exactly that: gated on `github.ref` they would fire on every deploy, including
+one dispatched from another ref, whose entry only that ref could ever read. They test
 `github.event.workflow_run.head_branch` instead.
 
 Because that lives in an `if:` expression rather than a shell script, the gather harness
@@ -303,24 +305,39 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
   listed in the switcher if gathered.
 - **Concurrency:** `concurrency: { group: pages, cancel-in-progress: true }`. Cancelling
   a superseded deploy is safe *because* every deploy reconstructs the whole site — the
-  one that replaces it gathers everything the cancelled one would have. This was unsafe
-  while publish was nested in CI, where cancelling marked an unrelated PR's run cancelled.
+  one that replaces it gathers everything the cancelled one would have.
 
 ## The release-layer cache
 
-Re-downloading and unzipping every release's `docs.zip` on every deploy was the one
-recurring cost that scaled with the number of releases, and it stopped being theoretical
-once a consumer reached 131 of them: 114 seconds per deploy, on every event, fetching the
-same immutable bytes.
+Re-downloading every release's `docs.zip` on every deploy is the one recurring cost that
+scales with the number of releases, and it is not theoretical: at 131 releases it was 114
+seconds per deploy, on every event, fetching the same immutable bytes.
 
-The engine now caches them (`actions/cache`, keyed on the exact set of asset ids it
+So the engine caches them — `actions/cache`, keyed on the exact set of asset ids it
 intends to publish, files named by **asset id** so a re-cut release cannot be served from
-a stale entry, and pruned to the published set so a capped site keeps a capped cache).
+a stale entry, and pruned to the published set so a capped site keeps a capped cache.
 Steady state is a total hit; cutting a release downloads exactly one zip.
 
-Caches are written only when the **default branch** was what got built — one saved while
-a PR is the trigger is scoped to that PR and unreadable by anything else, so saving there
-would only churn the 10 GB repo quota.
+Caches are written only when the **default branch** was what got built. Entries are
+scoped to the ref that wrote them, so one written by a deploy dispatched from some other
+ref is invisible to every ordinary deploy — dead weight against the 10 GB quota. (Under
+`workflow_run` the writing ref is always the default branch whatever triggered the run,
+which is why the guard has to read `head_branch`, not `github.ref`.)
+
+Neither key contains a branch or a commit. The branch is already in the *scope*, and both
+keys are **content hashes**: the release cache on the set of asset ids it intends to
+publish, the default-branch cache on the bytes of `docs.zip` itself. A commit SHA would
+mint a new multi-megabyte entry on every push even when the built docs are identical. The
+default-branch restore therefore uses a bare `key: mvs-default-v1-` that can never match
+exactly, letting `restore-keys` return the most recent entry — you cannot name a content
+hash before you have the content.
+
+That cache is also why the release downloads are **serial** while the PR-artifact
+downloads are **parallel**. With the cache in place the release gather fetches nothing on
+almost every deploy, so parallelising it buys a rare, off-critical-path cold start at the
+cost of a three-pass download-and-stage structure. PR artifacts cannot be cached at all —
+a PR's head SHA changes with every push — so that gather pays one download per open PR on
+*every* deploy, which is where `xargs -P 8` earns its keep.
 
 ## Key resolved decisions
 

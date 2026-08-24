@@ -12,22 +12,17 @@ on:
         required: false
         default: docs/_build/html
         type: string
-    outputs:
-      version-name:
-        description: The version name this build was served at (pr-<n> | <default-branch> | <tag>).
-        value: ${{ jobs.build.outputs.version-name }}
 
 # REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
 # the docs at the versioned BASE_URL and uploads this build's `docs` artifact
 # (docs.zip, a single html/ root dir). It runs for every event — PRs (including forks),
 # pushes to the default branch, and tags — but NEVER publishes. publish.yml (the
-# privileged half) deploys, called separately by the consumer's ci.yml on internal
-# events, injecting THIS build's artifact for the current version name.
+# privileged half) picks the artifact up once the run completes.
 #
-# This workflow OWNS the build/publish contract so it cannot drift: the version
-# name, the BASE_URL, the docs.zip single-root-dir shape, and the `docs` artifact name
-# all live here. The consumer supplies only HOW to turn sources into HTML, via
-# `build-command`.
+# This workflow owns one half of the build/publish contract: the docs.zip
+# single-root-dir shape and the `docs` artifact NAME (publish.yml gathers cross-run
+# artifacts by that name via the artifacts API, never by workflow filename). The
+# consumer supplies only HOW to turn sources into HTML, via `build-command`.
 #
 # Environment given to build-command: Node/npx (preinstalled on the runner) and uv
 # (always installed; honours a committed .python-version). So build-command can be
@@ -42,8 +37,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      version-name: ${{ steps.ver.outputs.version-name }}
     steps:
       # fetch-depth: 0 brings the full history *and tags* — a build-command may
       # derive a version from `git describe` (this repo's docs do, to pin the
@@ -68,8 +61,14 @@ jobs:
           enable-cache: false
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
-      # must be built with. pr-<n> for PRs; otherwise the ref name (default branch or
-      # a tag without `/`). No sanitisation: every version name is URL/path-safe.
+      # must be built with: pr-<n> for PRs, otherwise the ref name (the default branch,
+      # or a tag without `/`). No sanitisation — every version name is URL/path-safe.
+      #
+      # This is the OTHER half of the contract, and it is not passed anywhere: the
+      # gather independently re-derives the same name for each source it stages (a
+      # release's tag, a PR's number, the repo's default_branch) and unpacks the zip at
+      # site/<that name>. Both sides compute the same string from the same facts, so
+      # this rule and assemble.mjs's dest rule must change together.
       - name: Compute version name
         id: ver
         run: |
@@ -82,9 +81,8 @@ jobs:
           echo "version-name=$name" >> "$GITHUB_OUTPUT"
 
       # BASE_URL must match the versioned sub-path the build is served at, or its
-      # root-absolute assets 404. assemble files this build's artifact at the same
-      # version name (site/<default-branch>, site/<tag>, site/pr-<n>), so the two
-      # cannot drift. VERSION_NAME is the bare version token, exported for builds
+      # root-absolute assets 404 — see the version-name contract above.
+      # VERSION_NAME is the bare version token, exported for builds
       # that need it directly — e.g. a Sphinx conf.py setting pydata-sphinx-theme's
       # switcher `version_match` — without parsing it back out of BASE_URL.
       # build-command comes through an env var (not interpolated into the script)
@@ -100,10 +98,9 @@ jobs:
 
       # Pack the site as docs.zip with a single root directory — the durable contract
       # both publish.yml's gather and release.yml's asset rely on. Stage into html/
-      # first so any html-dir name yields the same root. publish.yml's extract keys on
-      # there being exactly ONE root dir, not on it being called html/ (release assets
-      # are durable and may have been packed by another pipeline), but everything this
-      # workflow produces is html/-rooted.
+      # first so any html-dir name yields the same root. The extract side keys on there
+      # being exactly ONE root dir, not on its name, but everything this workflow
+      # produces is html/-rooted.
       - name: Pack docs.zip (single html/ root)
         env:
           HTML_DIR: ${{ inputs.html-dir }}
@@ -123,7 +120,3 @@ jobs:
           path: ${{ runner.temp }}/docs.zip
           compression-level: 0
 
-      # NOTE: nothing here tells a fork PR that its docs will not be published. There is
-      # no longer anywhere sensible to say it: publish.yml excludes forks before the
-      # engine is reached, so no job runs in that case at all. This build job stays
-      # purely about building + uploading the docs artifact.
