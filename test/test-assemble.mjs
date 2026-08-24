@@ -11,13 +11,16 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	cacheKey,
 	discoverVersions,
 	isPrerelease,
 	missingRequired,
 	orderVersions,
 	preferredVersion,
+	RELZIPS_CACHE_PREFIX,
 	renderRedirect,
 	renderSwitcher,
+	selectArtifacts,
 	selectReleases,
 	stablePlan,
 	switcherStruct,
@@ -77,11 +80,8 @@ for (const d of ["main", "2.1", "2.0"]) mkdirSync(join(site, d));
 writeFileSync(join(site, "switcher.json"), "[]"); // file, ignored
 writeFileSync(join(site, "index.html"), "x"); // file, ignored
 symlinkSync("2.1", join(site, "stable")); // the alias, excluded
-mkdirSync(join(site, "_sources")); // durable default-branch store, excluded
 assert.deepEqual(discoverVersions(site).sort(), ["2.0", "2.1", "main"]);
-ok(
-	"discoverVersions returns dirs only, excluding files, the stable alias, and _sources",
-);
+ok("discoverVersions returns dirs only, excluding files and the stable alias");
 
 assert.deepEqual(discoverVersions(join(site, "does-not-exist")), []);
 ok("discoverVersions returns [] for a missing dir");
@@ -320,6 +320,188 @@ assert.equal(
 	"id-1.0",
 );
 ok("selectReleases carries the docs.zip asset id through for cache keying");
+
+// --- selectArtifacts: which CI artifact lands where ---
+const art = (id, sha, created, extra = {}) => ({
+	id,
+	created_at: created,
+	size_in_bytes: 4096,
+	expired: false,
+	workflow_run: {
+		id: 900,
+		head_sha: sha,
+		head_branch: extra.branch ?? null,
+		head_repository_id: extra.repoId ?? 42,
+	},
+});
+const pr = (num, sha, approved = true) => ({ num: String(num), sha, approved });
+const destOf = (rows, label) =>
+	rows.find((r) => r.label === label)?.dest ?? null;
+const rowOf = (rows, label) => rows.find((r) => r.label === label);
+
+// The newest artifact on the branch wins — compared on created_at, not artifact id.
+// A comparator reading the wrong field ties every artifact and silently returns the
+// oldest, which is a stale site nobody notices.
+const branchRows = selectArtifacts(
+	[
+		art(9000, "mainsha", "2026-04-01T00:00:00Z", { branch: "main" }),
+		art(9001, "mainsha", "2026-05-01T00:00:00Z", { branch: "main" }),
+	],
+	{ defaultBranch: "main", repoId: 42 },
+);
+assert.equal(rowOf(branchRows, "default-branch CI (main)").artifactId, 9001);
+ok("selectArtifacts takes the newest default-branch artifact by build date");
+
+// A fork's pull_request run executes in the UPSTREAM repo's Actions, so a fork branch
+// called `main` is visible here. Landing it in site/main would serve fork content as
+// the default branch.
+const forkBranch = selectArtifacts(
+	[
+		art(9100, "mainsha", "2026-05-01T00:00:00Z", { branch: "main" }),
+		art(9200, "forksha", "2026-06-01T00:00:00Z", {
+			branch: "main",
+			repoId: 777,
+		}),
+	],
+	{ defaultBranch: "main", repoId: 42 },
+);
+assert.equal(rowOf(forkBranch, "default-branch CI (main)").artifactId, 9100);
+ok(
+	"selectArtifacts excludes a fork-owned branch of the same name, even when newer",
+);
+
+// ...including when the fork's artifact shares the default branch's head SHA, which a
+// SHA-keyed re-lookup would hand back despite the repo filter.
+const forkSameSha = selectArtifacts(
+	[
+		art(9300, "mainsha", "2026-05-01T00:00:00Z", { branch: "main" }),
+		art(9400, "mainsha", "2026-06-01T00:00:00Z", {
+			branch: "main",
+			repoId: 777,
+		}),
+	],
+	{ defaultBranch: "main", repoId: 42 },
+);
+assert.equal(rowOf(forkSameSha, "default-branch CI (main)").artifactId, 9300);
+ok(
+	"selectArtifacts keeps a fork out of the default branch at an identical head SHA",
+);
+
+// A PR's artifact is looked up with NO repo filter: a fork PR's build legitimately
+// belongs to the fork, and `approved` is what gates it.
+const prRows = selectArtifacts(
+	[art(9500, "forkpr", "2026-05-01T00:00:00Z", { repoId: 777 })],
+	{ defaultBranch: "main", repoId: 42, prs: [pr(7, "forkpr")] },
+);
+assert.equal(destOf(prRows, "PR #7"), "pr-7");
+ok("selectArtifacts previews an approved fork PR's own artifact");
+
+const unapproved = selectArtifacts(
+	[art(9600, "forkpr", "2026-05-01T00:00:00Z", { repoId: 777 })],
+	{ defaultBranch: "main", repoId: 42, prs: [pr(7, "forkpr", false)] },
+);
+assert.equal(destOf(unapproved, "PR #7"), null);
+assert.match(rowOf(unapproved, "PR #7").decision, /not preview-approved/);
+ok("selectArtifacts skips an unapproved fork PR");
+
+// Expired artifacts are not a source at all.
+const expired = selectArtifacts(
+	[{ ...art(9700, "prsha", "2026-05-01T00:00:00Z"), expired: true }],
+	{ defaultBranch: "main", repoId: 42, prs: [pr(7, "prsha")] },
+);
+assert.equal(destOf(expired, "PR #7"), null);
+ok("selectArtifacts ignores expired artifacts");
+
+// The cap ranks by build date and applies AFTER eligibility, so an ineligible PR
+// never costs a slot — same rule as selectReleases.
+const cappedPrs = selectArtifacts(
+	[
+		art(1, "a", "2026-05-01T00:00:00Z"),
+		art(2, "b", "2026-05-03T00:00:00Z"),
+		art(3, "c", "2026-05-02T00:00:00Z"),
+	],
+	{
+		defaultBranch: "main",
+		repoId: 42,
+		maxPrs: 2,
+		prs: [pr(20, "a"), pr(21, "b"), pr(22, "c"), pr(23, "nothing")],
+	},
+);
+assert.deepEqual(
+	cappedPrs.filter((r) => r.dest).map((r) => r.dest),
+	["pr-21", "pr-22"],
+);
+assert.match(rowOf(cappedPrs, "PR #20").decision, /beyond max-prs=2/);
+assert.match(rowOf(cappedPrs, "PR #23").decision, /no non-expired/);
+ok("selectArtifacts caps PRs by build date, after eligibility");
+
+assert.equal(
+	selectArtifacts([], { defaultBranch: "main", repoId: 42 }).length,
+	1,
+);
+ok("selectArtifacts still reports the default branch when nothing was found");
+
+// --- cacheKey: the release-zip cache key is derived from the SELECTION ---
+const keyRows = selectReleases(
+	[rel("3.0", "2026-03-01T00:00:00Z"), rel("2.0", "2026-02-01T00:00:00Z")],
+	{ defaultBranch: "main" },
+);
+assert.match(cacheKey(keyRows), /^mvs-relzips-v1-[0-9a-f]{32}$/);
+ok("cacheKey is the namespace prefix plus a 32-char digest");
+
+assert.equal(cacheKey(keyRows), cacheKey(keyRows.slice().reverse()));
+ok("cacheKey is order-independent — it names a set, not a listing");
+
+// Cutting a release must MISS, or the new version never gets downloaded.
+const withNew = selectReleases(
+	[
+		rel("4.0", "2026-04-01T00:00:00Z"),
+		rel("3.0", "2026-03-01T00:00:00Z"),
+		rel("2.0", "2026-02-01T00:00:00Z"),
+	],
+	{ defaultBranch: "main" },
+);
+assert.notEqual(cacheKey(withNew), cacheKey(keyRows));
+ok("cacheKey changes when a release joins the published set");
+
+// ...and capping one out must miss too, so the entry stays pruned to what is served.
+const threeReleases = [
+	rel("4.0", "2026-04-01T00:00:00Z"),
+	rel("3.0", "2026-03-01T00:00:00Z"),
+	rel("2.0", "2026-02-01T00:00:00Z"),
+];
+assert.notEqual(
+	cacheKey(
+		selectReleases(threeReleases, { defaultBranch: "main", maxReleases: 1 }),
+	),
+	cacheKey(
+		selectReleases(threeReleases, { defaultBranch: "main", maxReleases: 2 }),
+	),
+);
+ok("cacheKey changes when max-releases changes the published set");
+
+// A release contributing no zip must not perturb the key, or a repo with one
+// asset-less release would miss on every single deploy.
+assert.equal(
+	cacheKey([
+		...keyRows,
+		{
+			tag: "junk",
+			dest: null,
+			date: null,
+			assetId: null,
+			size: 0,
+			decision: "",
+		},
+	]),
+	cacheKey(keyRows),
+);
+ok("cacheKey ignores rows that contribute nothing to the site");
+
+assert.equal(RELZIPS_CACHE_PREFIX, "mvs-relzips-v1-");
+ok(
+	"the cache namespace is exported so the workflow need not repeat the literal",
+);
 
 // A release with no created_at at all must not win the cap, and must not throw.
 const undated = selectReleases(

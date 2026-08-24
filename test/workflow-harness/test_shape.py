@@ -2,9 +2,8 @@
 Structural invariants of the publish workflows.
 
 The gather bash is covered by test_gather.py. What that harness cannot reach are the
-`if:` expressions, which are evaluated by GitHub, not by a shell — and those are where
-the workflow_run migration is easiest to get quietly wrong. Each assertion here stands
-for a specific way it has broken or could break.
+`if:` expressions and the wiring between the three files, which GitHub evaluates rather
+than a shell. Each assertion here stands for a way that wiring can break silently.
 """
 
 import os
@@ -38,24 +37,21 @@ engine_on, caller_on, ci_on = engine[True], caller[True], ci[True]
 
 print("\n-- engine: publish-gh-pages.yml --")
 check("is workflow_call only", list(engine_on) == ["workflow_call"], list(engine_on))
-check("exposes only pr + max-releases",
-      sorted(engine_on["workflow_call"]["inputs"]) == ["max-releases", "pr"],
+check("exposes exactly pr + max-releases + max-prs",
+      sorted(engine_on["workflow_call"]["inputs"]) == ["max-prs", "max-releases", "pr"],
       sorted(engine_on["workflow_call"]["inputs"]))
-check("has a single deploy job (no re-dispatch, no warn)",
-      list(engine["jobs"]) == ["deploy"], list(engine["jobs"]))
+check("is a single deploy job", list(engine["jobs"]) == ["deploy"], list(engine["jobs"]))
 
 steps = engine["jobs"]["deploy"]["steps"]
 names = [s.get("name", s.get("uses", "")) for s in steps]
-check("no in-run artifact injection remains",
-      not any("this run's docs artifact" in n or "Stage current build" == n for n in names), names)
-check("no wedged-origin retry remains", not any("Retry via" in n for n in names), names)
-check("still verifies the deployed origin", any("Verify" in n for n in names), names)
+check("verifies the deployed origin", any("Verify" in n for n in names), names)
 
-# THE trap this migration introduces. Under workflow_run, github.ref is ALWAYS the
-# default branch — even when a PR's CI triggered the run — so gating a cache SAVE on
-# github.ref would have every PR-triggered deploy writing caches that nothing can read.
+# THE workflow_run trap. github.ref is ALWAYS the default branch — even when a PR's CI
+# triggered the run — so a save gated on it would fire for every deploy, including one
+# dispatched from another ref, whose entry only that ref can read. head_branch is the
+# only honest answer to "was this the default branch?".
 saves = [s for s in steps if "cache/save" in str(s.get("uses", ""))]
-check("there are cache-save steps to check", len(saves) == 2, f"found {len(saves)}")
+check("both caches have a save step", len(saves) == 2, f"found {len(saves)}")
 for s in saves:
     cond = str(s.get("if", ""))
     check(f"{s['name']!r} does not gate on github.ref",
@@ -66,8 +62,9 @@ for s in saves:
 check("deploy cancels superseded runs",
       engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is True,
       engine["jobs"]["deploy"]["concurrency"])
-check("deploy no longer needs actions:write",
-      engine["jobs"]["deploy"]["permissions"]["actions"] == "read",
+check("deploy holds no write token beyond what it deploys with",
+      engine["jobs"]["deploy"]["permissions"]["actions"] == "read"
+      and engine["jobs"]["deploy"]["permissions"]["contents"] == "read",
       engine["jobs"]["deploy"]["permissions"])
 
 print("\n-- caller: publish.yml --")
@@ -78,18 +75,23 @@ check("listens for the CI workflow by name",
       f'{caller_on["workflow_run"]["workflows"]} vs ci name {ci["name"]!r}')
 
 guard = str(caller["jobs"]["publish"]["if"])
-# workflow_run hands a WRITE token to a job triggered by fork-PR code. Losing either
-# half of this guard is the pwn-request footgun the old read-only warn job existed to
-# avoid, and it would fail open rather than loudly.
+# workflow_run hands a WRITE token to a job triggered by fork-PR code. Losing either half
+# of this guard is a pwn-request, and it fails open rather than loudly.
 check("requires the triggering run to have succeeded",
       "conclusion == 'success'" in guard, guard)
 check("excludes forks", "head_repository.full_name == github.repository" in guard, guard)
-check("still allows a manual dispatch",
-      "workflow_dispatch" in guard, guard)
+check("still allows a manual dispatch", "workflow_dispatch" in guard, guard)
+
+# Site-size policy has to hold on EVERY path into the engine, and this workflow is its
+# only caller — an expression here could be emptied by a manual dispatch.
+with_block = caller["jobs"]["publish"]["with"]
+for cap in ("max-releases", "max-prs"):
+    val = str(with_block.get(cap, ""))
+    check(f"{cap} is set as a literal", val.isdigit(), repr(val))
 
 print("\n-- entry: ci.yml --")
-check("no longer publishes", "publish" not in ci["jobs"], list(ci["jobs"]))
-check("still uploads the docs artifact CI's consumers gather", "docs" in ci["jobs"], list(ci["jobs"]))
+check("builds without publishing", "publish" not in ci["jobs"], list(ci["jobs"]))
+check("uploads the docs artifact the engine gathers", "docs" in ci["jobs"], list(ci["jobs"]))
 
 print("\n" + ("FAILURES: " + ", ".join(fails) if fails else "all shape checks passed"))
 sys.exit(1 if fails else 0)

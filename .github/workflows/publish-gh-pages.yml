@@ -3,37 +3,26 @@ name: Publish to GitHub Pages
 # Reconstruct the WHOLE versioned docs site from durable sources (the consumer's
 # default-branch build, release docs.zip assets, open-PR build artifacts) and deploy it
 # directly to GitHub Pages — no gh-pages branch. The PRIVILEGED half, and a reusable
-# workflow: its only caller is a `publish.yml` in the consumer's repo (this repo has one
-# too, identical but for the pin), triggered by `workflow_run` when their CI completes.
+# workflow: its only caller is a `publish.yml` in the consumer's repo, triggered by
+# `workflow_run` when their CI completes.
 #
-# WHY workflow_run, and why this file is so much smaller than it used to be. Pages stamps
-# every deployment with `pages_build_version = GITHUB_SHA` and silently no-ops a repeat
-# (actions/deploy-pages#383) — but only for SOME events. `workflow_dispatch` and
-# `workflow_run` both force a re-serve. That was proven here on 2026-08-21, not reasoned:
-# four consecutive deploys at the identical build version b24237484c3b445469c2db4ef161410a185fcdbc
-# (a main push, a tag cut on that same commit, and two pushes to one PR) EVERY ONE of
-# which updated the live origin.
+# Two properties of that trigger shape the code below:
 #
-# Because a tag's deploy re-serves directly, the old `re-dispatch` trampoline is gone,
-# and with it the `publish-dispatch.yml` shim that existed only to give the trampoline a
-# locally-dispatchable file. Because `workflow_run` fires after the triggering run has
-# COMPLETED, that run's `docs` artifact is discoverable by the ordinary gather, so the
-# `version-name` injection is gone too. And because a fork's CI never reaches this
-# workflow (the caller guards on it), the read-only `warn` job is gone.
+#   - GITHUB_SHA and github.ref are ALWAYS the default branch's HEAD, never the commit
+#     that was built — a PR-triggered deploy reports `refs/heads/main`. Anything asking
+#     "was this the default branch?" must read `github.event.workflow_run.head_branch`.
+#   - Pages stamps each deployment with `pages_build_version = GITHUB_SHA` and silently
+#     no-ops a repeat (actions/deploy-pages#383), EXCEPT on `workflow_run` and
+#     `workflow_dispatch`, which force a re-serve. So a tag cut on an already-deployed
+#     commit still updates the origin, with no re-dispatch machinery.
 #
-# One caveat that shapes the code below: under `workflow_run`, GITHUB_SHA and github.ref
-# are ALWAYS the default branch's HEAD, never the commit that was built. Anything that
-# needs the real branch must read `github.event.workflow_run.head_branch`.
-#
-# The assemble logic is THIS repo's assemble.mjs (the pure kernel); the IO plumbing
-# lives as inline steps in this file. To version-match assemble.mjs to this workflow,
-# we check out the reusable workflow's OWN repo at its OWN commit via the `job` context:
-# unlike github.workflow_* (which resolve to the CALLER's entry workflow),
+# The pure logic is assemble.mjs; the IO plumbing is inline steps here. To version-match
+# assemble.mjs to this workflow we check out its OWN repo at its OWN commit via the `job`
+# context: unlike github.workflow_* (which resolve to the CALLER's entry workflow),
 # `job.workflow_repository` + `job.workflow_sha` resolve to the file that defines THIS
-# job — i.e. the reusable workflow at the ref a consumer pinned it to. So assemble.mjs
-# always matches the workflow version, with no hardcoded repo and no manual release-time
-# bump. assemble.mjs runs `git tag` in the cwd, so the CONSUMER's repo is checked out at
-# the root (with tags) to supply their version list; assemble.mjs comes from .mvs.
+# job — the reusable workflow at the ref a consumer pinned it to. assemble.mjs runs
+# `git tag` in the cwd, so the CONSUMER's repo is checked out at the root (with tags) to
+# supply their version list; assemble.mjs itself comes from .mvs.
 on:
   workflow_call:
     inputs:
@@ -47,55 +36,50 @@ on:
           Publish only the N most recent releases (by the tagged commit's date), or 0 for
           all of them. The site is deployed as ONE Pages artifact and Pages caps that at
           1 GB, so an old project with hundreds of released docs.zips will eventually
-          fail to deploy at all — a repo with 131 of them was already at 452 MB. Set this
-          in your publish.yml's `with:` block so it applies on every path.
+          fail to deploy at all. It also bounds the release-zip cache entry, which
+          counts against the repo's 10 GB Actions cache quota. Set this in your
+          publish.yml's `with:` block so it applies on every path.
+        required: false
+        default: "0"
+        type: string
+      max-prs:
+        description: >-
+          Publish previews for only the N most recently built open PRs, or 0 for all of
+          them. Same 1 GB ceiling as max-releases: a repo with dozens of open PRs carries
+          a preview for each on every deploy. Set this in your publish.yml's `with:`
+          block so it applies on every path.
         required: false
         default: "0"
         type: string
 
 jobs:
-  # The only job. The caller (publish.yml in the consumer's repo) has already gated on
-  # the triggering run having SUCCEEDED and not being from a fork, so there is nothing
-  # left to branch on here.
+  # The only job. The caller has already gated on the triggering run having SUCCEEDED and
+  # not being from a fork, so there is nothing left to branch on here.
   deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read     # checkout + read release assets
-      actions: read      # gather cross-run docs artifacts (the retry-dispatch that needed write is gone)
+      actions: read      # gather cross-run docs artifacts
       pages: write       # deploy to Pages
       id-token: write    # deploy-pages OIDC
       statuses: write    # set the preview-approved status on a fork PR head SHA
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    # Cancelling is safe now, and worth having: every deploy reconstructs the whole site
-    # from durable sources, so a superseded one has nothing unique in it — the next deploy
-    # gathers everything the cancelled one would have. This was NOT safe while publish was
-    # nested in ci.yml, where cancelling marked an unrelated PR's CI run as cancelled.
+    # Cancelling a superseded deploy is safe: every deploy reconstructs the whole site
+    # from durable sources, so the next one gathers everything the cancelled one would
+    # have.
     concurrency:
       group: pages
       cancel-in-progress: true
     env:
       REPO: ${{ github.repository }}
-      # The branch that was actually BUILT. Under workflow_run, github.ref and GITHUB_SHA
-      # are always the default branch's HEAD regardless of what triggered it, so github.ref
-      # is useless for "was this the default branch?" — it is true for a PR-triggered
-      # deploy too. head_branch is the honest answer; ref_name covers a manual dispatch,
-      # where there is no triggering run.
+      # The branch that was actually BUILT — see the header: github.ref is the default
+      # branch even for a PR-triggered deploy. ref_name covers a manual dispatch, where
+      # there is no triggering run.
       BUILT_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
-      # Site-size guard thresholds, both on the deployed artifact's scale. PROBE is the
-      # uncompressed size past which it is worth actually packing the tree to find out
-      # (the pack costs real seconds); WARN is the packed size that earns a warning,
-      # 700 MB against Pages' hard 1 GB. Overridable so the guard is testable and so a
-      # site with unusual compressibility can be tuned.
-      SIZE_PROBE_BYTES: "1610612736"
-      SIZE_WARN_BYTES: "734003200"
-      # DEPRECATED: the in-site durable store. Nothing writes it any more (the default
-      # branch's zip lives in the Actions cache); this is only still read as a one-shot
-      # fallback for a site last deployed by an older publish.yml.
-      SOURCES_DIR: _sources
     steps:
       # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
       # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
@@ -130,8 +114,8 @@ jobs:
             -f state=success -f context=preview-approved \
             -f description="Fork docs preview approved"
 
-      # BUILT_BRANCH vs github.ref is the one thing a post-mortem here always trips over,
-      # so state both up front rather than leaving someone to infer it from a cache miss.
+      # BUILT_BRANCH vs github.ref is the thing a post-mortem here always trips over, so
+      # state both up front rather than leaving someone to infer it from a cache miss.
       #
       # Every context value comes through `env:`, never interpolated into the script.
       # That keeps arbitrary values out of the shell, and it avoids nesting quotes: an
@@ -154,9 +138,9 @@ jobs:
             'github.sha'    "$GH_SHA (→ pages_build_version)" \
             'triggered by'  "${TRIGGER_URL:-manual dispatch}"
 
-      # The live Pages base URL, from the Pages API — respects a custom domain
-      # (CNAME); falls back to the conventional github.io URL if the API call
-      # fails. Used by the _sources restore below and baked into switcher.json.
+      # The live Pages base URL, from the Pages API — respects a custom domain (CNAME);
+      # falls back to the conventional github.io URL if the API call fails. Baked into
+      # switcher.json's entry URLs.
       - name: Resolve the Pages URL
         env:
           GH_TOKEN: ${{ github.token }}
@@ -174,7 +158,9 @@ jobs:
       #
       # Selection is assemble.mjs's job (pure, unit-tested); this step only does IO.
       # It runs BEFORE any download so the gather fetches only what will actually be
-      # published, and so the cache key describes exactly that set.
+      # published. It writes the decision TSV to --out and prints the cache key for
+      # that exact selection on stdout — the key is derived from the selection, so it
+      # is derived where the selection is made.
       #
       # Cached zips are named by ASSET ID, not by tag: an asset id identifies its bytes
       # unambiguously, so a re-cut release can never be served from a stale cache entry.
@@ -186,16 +172,15 @@ jobs:
         run: |
           set -euo pipefail
           gh api --paginate "repos/$REPO/releases" | jq -rs 'add // []' > "$RUNNER_TEMP/releases.json"
-          node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" select-releases \
+          key=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" select-releases \
             --default-branch "$DEFAULT" --seed-tag "$SEED_TAG" \
             --max-releases "${MAX_RELEASES:-0}" \
-            < "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/releases.tsv"
-          # Key on the exact set of asset ids we intend to publish, so any change to
-          # that set misses and re-saves. restore-keys then falls back to the previous
-          # set, which shares nearly every zip — only the new release is downloaded.
-          digest=$(awk -F'\t' '$2 != "-" {print $5}' "$RUNNER_TEMP/releases.tsv" \
-            | sort | sha256sum | cut -c1-32)
-          echo "cache-key=mvs-relzips-v1-$digest" >> "$GITHUB_OUTPUT"
+            --out "$RUNNER_TEMP/releases.tsv" \
+            < "$RUNNER_TEMP/releases.json")
+          echo "cache-key=$key" >> "$GITHUB_OUTPUT"
+          # The bare namespace, for restore-keys: a prefix match returns the previous
+          # selection, which shares every zip but the newly cut one.
+          echo "cache-prefix=${key%-*}-" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached release zips
         id: relcache
@@ -203,72 +188,54 @@ jobs:
         with:
           path: ${{ runner.temp }}/relcache
           key: ${{ steps.releases.outputs.cache-key }}
-          restore-keys: mvs-relzips-v1-
+          restore-keys: ${{ steps.releases.outputs.cache-prefix }}
 
       # Releases are permanent sources; the seed release (if present) stands in for the
       # default branch until the durable copy is established — store it as $DEFAULT.zip
       # so the priority-overwrite chain below can supersede it with a fresher source.
       #
       # Prints a decision for every release the API listed, so a version missing from
-      # the site can be explained from this log alone. Downloads run in parallel: a repo
-      # with a hundred releases spent minutes here doing them one at a time.
+      # the site can be explained from this log alone. Downloads are serial: the cache
+      # above makes the steady state 0 or 1 of them, and a cold cache is a rare,
+      # off-critical-path event that max-releases already bounds.
       - name: Gather release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           relcache="$RUNNER_TEMP/relcache"; mkdir -p "$relcache"
-          todo="$RUNNER_TEMP/relcache-todo"; : > "$todo"
-          failed="$RUNNER_TEMP/relcache-failed"; mkdir -p "$failed"
+          warnings="$RUNNER_TEMP/relcache-warnings"; : > "$warnings"
+          hits=0; downloads=0
 
-          # Pass 1 — account for every release, and queue the cache misses.
+          # Warnings are buffered to after the table rather than printed mid-loop, so
+          # the decision table stays readable.
           printf '%-28s %-21s %-9s %s\n' TAG CREATED SIZE DECISION
+          # NB tab is IFS whitespace, so `read` COLLAPSES consecutive tabs — an empty
+          # field would shift every column after it. assemble.mjs emits "-", never "".
           while IFS=$'\t' read -r tag dest created size assetid decision; do
             [ -n "$tag" ] || continue
             if [ "$dest" != "-" ]; then
               if [ -s "$relcache/$assetid.zip" ]; then
+                hits=$((hits + 1))
                 decision="$decision (cache hit)"
+              elif gh release download "$tag" --repo "$REPO" -p docs.zip \
+                     -O "$relcache/$assetid.zip" 2>"$RUNNER_TEMP/relcache-download.err"; then
+                downloads=$((downloads + 1))
+                decision="$decision (downloaded)"
               else
-                # Space-separated is safe: a git refname can never contain a space.
-                echo "$tag $assetid" >> "$todo"
-                decision="$decision (downloading)"
+                # Leave no truncated zip behind for the next run's cache to trust.
+                rm -f "$relcache/$assetid.zip"
+                decision="$decision (DOWNLOAD FAILED — skipped)"
+                echo "::warning::release $tag: docs.zip download failed — skipping. $(head -1 "$RUNNER_TEMP/relcache-download.err" 2>/dev/null)" >> "$warnings"
+              fi
+              if [ -s "$relcache/$assetid.zip" ]; then
+                cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
               fi
             fi
             printf '%-28s %-21s %-9s %s\n' "$tag" "$created" "$size" "$decision"
-          # NB tab is IFS whitespace, so `read` COLLAPSES consecutive tabs — an empty
-          # field would shift every column after it. assemble.mjs emits "-", never "".
           done < "$RUNNER_TEMP/releases.tsv"
-
-          # Pass 2 — fetch the misses in parallel. Each worker is independent and
-          # records its own failure, so one bad asset cannot abort the rest.
-          n=$(grep -c . "$todo" || true)
-          echo "release zips: $(( $(awk -F'\t' '$2 != "-"' "$RUNNER_TEMP/releases.tsv" | wc -l) - n )) cached, $n to download"
-          if [ "$n" -gt 0 ]; then
-            export REPO relcache failed
-            # shellcheck disable=SC2016
-            xargs -a "$todo" -P 8 -n 2 bash -c '
-              set -uo pipefail
-              tag="$1"; assetid="$2"
-              if ! gh release download "$tag" --repo "$REPO" -p docs.zip \
-                     -O "$relcache/$assetid.zip" 2>"$failed/$assetid.err"; then
-                rm -f "$relcache/$assetid.zip"
-                touch "$failed/$assetid"
-              fi
-            ' _
-          fi
-
-          # Pass 3 — stage into the gather dir, in the TSV's order so the log is
-          # deterministic whatever order the downloads finished in.
-          while IFS=$'\t' read -r tag dest created size assetid decision; do
-            [ "$dest" = "-" ] && continue
-            if [ -f "$failed/$assetid" ]; then
-              echo "::warning::release $tag: docs.zip download failed — skipping. $(head -1 "$failed/$assetid.err" 2>/dev/null)"
-            elif [ -s "$relcache/$assetid.zip" ]; then
-              cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
-            else
-              echo "::warning::release $tag: docs.zip missing after download — skipping"
-            fi
-          done < "$RUNNER_TEMP/releases.tsv"
+          echo "release zips: $hits cached, $downloads downloaded"
+          cat "$warnings"
 
           # Prune anything no longer selected, so a capped cache stays capped.
           keep=$(awk -F'\t' '$2 != "-" {print $5 ".zip"}' "$RUNNER_TEMP/releases.tsv" | sort -u)
@@ -277,11 +244,13 @@ jobs:
             grep -qxF "$(basename "$f")" <<<"$keep" || rm -f "$f"
           done
 
-      # Save only when the DEFAULT BRANCH was what got built. A cache written while a PR
-      # is the trigger is scoped to that PR and never reused by anything else, so saving
-      # there would just churn the 10 GB repo quota. This must test the BUILT branch, not
-      # github.ref — see BUILT_BRANCH above. Skipped on an exact key hit: the entry is
-      # already there and cache entries are immutable.
+      # Save only when the DEFAULT BRANCH was what got built. Entries are scoped to the
+      # writing ref, and a deploy dispatched from some other ref would write one only that
+      # ref can read — invisible to every ordinary deploy, and dead weight against the
+      # 10 GB quota. Test the BUILT branch, not github.ref, which under workflow_run is
+      # the default branch even for a PR-triggered deploy (so a workflow_run save is
+      # always default-branch-scoped, whatever triggered it). Skipped on an exact key
+      # hit: cache entries are immutable, so it is already there.
       - name: Save release zips to the cache
         if: >-
           (github.event.workflow_run.head_branch || github.ref_name) == github.event.repository.default_branch &&
@@ -292,116 +261,86 @@ jobs:
           key: ${{ steps.releases.outputs.cache-key }}
 
       # Branch CI artifacts overwrite the seed (higher priority). Found via the
-      # artifacts API by NAME (`docs` — the contract), never by workflow filename,
-      # so the consumer's entry workflow can be called anything. An artifact's
-      # workflow_run carries head_branch/head_sha/head_repository_id but no run
-      # conclusion — existence is the signal (docs.yml only uploads after a
-      # successful build). Default branch: newest non-expired docs artifact built
-      # from THIS repo's code on that branch (head_repository_id keeps a same-named
-      # fork branch out). PRs: keyed by head SHA — internal always; external forks
-      # only when the SHA carries a preview-approved status. No
-      # $ARTIFACT_VERSION_NAME skip — the current build (staged next) overwrites
-      # anything gathered here with the same name.
+      # artifacts API by NAME (`docs` — the contract), never by workflow filename, so the
+      # consumer's entry workflow can be called anything. An artifact's workflow_run
+      # carries head_branch/head_sha/head_repository_id but no run conclusion — existence
+      # is the signal, since docs.yml only uploads after a successful build.
       #
-      # The artifact list is paginated ONCE and indexed by head SHA. It used to be
-      # re-paginated per open PR, which on a busy repo (26 open PRs, thousands of
-      # artifacts) was ~175 s of identical API calls.
+      # This step is IO only: paginate the artifacts API ONCE (re-paginating it per open
+      # PR costs minutes on a busy repo), resolve each fork PR's approval, then hand both
+      # lists to assemble.mjs, which decides what lands where. Unlike the release zips
+      # these artifacts cannot be cached — a PR's head SHA changes on every push — so
+      # every deploy pays 1 + open-PR downloads, and those run in parallel.
       - name: Gather branch CI artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          MAX_PRS: ${{ inputs.max-prs }}
         run: |
           set -euo pipefail
           repo_id=$(gh api "repos/$REPO" -q .id)
-          arts="$RUNNER_TEMP/artifacts.json"
           gh api --paginate "repos/$REPO/actions/artifacts?name=docs&per_page=100" \
-            | jq -rs '[.[].artifacts[] | select(.expired | not)]' > "$arts"
-          echo "$(jq length "$arts") non-expired 'docs' artifact(s) indexed"
+            | jq -rs '[.[].artifacts[]]' > "$RUNNER_TEMP/artifacts.json"
 
-          # Ascending by created_at so the last write per SHA is the newest artifact.
-          declare -A BY_SHA
-          while IFS=$'\t' read -r sha id created size run; do
-            [ -n "$sha" ] && BY_SHA["$sha"]="$id"$'\t'"$created"$'\t'"$size"$'\t'"$run"
-          done < <(jq -r 'sort_by(.created_at) | .[]
-            | [.workflow_run.head_sha, .id, .created_at, .size_in_bytes, .workflow_run.id] | @tsv' "$arts")
-
-          # want.tsv: dest <TAB> artifact-id <TAB> label — resolved before any download,
-          # so the downloads can all run at once.
-          want="$RUNNER_TEMP/artifact-want.tsv"; : > "$want"
-          queue() {
-            local dest="$1" sha="$2" label="$3" meta="${BY_SHA[$2]:-}"
-            if [ -z "$meta" ]; then
-              echo "  $label → no non-expired 'docs' artifact for ${sha:0:8} — skipping"
-              return 0
-            fi
-            local id created size run
-            IFS=$'\t' read -r id created size run <<<"$meta"
-            echo "  $label → artifact $id ($size B, built $created) from $GITHUB_SERVER_URL/$REPO/actions/runs/$run @ ${sha:0:8}"
-            printf '%s\t%s\t%s\n' "$dest" "$id" "$label" >> "$want"
-          }
-
-          echo "default branch:"
-          dsha=$(jq -r --arg b "$DEFAULT" --argjson r "$repo_id" '
-            [.[] | select(.workflow_run.head_branch == $b and .workflow_run.head_repository_id == $r)]
-            | sort_by(.created_at) | last | .workflow_run.head_sha // empty' "$arts")
-          if [ -n "$dsha" ]; then
-            queue "$DEFAULT" "$dsha" "default-branch CI ($DEFAULT)"
-          else
-            echo "  default-branch CI ($DEFAULT) → no non-expired 'docs' artifact — skipping"
-          fi
-
-          prs=$(gh pr list --repo "$REPO" --state open --limit 200 \
-            --json number,headRefOid,isCrossRepository -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
-          echo "open PRs: $(grep -c . <<<"$prs" || true)"
+          # Fork approval is an API call per cross-repo PR, so settle it here and pass
+          # the answer in — assemble.mjs stays free of network IO.
+          prs="$RUNNER_TEMP/prs.tsv"; : > "$prs"
           while IFS=$'\t' read -r num sha cross; do
-            [ -z "$num" ] && continue
+            [ -n "$num" ] || continue
+            approved=true
             if [ "$cross" = "true" ]; then
               approved=$(gh api "repos/$REPO/commits/$sha/statuses" \
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
-              if [ "$approved" != "true" ]; then
-                echo "  PR #$num → fork PR, head ${sha:0:8} not preview-approved — skipping"
-                continue
-              fi
             fi
-            queue "pr-$num" "$sha" "PR #$num"
-          done <<< "$prs"
+            printf '%s\t%s\t%s\n' "$num" "$sha" "$approved" >> "$prs"
+          done < <(gh pr list --repo "$REPO" --state open --limit 200 \
+            --json number,headRefOid,isCrossRepository \
+            -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+
 
           # The API serves an artifact as a zip-of-the-artifact, with docs.zip inside.
-          # Three failure modes are reported distinctly because they need different
-          # fixes: download failure (transient), no docs.zip inside (an artifact built
-          # by a docs.yml older than the packing contract — re-run that build), and the
-          # not-found case already handled above.
-          if [ -s "$want" ]; then
-            export REPO
-            gather_dir="$RUNNER_TEMP/gather"; export gather_dir
-            # shellcheck disable=SC2016
-            xargs -a "$want" -P 8 -d '\n' -I{} bash -c '
-              set -uo pipefail
-              IFS=$'"'"'\t'"'"' read -r dest id label <<<"{}"
-              tmp=$(mktemp -d)
-              if ! gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" 2>/dev/null; then
-                echo "::warning::$label: artifact $id download failed — skipping"
-              elif ! unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" >/dev/null 2>&1 || [ ! -f "$tmp/docs.zip" ]; then
-                # The FILE test, not unzip'"'"'s exit status: unzip exits 0 with only a
-                # "caution: filename not matched" note when the member is absent.
-                echo "::warning::$label: artifact $id contains no docs.zip — it predates the docs.zip packing contract. Re-run that build to refresh it. Skipping."
-              else
-                mv "$tmp/docs.zip" "$gather_dir/$dest.zip"
-              fi
-              rm -rf "$tmp"
-            '
-          fi
+          # Two failure modes are reported distinctly because they need different fixes:
+          # a download failure (transient), and no docs.zip inside — which has two very
+          # different causes, so the warning names both.
+          # assemble.mjs decides; this pipeline only fetches. It prints three
+          # NUL-separated fields per artifact, which xargs hands to the worker as
+          # POSITIONAL ARGS — never -I{}, which pastes the row into the script TEXT where
+          # a label containing $(...) would be executed rather than printed. -r so an
+          # empty selection runs nothing.
+          #
+          # `gather-artifact` after the script is the worker's $0: `bash -c` takes the
+          # arg AFTER the script as $0, so without something there the first field would
+          # land in $0 and every other shift by one. bash prefixes its errors with $0, so
+          # naming it makes a failing worker identify itself in the log.
+          export REPO
+          export gather_dir="$RUNNER_TEMP/gather"
+          # shellcheck disable=SC2016
+          node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" select-artifacts \
+            --default-branch "$DEFAULT" --repo-id "$repo_id" \
+            --prs "$prs" --max-prs "${MAX_PRS:-0}" \
+            --repo "$REPO" --server-url "$GITHUB_SERVER_URL" \
+            < "$RUNNER_TEMP/artifacts.json" \
+            | xargs -0 -r -P 8 -n 3 bash -c '
+            set -uo pipefail
+            dest=$1 id=$2 label=$3
+            tmp=$(mktemp -d)
+            if ! gh api "repos/$REPO/actions/artifacts/$id/zip" > "$tmp/artifact.zip" 2>/dev/null; then
+              echo "::warning::$label: artifact $id download failed — skipping"
+            elif ! unzip -q "$tmp/artifact.zip" docs.zip -d "$tmp" >/dev/null 2>&1 || [ ! -f "$tmp/docs.zip" ]; then
+              # The FILE test, not the exit status: unzip exits 0 with only a
+              # "caution: filename not matched" note when the member is absent.
+              echo "::warning::$label: artifact $id has no docs.zip inside — skipping. Either it was built before docs.yml packed docs.zip (re-run that build to refresh it), or another workflow in this repo uploads an unrelated artifact also named docs (rename it — the artifact NAME is how versions are found)."
+            else
+              mv "$tmp/docs.zip" "$gather_dir/$dest.zip"
+            fi
+            rm -rf "$tmp"
+          ' gather-artifact
 
       # The default branch's last known-good docs.zip. Releases are durable and PRs are
       # ephemeral by design, but the DEFAULT BRANCH has no permanent source: it is
       # gathered from its latest CI artifact, which expires, after which it would drop
-      # out and the guard below would hard-fail.
-      #
-      # This used to be solved by publishing the zip into the site itself
-      # (`_sources/<default>.zip`) — permanent, but it shipped a multi-megabyte zip to
-      # every visitor's Pages artifact forever. The Actions cache holds it instead. The
-      # trade is real and deliberate: cache entries are evicted after 7 days without a
-      # read, and by LRU past 10 GB. A repo that goes quiet for over a week AND whose
-      # main CI artifact has expired loses this rung, where `_sources/` was forever.
+      # out and the guard below would hard-fail. The Actions cache holds a copy instead
+      # — evicted after 7 days without a read and by LRU past 10 GB, so a repo quiet for
+      # over a week AND whose CI artifact has expired loses the rung and fails loudly.
       #
       # Key is a bare prefix so it never matches exactly; restore-keys then supplies the
       # most recent entry.
@@ -412,9 +351,9 @@ jobs:
           key: mvs-default-v1-
           restore-keys: mvs-default-v1-
 
-      # Fallback chain for $DEFAULT.zip: current build → release/seed → branch CI (all
-      # above) → the cache → the deprecated in-site copy. Hard-fail if none of them
-      # produced it: a deploy missing the default branch publishes a hole.
+      # Fallback chain for $DEFAULT.zip: release/seed → branch CI (both above) → the
+      # cache. Hard-fail if none of them produced it: a deploy missing the default
+      # branch publishes a hole.
       - name: Ensure default-branch zip
         id: ensure-default
         env:
@@ -429,15 +368,9 @@ jobs:
             cp "$cache/default.zip" "$zip"
             echo "::notice::$DEFAULT restored from the Actions cache ($(stat -c%s "$zip") B) \
           — its CI artifact has expired, so this deploy is serving the last cached build"
-          # DEPRECATED rung, kept so a site deployed by an older publish.yml still has a
-          # source on its first upgraded deploy. Nothing writes _sources/ any more, so it
-          # disappears from the site on that very deploy; this read is one-shot insurance.
-          elif curl -fsSL "$PAGES_URL/$SOURCES_DIR/$DEFAULT.zip" -o "$zip" 2>/dev/null; then
-            echo "::notice::$DEFAULT restored from the deprecated in-site copy \
-          ($PAGES_URL/$SOURCES_DIR/$DEFAULT.zip) — it will be cached from here on"
           else
-            echo "::error::$DEFAULT: not provided by current build, releases, branch CI, \
-          the Actions cache, or the deprecated in-site copy — deploy aborted"
+            echo "::error::$DEFAULT: not provided by releases, branch CI or the Actions \
+          cache — deploy aborted"
             exit 1
           fi
           # Re-save only when the bytes actually changed: cache entries are immutable, so
@@ -450,8 +383,8 @@ jobs:
             echo "cache-key=mvs-default-v1-$new" >> "$GITHUB_OUTPUT"
           fi
 
-      # Same rule as the release-zip cache, and the same trap: test the BUILT branch, not
-      # github.ref, which under workflow_run is always the default branch.
+      # Same rule and the same trap as the release-zip cache above. Also gated on the
+      # content hash having changed, so an unchanged default branch adds no entry.
       - name: Save the default branch's durable docs.zip
         if: >-
           steps.ensure-default.outputs.cache-key != '' &&
@@ -465,13 +398,11 @@ jobs:
       #
       # THE ZIP-SHAPE CONTRACT: a docs.zip must unzip to exactly ONE top-level
       # directory, whose CONTENTS become site/<version-name>. The directory's NAME is
-      # ignored. docs.yml packs `html/`, but release assets are durable and long-lived
-      # — a repo migrating from python-copier-template's `_release.yml` has immutable
-      # releases carrying zips rooted at the TAG NAME (`mv html $GITHUB_REF_NAME;
-      # zip -r docs.zip $GITHUB_REF_NAME`), which cannot be re-cut. Keying on `html/`
-      # silently dropped every one of those releases from the switcher. Anything else
-      # — no entries, several entries, or files loose at the zip root — is malformed
-      # (nothing is known to produce it) and warns + skips rather than guessing.
+      # ignored, because release assets are durable and may have been packed by another
+      # pipeline — python-copier-template's `_release.yml` roots its zip at the TAG NAME,
+      # and an immutable release cannot be re-cut. Anything else — no entries, several
+      # entries, or files loose at the zip root — is malformed and warns + skips rather
+      # than guessing.
       - name: Extract artifacts into site
         run: |
           set -euo pipefail
@@ -495,34 +426,13 @@ jobs:
             fi
             rm -rf "$tmp"
           done
-          # upload-pages-artifact tars the whole site and GitHub Pages rejects the
-          # artifact over 1 GB. That ceiling arrives silently — deploys just start
-          # failing — so warn while there is still room to act. `max-releases` is the
-          # lever: it is unlimited by default, which is safe for a young project and a
-          # slow-motion footgun for an old one.
-          #
-          # The cap is on the COMPRESSED artifact, which is nothing like the size of the
-          # tree: this repo's own site is 734 MiB on disk but packs to 223 MiB, because
-          # HTML and JS compress ~3x. Comparing `du` against 1 GB would cry wolf at a
-          # third of the real usage. So measure the tree cheaply, and only pay for an
-          # actual pack when the tree is big enough for the answer to matter.
-          #
-          # -h matches upload-pages-artifact's --dereference: the `stable/` symlink is
-          # inflated to a full copy of a release in the real artifact, so a measurement
-          # that stored it as a symlink would under-read by a whole version.
-          bytes=$(du -sb "$RUNNER_TEMP/site" | cut -f1)
-          echo "assembled site: $(numfmt --to=iec --suffix=B "$bytes") uncompressed across \
+          # Report the assembled size. Pages rejects an artifact over 1 GB and
+          # deploy-pages warns when the upload exceeds it; `max-releases` / `max-prs` are
+          # the levers (see docs/how-to/keep-the-site-small.md). This is the tree on
+          # disk, so it reads high — the cap applies to the compressed upload, and
+          # HTML/JS packs around 3x.
+          echo "assembled site: $(du -sh "$RUNNER_TEMP/site" | cut -f1) on disk across \
           $(find "$RUNNER_TEMP/site" -mindepth 1 -maxdepth 1 -type d | wc -l) version dir(s)"
-          if [ "$bytes" -gt "$SIZE_PROBE_BYTES" ]; then
-            packed=$(tar -ch -C "$RUNNER_TEMP/site" . | gzip -1 -c | wc -c)
-            echo "packed artifact: ~$(numfmt --to=iec --suffix=B "$packed") (Pages rejects over 1 GB)"
-            if [ "$packed" -gt "$SIZE_WARN_BYTES" ]; then
-              echo "::warning title=Docs site approaching the Pages 1 GB limit::The \
-          deployed artifact is ~$(numfmt --to=iec --suffix=B "$packed"), against a hard \
-          1 GB cap. Set the \`max-releases\` input in your publish.yml to publish only the \
-          N most recent releases."
-            fi
-          fi
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.
@@ -544,36 +454,22 @@ jobs:
         with:
           path: ${{ runner.temp }}/site
 
-      # Deploy the uploaded artifact. deploy-pages stamps the deployment with
-      # pages_build_version = GITHUB_SHA and has no input to change it; the value is
-      # server-validated against the OIDC commit claim, so it CANNOT be overridden
-      # (a custom value 404s — actions/deploy-pages#383). The Pages backend silently
-      # DROPS a *second* deploy of an already-deployed SHA on a non-`workflow_dispatch`
-      # event (it reports success but the origin keeps serving the first artifact),
-      # EXCEPT a `workflow_dispatch` deploy of that SHA, which forces a re-serve. A
-      # release tag shares the default branch's just-deployed SHA, so an inline tag
-      # deploy would be dropped — which is why tags go through the `re-dispatch` job
-      # below (re-fired as workflow_dispatch) instead of here. main/internal-PR
-      # deploys are the FIRST of their SHA, so they serve fine inline. The Verify step
-      # below backstops any residual stale-origin case.
+      # deploy-pages stamps the deployment with pages_build_version = GITHUB_SHA and has
+      # no input to change it; the value is server-validated against the OIDC commit
+      # claim, so a custom one 404s (actions/deploy-pages#383). Under this workflow's
+      # triggers a repeat SHA still re-serves — see the header.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
 
-      # deploy-pages reports success once the deployment RECORD flips active — even
-      # if the Pages backend silently fails to update the SERVED origin (a wedged
-      # site can serve a stale artifact indefinitely; see the 2026-06 incident where
-      # a gh-pages→Actions cutover froze the origin while every deploy reported OK).
-      # The re-dispatch (deploy via workflow_dispatch) prevents the tag-after-merge
-      # drop; this is the backstop that turns any *other* stale-origin failure into a
-      # red check instead of silently serving old docs. Confirm the live switcher.json
-      # byte-matches the one we just assembled, polling up to ~6 min — the window is
-      # generous because a release deploys TWICE in quick succession on the same SHA (the
-      # merge-to-default-branch push, then the tag re-dispatch), and the second (dispatch)
-      # re-serve can take a few minutes to propagate to the origin behind the first
-      # (observed ~4 min on 2026-06-25). The loop exits the instant the origin matches,
-      # so a fast/first-of-SHA deploy isn't slowed. On failure, dump the origin headers
-      # (a frozen etag/last-modified is the wedge signature).
+      # deploy-pages reports success once the deployment RECORD flips active, even if the
+      # Pages backend fails to update the SERVED origin — a wedged site can serve a stale
+      # artifact indefinitely while every deploy reports OK. This turns that into a red
+      # check instead of silently serving old docs: confirm the live switcher.json
+      # byte-matches the one just assembled, polling up to ~6 min because a re-serve can
+      # take minutes to reach the origin. The loop exits the instant it matches, so a
+      # fast deploy isn't slowed. On failure, dump the origin headers (a frozen
+      # etag/last-modified is the wedge signature).
       - name: Verify the deployed origin matches what we assembled
         id: verify
         env:

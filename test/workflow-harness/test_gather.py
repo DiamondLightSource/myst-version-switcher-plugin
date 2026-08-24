@@ -1,10 +1,10 @@
 """Behaviour tests for publish-gh-pages.yml's gather steps. See run.py for how they load."""
 
-import os, sys, tempfile
+import os, re, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fixtures import ARTIFACTS, PRS, RELEASES
-from run import run, setup
+from fixtures import ARTIFACTS, PRS, RELEASES, art, rel
+from run import run, setup, steps_of
 
 fails = []
 
@@ -15,15 +15,22 @@ def check(name, cond, detail=""):
         fails.append(name)
 
 
-def do(tmp, maxrel="0", **kw):
+def do(tmp, maxrel="0", maxprs="0", **kw):
     """Run the three gather steps in order against one synthetic repo."""
     env, rt, data = setup(tmp, RELEASES, ARTIFACTS, PRS, **kw)
-    exprs = {"github.token": "t", "inputs.max-releases": maxrel, "runner.temp": rt}
+    exprs = {"github.token": "t", "inputs.max-releases": maxrel,
+             "inputs.max-prs": maxprs, "runner.temp": rt}
     r1 = run("Select releases to publish", env, exprs)
     assert r1.returncode == 0, r1.stderr
     r2 = run("Gather release artifacts", env, exprs)
     r3 = run("Gather branch CI artifacts", env, exprs)
     return env, rt, data, r1, r2, r3
+
+
+def log(r):
+    """Everything the step wrote to the workflow log: assemble.mjs decisions land on
+    stderr, the download warnings on stdout."""
+    return r.stdout + r.stderr
 
 print("\n-- unlimited: all valid releases gathered, junk skipped --")
 with tempfile.TemporaryDirectory() as tmp:
@@ -44,8 +51,39 @@ with tempfile.TemporaryDirectory() as tmp:
     check("artifacts API paginated exactly ONCE (was once per PR)",
           calls.count("actions/artifacts?name=docs") == 1,
           f"count={calls.count('actions/artifacts?name=docs')}")
-    check("newest artifact per SHA wins", "artifacts/9001/zip" in calls and "artifacts/9000/zip" not in calls)
+    check("newest artifact per SHA wins",
+          "artifacts/9001/zip" in calls and "artifacts/9000/zip" not in calls, calls)
     check("fork-owned same-named branch excluded", "artifacts/9002/zip" not in calls)
+
+print("\n-- the cache key comes from the selection, via GITHUB_OUTPUT --")
+# The restore step reads BOTH of these: `key` for an exact hit, `restore-keys` for the
+# prefix fallback to the previous selection. A missing/misspelt output silently degrades
+# the cache to a permanent miss, which nothing else here would notice.
+def cache_outputs(tmp, maxrel):
+    env, rt, data = setup(tmp, RELEASES, [], [])
+    ex = {"github.token": "t", "inputs.max-releases": maxrel, "runner.temp": rt}
+    r = run("Select releases to publish", env, ex)
+    assert r.returncode == 0, r.stderr
+    return dict(l.split("=", 1) for l in open(env["GITHUB_OUTPUT"]).read().splitlines() if l)
+
+with tempfile.TemporaryDirectory() as tmp:
+    out = cache_outputs(tmp, "0")
+    check("the step emits a cache-key",
+          bool(re.fullmatch(r"mvs-relzips-v1-[0-9a-f]{32}", out.get("cache-key", ""))),
+          out)
+    check("the step emits the bare namespace for restore-keys",
+          out.get("cache-prefix") == "mvs-relzips-v1-", out)
+    check("the key sits under the prefix",
+          out.get("cache-key", "").startswith(out.get("cache-prefix", "\0")), out)
+
+with tempfile.TemporaryDirectory() as tmp:
+    capped = cache_outputs(tmp, "2")
+    with tempfile.TemporaryDirectory() as tmp2:
+        uncapped = cache_outputs(tmp2, "0")
+    check("capping changes the key but not the namespace",
+          capped["cache-key"] != uncapped["cache-key"]
+          and capped["cache-prefix"] == uncapped["cache-prefix"],
+          f'{capped} vs {uncapped}')
 
 print("\n-- cache hit: second run downloads nothing --")
 with tempfile.TemporaryDirectory() as tmp:
@@ -57,7 +95,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("second run exits 0", r.returncode == 0, r.stderr)
     check("no release downloaded on a full cache hit",
           "release download" not in open(env["MOCK_CALLS"]).read())
-    check("log reports all cached", "4 cached, 0 to download" in r.stdout, r.stdout[:400])
+    check("log reports all cached", "4 cached, 0 downloaded" in r.stdout, r.stdout[:400])
 
 print("\n-- cap: only the newest N, seed exempt, cache pruned --")
 with tempfile.TemporaryDirectory() as tmp:
@@ -69,6 +107,39 @@ with tempfile.TemporaryDirectory() as tmp:
           sorted(os.listdir(f"{rt}/relcache")) == ["1.zip", "201.zip", "301.zip"], os.listdir(f"{rt}/relcache"))
     check("cap decision is explained in the log", "beyond max-releases=2" in r2.stdout, r2.stdout[:300])
 
+print("\n-- max-prs: newest builds win, an ineligible PR costs no slot --")
+# A dedicated fixture: the shared one has only one eligible PR, so no cap could bite.
+CAP_PRS = [(20, "sha20", False), (21, "sha21", False), (22, "sha22", False),
+           (23, "sha23", False), (24, "sha24", True)]
+CAP_ARTS = [art(1020, "sha20", "2026-05-01T00:00:00Z"),
+            art(1021, "sha21", "2026-05-03T00:00:00Z"),
+            art(1022, "sha22", "2026-05-02T00:00:00Z"),
+            # 23 has no artifact at all; 24 is an unapproved fork.
+            art(1024, "sha24", "2026-05-04T00:00:00Z")]
+
+def cap_prs(tmp, maxprs):
+    env, rt, data = setup(tmp, [], CAP_ARTS, CAP_PRS)
+    ex = {"github.token": "t", "inputs.max-prs": maxprs, "runner.temp": rt}
+    return run("Gather branch CI artifacts", env, ex), rt
+
+with tempfile.TemporaryDirectory() as tmp:
+    r, rt = cap_prs(tmp, "2")
+    got = sorted(os.listdir(f"{rt}/gather"))
+    check("cap keeps the two most recently built PRs", got == ["pr-21.zip", "pr-22.zip"], got)
+    check("the capped PR is explained", "PR #20 → skip: beyond max-prs=2" in log(r), log(r))
+    check("a PR with no artifact does not consume a slot",
+          "PR #23 → skip: no non-expired" in log(r), log(r))
+    check("an unapproved fork PR does not consume a slot",
+          "PR #24 → skip: fork PR" in log(r) and "pr-24.zip" not in got, log(r))
+    check("the cap is reported alongside the PR count", "(max-prs=2)" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    r, rt = cap_prs(tmp, "0")
+    got = sorted(os.listdir(f"{rt}/gather"))
+    check("max-prs 0 is unlimited",
+          got == ["pr-20.zip", "pr-21.zip", "pr-22.zip"], got)
+    check("no cap is announced when unlimited", "max-prs=" not in log(r), log(r))
+
 print("\n-- failures are isolated, not fatal --")
 with tempfile.TemporaryDirectory() as tmp:
     env, rt, data, r1, r2, r3 = do(tmp, dlfail=["2.0"], artfail=[9100], artnodocs=[9001])
@@ -79,8 +150,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the failed release is absent", "2.0.zip" not in got, got)
     check("failed download is warned", "::warning::release 2.0" in r2.stdout, r2.stdout[-400:])
     check("failed release is NOT left in the cache", "201.zip" not in os.listdir(f"{rt}/relcache"))
-    check("artifact download failure warned", "artifact 9100 download failed" in r3.stdout, r3.stdout[-500:])
-    check("artifact without docs.zip warned distinctly", "contains no docs.zip" in r3.stdout, r3.stdout[-500:])
+    check("artifact download failure warned", "artifact 9100 download failed" in log(r3), log(r3)[-500:])
+    check("artifact without docs.zip warned distinctly", "has no docs.zip inside" in log(r3), log(r3)[-500:])
+    check("that warning names both causes, not just the historical one",
+          "re-run that build" in log(r3) and "also named docs" in log(r3), log(r3)[-600:])
     check("main falls back to the seed release when its artifact is bad", "main.zip" in got, got)
 
 print("\n-- empty repo: no releases, no artifacts, no PRs --")
@@ -90,6 +163,8 @@ with tempfile.TemporaryDirectory() as tmp:
     a = run("Select releases to publish", env, exprs)
     b = run("Gather release artifacts", env, exprs)
     c = run("Gather branch CI artifacts", env, exprs)
+    # Also the guard on xargs -r: without it, an empty selection runs the worker once
+    # with no args, `set -u` trips on $1, and pipefail fails the whole deploy.
     check("all three steps survive an empty repo",
           a.returncode == 0 and b.returncode == 0 and c.returncode == 0,
           a.stderr + b.stderr + c.stderr)
@@ -98,11 +173,10 @@ with tempfile.TemporaryDirectory() as tmp:
 print("\n-- default-branch fallback chain --")
 import subprocess
 
-def ensure(tmp, *, gathered=None, cached=None, in_site=None):
+def ensure(tmp, *, gathered=None, cached=None):
     """Run Ensure-default-branch-zip with a chosen rung populated."""
     env, rt, data = setup(tmp, [], [], [])
     ex = {"github.token": "t", "runner.temp": rt}
-    env["PAGES_URL"] = in_site or "http://127.0.0.1:1"   # unroutable => the curl rung fails
     for path, marker in ((f"{rt}/gather/main.zip", gathered),
                          (f"{rt}/defaultcache/default.zip", cached)):
         if marker:
@@ -132,7 +206,6 @@ with tempfile.TemporaryDirectory() as tmp:
     # Same bytes already cached => no new immutable cache entry requested.
     env, rt, data = setup(tmp, [], [], [])
     ex = {"github.token": "t", "runner.temp": rt}
-    env["PAGES_URL"] = "http://127.0.0.1:1"
     os.makedirs(f"{rt}/defaultcache", exist_ok=True)
     subprocess.run([f"{data}/mkzip.sh", f"{rt}/gather/main.zip", "same"], check=True)
     subprocess.run([f"{data}/mkzip.sh", f"{rt}/defaultcache/default.zip", "same"], check=True)
@@ -144,7 +217,78 @@ with tempfile.TemporaryDirectory() as tmp:
           r.returncode == 0 and "cache-key=" not in open(env["GITHUB_OUTPUT"]).read(),
           open(env["GITHUB_OUTPUT"]).read())
 
-print("\n-- extract: zip shape contract and the size guard --")
+print("\n-- the parallel download passes rows as data, not as script text --")
+# The worker used to be `xargs -I{}`, which pastes each row into the script TEXT. Git
+# permits $ and () in a branch name, so a branch could smuggle a command substitution
+# into the label. Positional args make it inert; assert it stays that way.
+with tempfile.TemporaryDirectory() as tmp:
+    hostile = "br$(id -u)x"
+    env, rt, data = setup(tmp, [], [art(5000, "sha5000", "2026-05-01T00:00:00Z", branch=hostile)],
+                          [], artfail=[5000])
+    env["DEFAULT"] = hostile
+    r = run("Gather branch CI artifacts", env, {"github.token": "t", "runner.temp": rt})
+    check("the branch name reaches the warning verbatim", hostile in log(r), log(r)[-400:])
+    check("the command substitution in it is never executed",
+          f"br{os.getuid()}x" not in log(r), log(r)[-400:])
+
+# The worker's argument wiring: `bash -c` takes the arg AFTER the script as $0, so if
+# that placeholder is ever dropped, dest lands in $0 and every field shifts by one. A
+# space-bearing label is the case that shows it — the row still parses, it just lands in
+# the wrong place.
+with tempfile.TemporaryDirectory() as tmp:
+    env, rt, data = setup(tmp, [], [art(6000, "sha6000", "2026-05-01T00:00:00Z", branch="main")], [])
+    r = run("Gather branch CI artifacts", env, {"github.token": "t", "runner.temp": rt})
+    check("a row whose label contains spaces still stages at its own dest",
+          os.listdir(f"{rt}/gather") == ["main.zip"],
+          f'{os.listdir(f"{rt}/gather")} — label was {"default-branch CI (main)"!r}')
+
+print("\n-- the version-name contract: both sides derive the same string --")
+# docs.yml builds at BASE_URL=/repo/<version-name> and the gather independently stages
+# each source at site/<version-name>. Nothing is passed between them, so the ONLY thing
+# keeping a build's assets from 404ing is that the two rules agree. Pin them together.
+DOCS = steps_of("docs.yml", "build")
+
+def docs_yml_version_name(tmp, event, *, ref_name="", pr_number=""):
+    """Run docs.yml's own 'Compute version name' step and read its output."""
+    out = os.path.join(tmp, "ver.txt")
+    open(out, "w").close()
+    env = dict(os.environ, GITHUB_OUTPUT=out)
+    exprs = {"github.event_name": event, "github.ref_name": ref_name,
+             "github.event.pull_request.number": pr_number}
+    r = run("Compute version name", env, exprs, from_steps=DOCS)
+    assert r.returncode == 0, r.stderr
+    return open(out).read().strip().split("=", 1)[1]
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A tag: docs.yml uses the ref name; the gather uses the release's tag.
+    built = docs_yml_version_name(tmp, "push", ref_name="1.2.3")
+    env, rt, data = setup(tmp, [rel("1.2.3", "2026-01-01T00:00:00Z", 555)], [], [])
+    ex = {"github.token": "t", "inputs.max-releases": "0", "runner.temp": rt}
+    assert run("Select releases to publish", env, ex).returncode == 0
+    dest = open(f"{rt}/releases.tsv").read().split("\t")[1]
+    check(f"a tag builds and is staged at the same name ({built!r})", built == dest,
+          f"docs.yml says {built!r}, the gather stages at {dest!r}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A PR: docs.yml uses pr-<n>; the gather uses the PR number from `gh pr list`.
+    built = docs_yml_version_name(tmp, "pull_request", pr_number="7")
+    env, rt, data = setup(tmp, [], [art(7001, "pr7sha", "2026-01-01T00:00:00Z")],
+                          [(7, "pr7sha", False)])
+    r = run("Gather branch CI artifacts", env, {"github.token": "t", "runner.temp": rt})
+    staged = [f[:-4] for f in os.listdir(f"{rt}/gather")]
+    check(f"a PR builds and is staged at the same name ({built!r})", staged == [built],
+          f"docs.yml says {built!r}, the gather staged {staged}")
+
+with tempfile.TemporaryDirectory() as tmp:
+    # The default branch: docs.yml uses the ref name, the gather uses default_branch.
+    built = docs_yml_version_name(tmp, "push", ref_name="main")
+    env, rt, data = setup(tmp, [], [art(8001, "mainsha", "2026-01-01T00:00:00Z", branch="main")], [])
+    r = run("Gather branch CI artifacts", env, {"github.token": "t", "runner.temp": rt})
+    staged = [f[:-4] for f in os.listdir(f"{rt}/gather")]
+    check(f"the default branch builds and is staged at the same name ({built!r})",
+          staged == [built], f"docs.yml says {built!r}, the gather staged {staged}")
+
+print("\n-- extract: the zip-shape contract --")
 with tempfile.TemporaryDirectory() as tmp:
     env, rt, data = setup(tmp, [], [], [])
     ex = {"github.token": "t", "runner.temp": rt}
@@ -158,42 +302,9 @@ with tempfile.TemporaryDirectory() as tmp:
     got = sorted(os.listdir(f"{rt}/site"))
     check("extract exits 0 despite malformed zips", r.returncode == 0, r.stderr)
     check("only well-formed zips become version dirs", got == ["1.0", "main"], got)
-    check("_sources is no longer published into the site", "_sources" not in got, got)
     check("an unreadable zip warns", "could not unzip" in r.stdout, r.stdout)
     check("a two-root zip warns", "exactly one top-level directory" in r.stdout, r.stdout)
-    check("the site size is reported", "assembled site:" in r.stdout, r.stdout)
-    check("a small site does not trip the 1 GB warning",
-          "approaching the Pages 1 GB limit" not in r.stdout)
-    check("a small site is not packed just to measure it",
-          "packed artifact:" not in r.stdout, r.stdout)
-
-# The guard's whole point is the warning, and it compares the PACKED size — measuring
-# the tree with du would cry wolf, since HTML/JS packs ~3x (this repo's own site is
-# 734 MiB on disk and 223 MiB deployed). Dial the thresholds down rather than build a
-# multi-gigabyte fixture.
-with tempfile.TemporaryDirectory() as tmp:
-    env, rt, data = setup(tmp, [], [], [])
-    ex = {"github.token": "t", "runner.temp": rt}
-    subprocess.run([f"{data}/mkzip.sh", f"{rt}/gather/main.zip", "main"], check=True)
-    env["SIZE_PROBE_BYTES"] = "1"        # always pack
-    env["SIZE_WARN_BYTES"] = "1"         # always warn
-    r = run("Extract artifacts into site", env, ex)
-    check("past the probe threshold the tree is actually packed",
-          "packed artifact:" in r.stdout, r.stdout)
-    check("past the warn threshold a warning is emitted",
-          "::warning title=Docs site approaching the Pages 1 GB limit" in r.stdout, r.stdout)
-    check("the warning names max-releases as the lever", "max-releases" in r.stdout, r.stdout)
-
-with tempfile.TemporaryDirectory() as tmp:
-    env, rt, data = setup(tmp, [], [], [])
-    ex = {"github.token": "t", "runner.temp": rt}
-    subprocess.run([f"{data}/mkzip.sh", f"{rt}/gather/main.zip", "main"], check=True)
-    env["SIZE_PROBE_BYTES"] = "1"        # pack it...
-    env["SIZE_WARN_BYTES"] = str(10**12)  # ...but it is nowhere near the cap
-    r = run("Extract artifacts into site", env, ex)
-    check("a packed site under the cap reports but does not warn",
-          "packed artifact:" in r.stdout and "approaching the Pages 1 GB limit" not in r.stdout,
-          r.stdout)
+    check("the assembled size is reported", "assembled site:" in r.stdout, r.stdout)
 
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'all harness checks passed'}")
 sys.exit(1 if fails else 0)

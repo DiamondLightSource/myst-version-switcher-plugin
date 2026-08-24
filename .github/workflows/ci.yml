@@ -7,8 +7,8 @@ name: CI
 # It does NOT publish the site. publish.yml picks this run up on `workflow_run` once it
 # completes and deploys from there, so the site's reconstruction cost stays out of every
 # PR's critical path and a Pages failure never shows as a red check against an author who
-# cannot act on it. That also means this workflow needs no elevated permissions, and its
-# `name:` below is load-bearing — publish.yml matches on it.
+# cannot act on it. This workflow therefore needs no elevated permissions, and its `name:`
+# below is load-bearing — publish.yml matches on it.
 on:
   pull_request:
   push:

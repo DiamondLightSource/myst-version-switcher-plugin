@@ -5,13 +5,21 @@
  * dir, then the extract step unzips them all into the site tree. This file is
  * the final step: given the populated site tree it orders the versions, writes
  * switcher.json + index.html, and prints the stable-alias source dir on stdout.
- * Exposed as two subcommands, one at each end of the gather:
+ * Exposed as three subcommands: two that decide what the gather should fetch, and one
+ * that renders the assembled tree.
  *
- *   node assemble.mjs select-releases --default-branch <name> [--seed-tag <tag>]
- *                                     [--max-releases <n>] < releases.json
- *       → one TSV row per listed release deciding whether (and where) it lands in
- *         the site. Runs BEFORE the gather, so publish.yml downloads only what it
+ *   node assemble.mjs select-releases --default-branch <name> --out <file>
+ *                                     [--seed-tag <tag>] [--max-releases <n>] < releases.json
+ *       → write one TSV row per listed release to <file>, deciding whether (and
+ *         where) it lands in the site; print the cache key for that exact selection
+ *         on stdout. Runs BEFORE the gather, so publish.yml downloads only what it
  *         will actually publish.
+ *
+ *   node assemble.mjs select-artifacts --default-branch <name> --repo-id <id>
+ *                                      [--prs <file>] [--max-prs <n>] < artifacts.json
+ *       → print `dest \0 artifact-id \0 label \0` for every CI artifact to download
+ *         (the default branch's, plus each eligible open PR's), ready for
+ *         `xargs -0 -n 3`; a decision for every candidate goes to stderr.
  *
  *   node assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
@@ -23,6 +31,7 @@
  * `generate` file writes touch IO.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -41,13 +50,35 @@ export const DOCS_ZIP = "docs.zip";
 export const SEED_TAG = "pages-default-seed";
 
 /**
- * The DEPRECATED in-site durable store (`_sources/<default>.zip`). publish.yml used
- * to persist the default branch's docs.zip here every deploy; it now caches it
- * instead, so newly assembled trees never contain this directory. The exclusion
- * stays as insurance — it costs nothing, and a stray `_sources` dir must never be
- * mistaken for a version.
+ * Namespace for the release-zip `actions/cache` entries. Bump the version segment
+ * whenever a change here would make an existing entry mean something different, so
+ * old entries are abandoned rather than misread. `restore-keys` uses this bare
+ * prefix, so the workflow takes it from `select-releases` too rather than repeating
+ * the literal.
  */
-export const SOURCES_DIR = "_sources";
+export const RELZIPS_CACHE_PREFIX = "mvs-relzips-v1-";
+
+/**
+ * The cache key for a selection: the namespace plus a digest of the asset ids it
+ * intends to publish. Content-addressed on the SET, so cutting a release misses (and
+ * `restore-keys` then supplies the previous set, which shares every other zip), while
+ * a deploy that changes nothing re-uses the entry exactly.
+ *
+ * Asset ids, not tags: an id names immutable bytes, so a re-cut release can never be
+ * served from a stale entry. Skipped and capped-out releases contribute nothing, which
+ * is what keeps a capped site's cache capped.
+ */
+export function cacheKey(rows = []) {
+	const ids = rows
+		.filter((row) => row.dest !== null)
+		.map((row) => String(row.assetId))
+		.sort();
+	const digest = createHash("sha256")
+		.update(ids.map((id) => `${id}\n`).join(""))
+		.digest("hex")
+		.slice(0, 32);
+	return `${RELZIPS_CACHE_PREFIX}${digest}`;
+}
 
 /** Run a git command and return its non-empty stdout lines. */
 function gitLines(args) {
@@ -64,10 +95,7 @@ export function discoverVersions(siteDir) {
 		return [];
 	}
 	return entries
-		.filter(
-			(d) =>
-				d.isDirectory() && d.name !== STABLE_ALIAS && d.name !== SOURCES_DIR,
-		)
+		.filter((d) => d.isDirectory() && d.name !== STABLE_ALIAS)
 		.map((d) => d.name);
 }
 
@@ -85,9 +113,8 @@ export function getSortedTags() {
 
 /**
  * Order the gathered versions: `master`, `main`, then tags newest-first, then any
- * leftover directories (e.g. feature-branch previews) alphabetically. `tags` must
- * already be newest-first. Versions are the directory names under `site/` — the
- * current build is already among them, so there is no `add` parameter.
+ * leftover directories (e.g. PR previews) alphabetically. `tags` must already be
+ * newest-first; `builds` are the directory names under `site/`.
  */
 export function orderVersions(builds, tags) {
 	const remaining = new Set(builds);
@@ -110,14 +137,18 @@ export function orderVersions(builds, tags) {
 }
 
 /**
- * Newest first. Releases with no date sort last, and ties break on tag name so
- * the selection is deterministic (two releases can share a timestamp).
+ * Comparator: newest first, undated last. Timestamp ties break on `keyOf` ascending
+ * — arbitrary, but a total order, which is what matters: an unstable ranking would
+ * change the published set (and so the cache key) on identical inputs. Shared by the
+ * release cap and the PR cap so the two cannot drift apart.
  */
-function byDateDesc(a, b) {
-	const ta = a.date ? Date.parse(a.date) : Number.NEGATIVE_INFINITY;
-	const tb = b.date ? Date.parse(b.date) : Number.NEGATIVE_INFINITY;
-	if (ta !== tb) return tb - ta;
-	return a.tag.localeCompare(b.tag);
+function byDateDesc(keyOf) {
+	return (a, b) => {
+		const ta = a.date ? Date.parse(a.date) : Number.NEGATIVE_INFINITY;
+		const tb = b.date ? Date.parse(b.date) : Number.NEGATIVE_INFINITY;
+		if (ta !== tb) return tb - ta;
+		return String(keyOf(a)).localeCompare(String(keyOf(b)));
+	};
 }
 
 /**
@@ -132,17 +163,14 @@ function byDateDesc(a, b) {
  * number. Tags are wildly inconsistent across repos and a misparse silently drops
  * a release; the API already knows the order.
  *
- * The key is `created_at` (the tagged commit's date), NOT `published_at`.
- * `published_at` records when the release record was last published, so
- * re-publishing an old release makes it look new: blueapi has `1.3.2-a9` created
- * 2025-10-01 but published 2026-07-30, which under `published_at` outranks the
- * genuinely newer `1.11.3`. `created_at` is immune to that.
+ * The key is `created_at` (the tagged commit's date), NOT `published_at`, which
+ * records when the release record was last published — re-publishing an old
+ * release makes it look newer than releases that genuinely followed it.
  *
- * `maxReleases` caps how many releases the site publishes. It exists because the
- * deploy uploads the WHOLE site as one artifact and GitHub Pages caps that at 1 GB:
- * a repo with 131 released docs.zips was at 452 MB and climbing ~5 MB per release.
- * 0 means unlimited. The seed release is never capped — it is not a version, it
- * stands in for the default branch.
+ * `maxReleases` caps how many releases the site publishes, because the deploy
+ * uploads the WHOLE site as one artifact against a 1 GB Pages limit. 0 means
+ * unlimited. The seed release is never capped — it is not a version, it stands in
+ * for the default branch.
  *
  * @param {object[]} releases raw release objects
  * @param {{defaultBranch: string, seedTag?: string, maxReleases?: number}} opts
@@ -189,12 +217,131 @@ export function selectReleases(
 		// never consumes a slot. Everything past the cap is demoted in place.
 		const ranked = rows
 			.filter((row) => row.dest !== null && row.tag !== seedTag)
-			.sort(byDateDesc);
+			.sort(byDateDesc((row) => row.tag));
 		for (const row of ranked.slice(cap)) {
 			row.dest = null;
 			row.decision = `skip: beyond max-releases=${cap} (dated ${row.date ?? "unknown"})`;
 		}
 	}
+	return rows;
+}
+
+/**
+ * Decide which CI artifacts contribute a version, and why.
+ *
+ * Pure: takes the flattened `GET /repos/{repo}/actions/artifacts?name=docs` list plus
+ * the open-PR list with fork approval already resolved (that costs an API call per fork
+ * PR, so the caller settles it), and returns one row per candidate — the default branch
+ * and every PR — in a stable order, so the workflow can print a table accounting for all
+ * of them. `dest` is the `site/<dir>` the artifact becomes, or null when skipped.
+ *
+ * Two different lookups, deliberately:
+ *
+ *   - The DEFAULT BRANCH takes the newest artifact built from THIS repo on that branch.
+ *     `repoId` is a security boundary, not an optimisation: a fork's pull_request run
+ *     executes in the upstream repo's Actions, so without it a fork branch named `main`
+ *     could land in `site/main`. The chosen artifact is that filtered one — never a
+ *     re-lookup by SHA, which could hand back a fork's artifact for the same commit.
+ *   - A PR takes the newest artifact at its head SHA with NO repo filter, because a fork
+ *     PR's artifact legitimately belongs to the fork. `approved` is what gates those.
+ *
+ * `maxPrs` caps how many previews the site carries, ranked by build date. As with
+ * releases, the cap applies AFTER eligibility, so a PR with no artifact or an
+ * unapproved fork PR never consumes a slot. 0 means unlimited.
+ *
+ * @param {object[]} artifacts flattened artifact objects (expired ones are dropped here)
+ * @param {{defaultBranch: string, repoId: number|string,
+ *          prs?: {num: string, sha: string, approved: boolean}[],
+ *          maxPrs?: number}} opts
+ * @returns {{dest: string|null, label: string, artifactId: number|null, sha: string,
+ *            date: string|null, size: number, runId: number|null, decision: string}[]}
+ */
+export function selectArtifacts(
+	artifacts = [],
+	{ defaultBranch, repoId, prs = [], maxPrs = 0 } = {},
+) {
+	const cap = Number(maxPrs) > 0 ? Number(maxPrs) : 0;
+	const live = artifacts.filter((a) => a && !a.expired);
+
+	const meta = (artifact) => ({
+		artifactId: artifact?.id ?? null,
+		date: artifact?.created_at ?? null,
+		size: artifact?.size_in_bytes ?? 0,
+		runId: artifact?.workflow_run?.id ?? null,
+	});
+	// byDateDesc reads `.date`; artifacts carry `created_at`, so map before sorting
+	// rather than silently comparing undefined against undefined.
+	const newest = (candidates) =>
+		candidates.length === 0
+			? null
+			: candidates
+					.map((a) => ({ date: a?.created_at ?? null, key: String(a?.id), a }))
+					.sort(byDateDesc((x) => x.key))[0].a;
+
+	// Newest artifact per head SHA, for the PR lookups.
+	const bySha = new Map();
+	for (const artifact of live) {
+		const sha = artifact?.workflow_run?.head_sha;
+		if (!sha) continue;
+		const best = bySha.get(sha);
+		if (
+			!best ||
+			Date.parse(artifact.created_at) >= Date.parse(best.created_at)
+		) {
+			bySha.set(sha, artifact);
+		}
+	}
+
+	const rows = [];
+
+	const branchArtifact = newest(
+		live.filter(
+			(a) =>
+				a?.workflow_run?.head_branch === defaultBranch &&
+				String(a?.workflow_run?.head_repository_id) === String(repoId),
+		),
+	);
+	rows.push({
+		dest: branchArtifact ? defaultBranch : null,
+		label: `default-branch CI (${defaultBranch})`,
+		sha: branchArtifact?.workflow_run?.head_sha ?? "",
+		...meta(branchArtifact),
+		decision: branchArtifact
+			? "gather"
+			: "skip: no non-expired 'docs' artifact for the default branch",
+	});
+
+	const prRows = prs.map((pr) => {
+		const artifact = pr.approved ? bySha.get(pr.sha) : undefined;
+		const row = {
+			dest: null,
+			label: `PR #${pr.num}`,
+			num: pr.num,
+			sha: pr.sha,
+			...meta(artifact),
+			decision: "",
+		};
+		if (!pr.approved) {
+			row.decision = `skip: fork PR, head ${pr.sha.slice(0, 8)} not preview-approved`;
+		} else if (!artifact) {
+			row.decision = `skip: no non-expired 'docs' artifact for ${pr.sha.slice(0, 8)}`;
+		} else {
+			row.dest = `pr-${pr.num}`;
+			row.decision = "gather";
+		}
+		return row;
+	});
+
+	if (cap > 0) {
+		const ranked = prRows
+			.filter((row) => row.dest !== null)
+			.sort(byDateDesc((row) => row.num));
+		for (const row of ranked.slice(cap)) {
+			row.dest = null;
+			row.decision = `skip: beyond max-prs=${cap} (built ${row.date ?? "unknown"})`;
+		}
+	}
+	rows.push(...prRows);
 	return rows;
 }
 
@@ -229,7 +376,7 @@ export function preferredVersion(versions, tags) {
  * a `stable/` alias pointing at it and the root redirects to the constant
  * `stable/` URL. Before the first release (preferred is `main`/`master`/a
  * leftover, or a prerelease-only fallback) there is no `stable/` and the root
- * redirects straight to that fallback version, as today.
+ * redirects straight to that fallback version.
  *
  * @returns {{preferred: string|null, stableSrc: string|null, redirectTarget: string|null}}
  *   `stableSrc` is the version dir to alias as `stable/` (or null); `redirectTarget`
@@ -245,13 +392,10 @@ export function stablePlan(versions, tags) {
 
 /**
  * Required branches that did not end up in the assembled site. Pure. `versions`
- * are the discovered site dirs; a required branch is present iff its name is
- * among them. By the time `generate` runs, the current
- * ref and every gathered branch are already dirs, so this needs no separate
- * "present" bookkeeping. The action gathers a preview for every branch with a
- * recent CI build (dumb bash); this only guards that the required branches
- * (default: the repo's default branch) didn't silently vanish. `generate`
- * hard-fails on a non-empty result.
+ * are the discovered site dirs; a required branch is present iff its name is among
+ * them. Guards that a branch the site cannot do without (default: the repo's
+ * default branch) did not silently vanish — `generate` hard-fails on a non-empty
+ * result rather than publishing a hole.
  *
  * @param {string[]} [required] branches that must be present (raw names)
  * @param {string[]} [versions] discovered site dir names
@@ -279,7 +423,7 @@ export function switcherStruct(baseUrl, versions, preferred) {
 	});
 }
 
-/** Serialise the switcher exactly as the Python tool did (2-space JSON). */
+/** Serialise the switcher as pydata-style 2-space JSON. */
 export function renderSwitcher(baseUrl, versions, preferred) {
 	return JSON.stringify(switcherStruct(baseUrl, versions, preferred), null, 2);
 }
@@ -337,12 +481,14 @@ function cmdSelectReleases(rest) {
 			"default-branch": { type: "string" },
 			"seed-tag": { type: "string" },
 			"max-releases": { type: "string" },
+			out: { type: "string" },
 		},
 	});
 	const defaultBranch = values["default-branch"];
-	if (!defaultBranch) {
+	const out = values.out;
+	if (!defaultBranch || !out) {
 		throw new Error(
-			"usage: assemble.mjs select-releases --default-branch <name> [--seed-tag <tag>] [--max-releases <n>] < releases.json",
+			"usage: assemble.mjs select-releases --default-branch <name> --out <file> [--seed-tag <tag>] [--max-releases <n>] < releases.json",
 		);
 	}
 	const raw = readFileSync(0, "utf8").trim();
@@ -360,29 +506,107 @@ function cmdSelectReleases(rest) {
 		`${rows.length} release(s) listed, ${gathered.length} selected` +
 			(cap > 0 ? ` (max-releases=${cap})` : " (max-releases unlimited)"),
 	);
-	if (cap > 0 && rows.length - gathered.length > 0) {
-		const dropped = rows.filter((row) =>
-			row.decision.startsWith("skip: beyond"),
+	const dropped = rows.filter((row) => row.decision.startsWith("skip: beyond"));
+	if (dropped.length > 0) {
+		console.error(
+			`${dropped.length} release(s) dropped by the cap — oldest kept: ` +
+				`${gathered.map((r) => r.tag).slice(-1)[0] ?? "(none)"}`,
 		);
-		if (dropped.length > 0) {
-			console.error(
-				`${dropped.length} release(s) dropped by the cap — oldest kept: ` +
-					`${gathered.map((r) => r.tag).slice(-1)[0] ?? "(none)"}`,
-			);
-		}
 	}
 
-	for (const row of rows) {
-		const cells = [
-			field(row.tag),
-			field(row.dest),
-			field(row.date),
-			field(row.size),
-			field(row.assetId),
-			field(row.decision),
-		];
-		process.stdout.write(`${cells.join("\t")}\n`);
+	const tsv = rows
+		.map((row) =>
+			[
+				field(row.tag),
+				field(row.dest),
+				field(row.date),
+				field(row.size),
+				field(row.assetId),
+				field(row.decision),
+			].join("\t"),
+		)
+		.map((line) => `${line}\n`)
+		.join("");
+	writeFileSync(out, tsv, "utf8");
+
+	// The only stdout: the cache key for exactly this selection.
+	console.log(cacheKey(rows));
+}
+
+/**
+ * `select-artifacts --default-branch <name> --repo-id <id> [--prs <file>]
+ *                  [--max-prs <n>] [--server-url <url>] [--repo <owner/name>]`
+ * — read the flattened artifacts JSON on stdin (`gh api --paginate … | jq -rs
+ * '[.[].artifacts[]]'`) and print, for every artifact to download, three NUL-separated
+ * fields: dest, artifact id, label. That feeds `xargs -0 -n 3` directly, which hands
+ * them to the worker as positional args — data, never script text. NUL because a label
+ * carries spaces and a delimiter the payload cannot contain is the only kind that
+ * cannot be spoofed by it. Decisions go to stderr, so the log stays readable.
+ *
+ * `--prs` is TSV: `number <TAB> head-sha <TAB> approved`, with fork approval already
+ * resolved by the caller (it costs an API call per fork PR).
+ */
+function cmdSelectArtifacts(rest) {
+	const { values } = parseArgs({
+		args: rest,
+		options: {
+			"default-branch": { type: "string" },
+			"repo-id": { type: "string" },
+			"max-prs": { type: "string" },
+			prs: { type: "string" },
+			"server-url": { type: "string" },
+			repo: { type: "string" },
+		},
+	});
+	const { "default-branch": defaultBranch, "repo-id": repoId } = values;
+	if (!defaultBranch || !repoId) {
+		throw new Error(
+			"usage: assemble.mjs select-artifacts --default-branch <name> --repo-id <id> [--prs <file>] [--max-prs <n>] [--server-url <url>] [--repo <owner/name>] < artifacts.json",
+		);
 	}
+	const raw = readFileSync(0, "utf8").trim();
+	const artifacts = raw ? JSON.parse(raw) : [];
+
+	const prs = (values.prs ? readFileSync(values.prs, "utf8") : "")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			const [num, sha, approved] = line.split("\t");
+			return { num, sha: sha ?? "", approved: approved === "true" };
+		});
+
+	const cap = Number(values["max-prs"] ?? 0) || 0;
+	const rows = selectArtifacts(artifacts, {
+		defaultBranch,
+		repoId,
+		prs,
+		maxPrs: cap,
+	});
+	const wanted = rows.filter((row) => row.dest !== null);
+
+	console.error(
+		`${artifacts.filter((a) => a && !a.expired).length} non-expired 'docs' artifact(s), ` +
+			`${prs.length} open PR(s), ${wanted.length} to gather` +
+			(cap > 0 ? ` (max-prs=${cap})` : ""),
+	);
+	const runUrl = (row) =>
+		values.repo && row.runId
+			? ` from ${values["server-url"] || "https://github.com"}/${values.repo}/actions/runs/${row.runId}`
+			: "";
+	for (const row of rows) {
+		console.error(
+			row.dest === null
+				? `  ${row.label} → ${row.decision}`
+				: `  ${row.label} → artifact ${row.artifactId} (${row.size} B, built ${row.date})${runUrl(row)} @ ${row.sha.slice(0, 8)}`,
+		);
+	}
+
+	// The only stdout: NUL-separated triples for `xargs -0 -n 3`.
+	process.stdout.write(
+		wanted
+			.map((row) => `${row.dest}\0${row.artifactId}\0${row.label}\0`)
+			.join(""),
+	);
 }
 
 /**
@@ -457,8 +681,12 @@ export function main(argv = process.argv.slice(2)) {
 			return cmdGenerate(rest);
 		case "select-releases":
 			return cmdSelectReleases(rest);
+		case "select-artifacts":
+			return cmdSelectArtifacts(rest);
 		default:
-			throw new Error("usage: assemble.mjs generate|select-releases ...");
+			throw new Error(
+				"usage: assemble.mjs generate|select-releases|select-artifacts ...",
+			);
 	}
 }
 
