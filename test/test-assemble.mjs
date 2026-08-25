@@ -312,6 +312,13 @@ const toMain = renderRedirect("main");
 assert.match(toMain, /url=\.\/main\/index\.html/);
 ok("renderRedirect targets the fallback dir before the first release");
 
+// defence in depth: docs.yml validates the version name, but the two rules live in
+// different files and this one renders HTML.
+const nasty = renderRedirect('x"><script>&');
+assert.ok(!nasty.includes("<script>"));
+assert.ok(nasty.includes("&quot;&gt;&lt;script&gt;&amp;"));
+ok("renderRedirect escapes HTML metacharacters in the target");
+
 // --- selectReleases: which releases become site dirs, and why -----------------
 // Shaped like the raw `GET /repos/{repo}/releases` payload publish.yml pipes in.
 const rel = (tag, created, { docsZip = true, size = 100 } = {}) => ({

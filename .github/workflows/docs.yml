@@ -62,21 +62,45 @@ jobs:
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
       # must be built with: pr-<n> for PRs, otherwise the ref name (the default branch,
-      # or a tag without `/`). No sanitisation — every version name is URL/path-safe.
+      # or a tag without `/`).
       #
       # This is the OTHER half of the contract, and it is not passed anywhere: the
       # gather independently re-derives the same name for each source it stages (a
       # release's tag, a PR's number, the repo's default_branch) and unpacks the zip at
       # site/<that name>. Both sides compute the same string from the same facts, so
       # this rule and assemble.mjs's dest rule must change together.
+      #
+      # The name is VALIDATED, not assumed clean. In THIS repo it is clean by
+      # construction (`tags: ['*']` never builds a `/`-tag), but this is a reusable
+      # workflow: a consumer triggering it on `push: branches: ['**']` would let anyone
+      # who can push a branch choose the string — and git accepts `$( )`, backticks and
+      # quotes in a ref name. Hence both halves here: the ref comes through `env:` so
+      # the shell never parses it as script text, and the character set is then checked
+      # so it stays a safe URL path segment and site dir.
       - name: Compute version name
         id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            name="pr-${{ github.event.pull_request.number }}"
+          if [ "$EVENT" = pull_request ]; then
+            name="pr-$PR_NUMBER"
           else
-            name="${{ github.ref_name }}"
+            name="$REF_NAME"
+          fi
+          case "$name" in
+            "" | "." | "..") ok=false ;;
+            *[!A-Za-z0-9._-]*) ok=false ;;
+            *) ok=true ;;
+          esac
+          if [ "$ok" != true ]; then
+            echo "::error::version name '$name' is not usable as a URL path segment \
+          — it must be non-empty and contain only A-Z a-z 0-9 . _ - (a '/' in a branch \
+          or tag name is the usual cause). Build this ref under a name that is, or \
+          exclude it from the workflow's triggers."
+            exit 1
           fi
           echo "version-name=$name" >> "$GITHUB_OUTPUT"
 

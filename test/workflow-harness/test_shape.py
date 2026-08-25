@@ -101,6 +101,30 @@ for cap in ("max-releases", "max-prs"):
     val = str(with_block.get(cap, ""))
     check(f"{cap} is set as a literal", val.isdigit(), repr(val))
 
+# ── Cross-cutting: every workflow file, every job ──────────────────────────────
+#
+# A context value interpolated into a `run:` body is substituted as SCRIPT TEXT before
+# bash sees it, so a ref name containing $( ) or backticks executes. These are REUSABLE
+# workflows: a consumer can trigger docs.yml on `push: branches: ['**']`, which hands
+# the string to anyone who can push a branch. The rule is therefore absolute rather than
+# case-by-case — every context value comes through `env:` — and this is what keeps it
+# absolute. There is deliberately no allow-list; add one only with a comment saying why
+# the value cannot be attacker-controlled.
+print("\n-- every workflow: no ${{ }} inside a run: body --")
+for name in sorted(os.listdir(WF)):
+    if not name.endswith((".yml", ".yaml")):
+        continue
+    wf = load(name)
+    for job_name, job in (wf.get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            body = step.get("run")
+            if not body or "${{" not in body:
+                continue
+            label = step.get("name", body.splitlines()[0][:40])
+            check(f"{name}:{job_name}:{label!r} takes context through env:", False,
+                  "\n         ".join(l.strip() for l in body.splitlines() if "${{" in l))
+check("all run: bodies are expression-free", True)
+
 print("\n-- entry: ci.yml --")
 check("builds without publishing", "publish" not in ci["jobs"], list(ci["jobs"]))
 check("uploads the docs artifact the engine gathers", "docs" in ci["jobs"], list(ci["jobs"]))

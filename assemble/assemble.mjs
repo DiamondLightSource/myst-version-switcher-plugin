@@ -508,16 +508,34 @@ export function renderSwitcher(baseUrl, versions, preferred) {
 	return JSON.stringify(switcherStruct(baseUrl, versions, preferred), null, 2);
 }
 
-/** Root redirect to `target` (relative, so it is host- and repo-agnostic). */
+/** Escape a value for an HTML attribute or text node. */
+function escapeHtml(value) {
+	return String(value)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+/**
+ * Root redirect to `target` (relative, so it is host- and repo-agnostic).
+ *
+ * `target` is a version name, which docs.yml validates down to `[A-Za-z0-9._-]` — so
+ * the escaping is belt-and-braces. It stays because this renders HTML from a value
+ * that ultimately derives from a ref name, and the two rules live in different files:
+ * loosening the workflow's character set should not be able to inject markup here.
+ */
 export function renderRedirect(target) {
+	const safe = escapeHtml(target);
 	return `<!DOCTYPE html>
 <html>
 
 <head>
-    <title>Redirecting to ${target}</title>
+    <title>Redirecting to ${safe}</title>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=./${target}/index.html">
-    <link rel="canonical" href="${target}/index.html">
+    <meta http-equiv="refresh" content="0; url=./${safe}/index.html">
+    <link rel="canonical" href="${safe}/index.html">
 </head>
 
 </html>
