@@ -10,6 +10,24 @@ case "$*" in
   "pr list --repo $REPO --state open --limit 200 --json number,headRefOid,isCrossRepository -q .[] | [.number, .headRefOid, .isCrossRepository] | @tsv")
                                            cat "$MOCK_DATA/prs.tsv" ;;
 esac
+# A release asset, by ASSET ID (the workflow no longer downloads by tag). The
+# download-fails fixture still lists TAGS, so map the id back through releases.json.
+if [[ "$*" == api*releases/assets/* ]]; then
+  id=$(sed 's#.*releases/assets/\([0-9]*\).*#\1#' <<<"$*")
+  tag=$(python3 -c "
+import json,sys
+for r in json.load(open('$MOCK_DATA/releases.json')):
+    for a in r['assets']:
+        if str(a['id']) == '$id': print(r['tag_name'])
+" 2>/dev/null)
+  if grep -qxF "$tag" "$MOCK_DATA/download-fails" 2>/dev/null; then
+    # As the real gh does when the request fails but stdout is redirected to a file:
+    # exit non-zero AND leave an error body behind.
+    echo '{"message":"Not Found"}'; echo "HTTP 404: not found" >&2; exit 1
+  fi
+  "$MOCK_DATA/mkzip.sh" /dev/stdout "release-$tag"; exit 0
+fi
+
 case "$1$2" in
   releasedownload)
     tag="$3"; out=""

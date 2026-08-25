@@ -226,15 +226,25 @@ jobs:
               if [ -s "$relcache/$assetid.zip" ]; then
                 hits=$((hits + 1))
                 decision="$decision (cache hit)"
-              elif gh release download "$tag" --repo "$REPO" -p docs.zip \
-                     -O "$relcache/$assetid.zip" 2>"$RUNNER_TEMP/relcache-download.err"; then
+              # Fetch by ASSET ID, not `gh release download <tag> -p docs.zip`, so the
+              # bytes match the id they are cached under. The cache is id-addressed
+              # precisely because an id names immutable bytes — but a re-cut release
+              # between the listing above and this download would have handed the NEW
+              # docs.zip to the OLD id, cached for every later deploy to trust.
+              elif gh api "repos/$REPO/releases/assets/$assetid" \
+                     -H 'Accept: application/octet-stream' \
+                     > "$relcache/$assetid.zip" 2>"$RUNNER_TEMP/relcache-download.err" \
+                   && [ -s "$relcache/$assetid.zip" ] \
+                   && [ "$(head -c 2 "$relcache/$assetid.zip")" = PK ]; then
                 downloads=$((downloads + 1))
                 decision="$decision (downloaded)"
               else
-                # Leave no truncated zip behind for the next run's cache to trust.
+                # Leave nothing behind for the next run's cache to trust: a redirect to
+                # a file means a FAILED request still wrote an error body, so the exit
+                # status alone is not enough — hence the zip magic check above.
                 rm -f "$relcache/$assetid.zip"
                 decision="$decision (DOWNLOAD FAILED — skipped)"
-                echo "::warning::release $tag: docs.zip download failed — skipping. $(head -1 "$RUNNER_TEMP/relcache-download.err" 2>/dev/null)" >> "$warnings"
+                echo "::warning::release $tag: docs.zip (asset $assetid) download failed — skipping. $(head -1 "$RUNNER_TEMP/relcache-download.err" 2>/dev/null)" >> "$warnings"
               fi
               if [ -s "$relcache/$assetid.zip" ]; then
                 cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
@@ -292,6 +302,7 @@ jobs:
           # Fork approval is an API call per cross-repo PR, so settle it here and pass
           # the answer in — assemble.mjs stays free of network IO.
           prs="$RUNNER_TEMP/prs.tsv"; : > "$prs"
+          pr_limit=200
           while IFS=$'\t' read -r num sha cross; do
             [ -n "$num" ] || continue
             approved=true
@@ -300,9 +311,17 @@ jobs:
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
             fi
             printf '%s\t%s\t%s\n' "$num" "$sha" "$approved" >> "$prs"
-          done < <(gh pr list --repo "$REPO" --state open --limit 200 \
+          done < <(gh pr list --repo "$REPO" --state open --limit "$pr_limit" \
             --json number,headRefOid,isCrossRepository \
             -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+          # A truncated listing is otherwise indistinguishable from a repo that happens
+          # to have exactly $pr_limit open PRs: the missing ones simply get no preview,
+          # with nothing in the log to explain it.
+          if [ "$(wc -l < "$prs")" -ge "$pr_limit" ]; then
+            echo "::warning::more than $pr_limit open PRs — only the first $pr_limit were \
+          considered for previews, so some open PRs will have none. max-prs caps how many \
+          are published; this caps how many are even looked at."
+          fi
 
 
           # The API serves an artifact as a zip-of-the-artifact, with docs.zip inside.

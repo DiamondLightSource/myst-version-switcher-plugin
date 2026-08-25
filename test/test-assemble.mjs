@@ -17,6 +17,7 @@ import {
 	missingRequired,
 	orderTags,
 	orderVersions,
+	parseCap,
 	preferredVersion,
 	RELZIPS_CACHE_PREFIX,
 	renderRedirect,
@@ -236,6 +237,25 @@ assert.deepEqual(stablePlan(["main", "1.1.0-beta.1"], ["1.1.0-beta.1"]), {
 	redirectTarget: "main",
 });
 ok("stablePlan never aliases a hyphenated prerelease as stable");
+
+// --- parseCap: a cap that cannot be read is not a cap of 0 ---
+assert.equal(parseCap(undefined), 0);
+assert.equal(parseCap(""), 0);
+assert.equal(parseCap("0"), 0);
+assert.equal(parseCap("30"), 30);
+assert.equal(parseCap(30), 30);
+ok("parseCap accepts non-negative integers, absent means unlimited");
+
+// `Number(x) || 0` turned every one of these into 0 — i.e. UNLIMITED — so a typo in a
+// consumer's publish.yml silently disabled the 1 GB guard.
+for (const bad of ["abc", "-1", "3O", "1.5", "1e3", " ", "30 releases"]) {
+	assert.throws(
+		() => parseCap(bad, "max-releases"),
+		/max-releases must be/,
+		`parseCap(${JSON.stringify(bad)})`,
+	);
+}
+ok("parseCap throws on anything that is not a non-negative integer");
 
 // --- missingRequired: required branches absent from the discovered site dirs ---
 // versions are the discovered site dirs; the default branch and every gathered
@@ -543,6 +563,24 @@ assert.equal(
 	1,
 );
 ok("selectArtifacts still reports the default branch when nothing was found");
+
+// --- selectArtifacts: the per-SHA index breaks ties by the shared comparator ---
+// Two artifacts for one PR head, created in the same second (a re-run, a matrix). The
+// winner must not depend on the order the API paginated them in.
+const sameSecond = [
+	art(9301, "prsha", "2026-05-02T00:00:00Z"),
+	art(9302, "prsha", "2026-05-02T00:00:00Z"),
+];
+const pickFrom = (list) =>
+	selectArtifacts(list, {
+		defaultBranch: "main",
+		repoId: 42,
+		prs: [pr(5, "prsha")],
+	}).find((row) => row.dest === "pr-5")?.artifactId;
+assert.equal(pickFrom(sameSecond), pickFrom([...sameSecond].reverse()));
+ok(
+	"selectArtifacts picks the same artifact whatever order the API returned them in",
+);
 
 // --- cacheKey: the release-zip cache key is derived from the SELECTION ---
 const keyRows = selectReleases(

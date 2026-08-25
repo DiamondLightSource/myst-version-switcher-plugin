@@ -81,6 +81,26 @@ export function cacheKey(rows = []) {
 	return `${RELZIPS_CACHE_PREFIX}${digest}`;
 }
 
+/**
+ * A site-size cap (`max-releases` / `max-prs`) as a non-negative integer; 0 means
+ * unlimited. Throws on anything else.
+ *
+ * This used to be `Number(x) || 0`, which points the wrong way: `Number("3O")` is NaN
+ * and `|| 0` turns NaN into 0 — so a typo in a consumer's publish.yml silently
+ * DISABLED the cap that exists to stop a 1 GB deploy failure. A cap you cannot read is
+ * not a cap of 0.
+ */
+export function parseCap(value, name = "cap") {
+	if (value === undefined || value === null || value === "") return 0;
+	const text = String(value).trim();
+	if (!/^\d+$/.test(text)) {
+		throw new Error(
+			`${name} must be a non-negative integer (0 = unlimited), got ${JSON.stringify(value)}`,
+		);
+	}
+	return Number(text);
+}
+
 /** Run a git command and return its non-empty stdout lines. */
 function gitLines(args) {
 	const out = execFileSync("git", args, { encoding: "utf8" });
@@ -149,8 +169,10 @@ export function orderVersions(builds, tags, defaultBranch) {
 /**
  * Comparator: newest first, undated last. Timestamp ties break on `keyOf` ascending
  * — arbitrary, but a total order, which is what matters: an unstable ranking would
- * change the published set (and so the cache key) on identical inputs. Shared by the
- * release cap and the PR cap so the two cannot drift apart.
+ * change the published set (and so the cache key) on identical inputs. The ONLY
+ * "which of these is newest?" rule in this file: the release cap, the PR cap, the
+ * default-branch artifact and the per-SHA index all reach it through `byDateDesc` or
+ * `newest`, so none of them can break a tie differently from the others.
  */
 function byDateDesc(keyOf) {
 	return (a, b) => {
@@ -191,7 +213,7 @@ export function selectReleases(
 	releases = [],
 	{ defaultBranch, seedTag = SEED_TAG, maxReleases = 0 } = {},
 ) {
-	const cap = Number(maxReleases) > 0 ? Number(maxReleases) : 0;
+	const cap = parseCap(maxReleases, "max-releases");
 
 	const rows = releases.map((release) => {
 		const tag = release?.tag_name ?? "";
@@ -270,7 +292,7 @@ export function selectArtifacts(
 	artifacts = [],
 	{ defaultBranch, repoId, prs = [], maxPrs = 0 } = {},
 ) {
-	const cap = Number(maxPrs) > 0 ? Number(maxPrs) : 0;
+	const cap = parseCap(maxPrs, "max-prs");
 	const live = artifacts.filter((a) => a && !a.expired);
 
 	const meta = (artifact) => ({
@@ -288,19 +310,20 @@ export function selectArtifacts(
 					.map((a) => ({ date: a?.created_at ?? null, key: String(a?.id), a }))
 					.sort(byDateDesc((x) => x.key))[0].a;
 
-	// Newest artifact per head SHA, for the PR lookups.
-	const bySha = new Map();
+	// Newest artifact per head SHA, for the PR lookups — through `newest`, so BOTH
+	// lookups break a timestamp tie the same way. This loop used to keep whichever
+	// artifact the API happened to return last, i.e. page order, which is not a rule
+	// at all: two artifacts created in the same second (a matrix, a re-run) could
+	// swap the preview between deploys.
+	const groups = new Map();
 	for (const artifact of live) {
 		const sha = artifact?.workflow_run?.head_sha;
 		if (!sha) continue;
-		const best = bySha.get(sha);
-		if (
-			!best ||
-			Date.parse(artifact.created_at) >= Date.parse(best.created_at)
-		) {
-			bySha.set(sha, artifact);
-		}
+		const list = groups.get(sha);
+		if (list) list.push(artifact);
+		else groups.set(sha, [artifact]);
 	}
+	const bySha = new Map([...groups].map(([sha, list]) => [sha, newest(list)]));
 
 	const rows = [];
 
@@ -591,7 +614,7 @@ function cmdSelectReleases(rest) {
 	}
 	const raw = readFileSync(0, "utf8").trim();
 	const releases = raw ? JSON.parse(raw) : [];
-	const cap = Number(values["max-releases"] ?? 0) || 0;
+	const cap = parseCap(values["max-releases"], "--max-releases");
 
 	const rows = selectReleases(releases, {
 		defaultBranch,
@@ -673,7 +696,7 @@ function cmdSelectArtifacts(rest) {
 			return { num, sha: sha ?? "", approved: approved === "true" };
 		});
 
-	const cap = Number(values["max-prs"] ?? 0) || 0;
+	const cap = parseCap(values["max-prs"], "--max-prs");
 	const rows = selectArtifacts(artifacts, {
 		defaultBranch,
 		repoId,

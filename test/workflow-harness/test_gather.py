@@ -54,6 +54,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("newest artifact per SHA wins",
           "artifacts/9001/zip" in calls and "artifacts/9000/zip" not in calls, calls)
     check("fork-owned same-named branch excluded", "artifacts/9002/zip" not in calls)
+    # By ASSET ID, not by tag: the cache is id-addressed, so fetching `-p docs.zip` from
+    # a tag could cache freshly re-cut bytes under the old id.
+    check("release zips are fetched by asset id",
+          "releases/assets/301" in calls and "release download" not in calls, calls)
 
 print("\n-- the cache key comes from the selection, via GITHUB_OUTPUT --")
 # The restore step reads BOTH of these: `key` for an exact hit, `restore-keys` for the
@@ -149,12 +153,31 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a failed release download does not block the others", "3.0.zip" in got and "1.0.zip" in got)
     check("the failed release is absent", "2.0.zip" not in got, got)
     check("failed download is warned", "::warning::release 2.0" in r2.stdout, r2.stdout[-400:])
+    # `gh api > file` writes the error body before exiting non-zero, so "nothing left
+    # behind" needs the zip-magic check as well as the exit status.
     check("failed release is NOT left in the cache", "201.zip" not in os.listdir(f"{rt}/relcache"))
     check("artifact download failure warned", "artifact 9100 download failed" in log(r3), log(r3)[-500:])
     check("artifact without docs.zip warned distinctly", "has no docs.zip inside" in log(r3), log(r3)[-500:])
     check("that warning names both causes, not just the historical one",
           "re-run that build" in log(r3) and "also named docs" in log(r3), log(r3)[-600:])
     check("main falls back to the seed release when its artifact is bad", "main.zip" in got, got)
+
+print("\n-- a malformed cap fails the deploy rather than silently unlimiting it --")
+with tempfile.TemporaryDirectory() as tmp:
+    env, rt, data = setup(tmp, RELEASES, ARTIFACTS, PRS)
+    r = run("Select releases to publish", env,
+            {"github.token": "t", "inputs.max-releases": "3O", "runner.temp": rt})
+    check("select-releases exits non-zero on a mistyped cap", r.returncode != 0, log(r))
+    check("and says what it wanted", "non-negative integer" in log(r), log(r))
+
+print("\n-- more open PRs than the gather even looks at --")
+with tempfile.TemporaryDirectory() as tmp:
+    many = [(n, f"sha{n}", False) for n in range(1, 201)]
+    env, rt, data = setup(tmp, [], [], many)
+    r = run("Gather branch CI artifacts", env,
+            {"github.token": "t", "inputs.max-prs": "0", "runner.temp": rt})
+    check("a truncated PR listing is warned about",
+          "::warning::more than 200 open PRs" in log(r), log(r)[-400:])
 
 print("\n-- empty repo: no releases, no artifacts, no PRs --")
 with tempfile.TemporaryDirectory() as tmp:
