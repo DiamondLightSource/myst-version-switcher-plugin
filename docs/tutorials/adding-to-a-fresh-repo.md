@@ -153,7 +153,9 @@ jobs:
 
 That is the whole publish setup: no job in `ci.yml`, no shim, nothing to thread through.
 A maintainer publishes a fork preview by running this workflow from the Actions tab with
-the `pr` number.
+the `pr` number — which serves that fork's HTML and JS from your Pages origin, shared
+with the rest of the org's sites, so read [what you are
+approving](../reference/workflows.md#what-approving-a-fork-preview-grants) before you do.
 
 ## 4. Push your branch and open a PR
 

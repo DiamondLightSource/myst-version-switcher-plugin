@@ -69,7 +69,29 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 Both caps exist because the site deploys as **one** Pages artifact against a hard
 **1 GB** limit, which a long-lived project will eventually hit. Set them as **literals**
 in `publish.yml`'s `with:` block so they apply on every path. See
-[keep-the-site-small](../how-to/keep-the-site-small.md).
+[keep-the-site-small](../how-to/keep-the-site-small.md). A cap that is not a
+non-negative integer fails the deploy rather than being read as `0`/unlimited.
+
+:::{note} `.mvs/` is reserved
+The job checks your repo out at the workspace root and this project's `assemble/` into
+`.mvs/` beside it, so a repo of your own with a `.mvs/` directory would collide. Nothing
+else in the workspace is touched, and the checkout is discarded with the runner.
+:::
+
+### What approving a fork preview grants
+
+The `pr` input publishes fork-authored HTML and JavaScript to your Pages site, and a
+project Pages site shares an **origin** with every other Pages site in the org:
+`https://ORG.github.io`. Same origin means the same `localStorage`, the same
+service-worker scope and any cookies scoped to that host — so an approved preview is not
+sandboxed from the rest of the organisation's documentation.
+
+The mechanism is deliberately tight: the approval is a commit status **pinned to the head
+SHA**, so a later push drops the preview until a maintainer re-approves, which closes the
+approve-then-push hole. What it cannot do is judge the content for you. Treat approving as
+a **code review of the built output** — look at what the PR adds to the docs, not only at
+whether CI is green. If you only need to check that the docs build, CI already told you
+that without publishing anything.
 
 ## What it reports back
 

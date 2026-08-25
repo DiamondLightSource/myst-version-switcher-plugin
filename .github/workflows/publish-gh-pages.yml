@@ -95,16 +95,24 @@ jobs:
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
     steps:
-      # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
-      # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
+      # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to order
+      # that repo's deployed versions. It needs the TAGS, not the history — and this
+      # runs on every deploy of every consumer, some with years of commits, so ask for
+      # exactly that rather than `fetch-depth: 0`. (docs.yml deliberately still clones
+      # in full: a build-command may run `git describe`.)
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: true
 
       # THIS reusable workflow's repo + commit (the `job` context resolves to the
       # reusable file, not the caller), so assemble.mjs matches the ref the consumer
       # pinned publish-gh-pages.yml@<ref> to — automatically, no version bump.
       # Sparse: only assemble/ is needed.
+      #
+      # `.mvs` is a RESERVED path in the consumer's workspace (documented as such in
+      # docs/reference/workflows.md): the checkout lands inside their tree, so a repo
+      # that has its own `.mvs/` would collide.
       - name: Fetch assemble.mjs
         uses: actions/checkout@v7
         with:
