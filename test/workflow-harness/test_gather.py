@@ -304,7 +304,6 @@ with tempfile.TemporaryDirectory() as tmp:
     check("only well-formed zips become version dirs", got == ["1.0", "main"], got)
     check("an unreadable zip warns", "could not unzip" in r.stdout, r.stdout)
     check("a two-root zip warns", "exactly one top-level directory" in r.stdout, r.stdout)
-    check("the assembled size is reported", "assembled site:" in r.stdout, r.stdout)
 
 print("\n-- linking the published docs back to the triggering commit --")
 def link(tmp, *, dirs=(), built_branch="main", **exprs):
@@ -358,6 +357,78 @@ with tempfile.TemporaryDirectory() as tmp:
                     **{"inputs.pr": "42", "steps.approve.outputs.sha": "f0rk5haa"})
     check("a dispatched fork preview is linked at the approved SHA",
           "statuses/f0rk5haa" in calls and "widget/pr-42/" in calls, calls)
+
+print("\n-- generate: the deploy stamp and the size report --")
+with tempfile.TemporaryDirectory() as tmp:
+    # Runs the real step, so assemble.mjs's `git tag` reads THIS repo — no tag of ours is
+    # a deployed dir here, so there is no stable/ alias and the site is just the branch.
+    env, rt, data = setup(tmp, [], [], [])
+    os.makedirs(f"{rt}/site/main", exist_ok=True)
+    env["PAGES_URL"] = "https://acme.github.io/widget"
+    r = run("Generate switcher.json and stable alias", env, {"runner.temp": rt})
+    check("generate exits 0", r.returncode == 0, log(r))
+    check("writes switcher.json", os.path.exists(f"{rt}/site/switcher.json"))
+    stamp = f"{rt}/site/deploy-id.txt"
+    check("stamps the deploy with something unique to this run",
+          os.path.exists(stamp) and "run=" in open(stamp).read(),
+          open(stamp).read() if os.path.exists(stamp) else "missing")
+    # The size is reported HERE, not in the extract step: it has to be measured after
+    # the stable/ symlink exists, and with -L, or it under-reports by a whole release.
+    check("reports the assembled size after the alias", "assembled site:" in log(r), log(r))
+
+print("\n-- the origin verify catches a wedge the switcher.json alone cannot --")
+# The step polls for ~6 min before giving up, so shorten the deadline. This is the same
+# kind of substitution run.py already does for ${{ }}: one asserted literal, in a body
+# still loaded from the YAML.
+def verify(tmp, *, origin, assembled=None):
+    """Run the verify step against a mock origin. `origin` is what the site SERVES;
+    `assembled` (default: the same) is what this deploy built."""
+    env, rt, data = setup(tmp, [], [], [])
+    assembled = origin if assembled is None else assembled
+    for name, text in assembled.items():
+        open(f"{rt}/site/{name}", "w").write(text)
+    env["MOCK_ORIGIN"] = os.path.join(tmp, "origin")
+    os.makedirs(env["MOCK_ORIGIN"], exist_ok=True)
+    for name, text in origin.items():
+        open(f"{env['MOCK_ORIGIN']}/{name}", "w").write(text)
+    step = dict(steps_of("publish-gh-pages.yml", "deploy")["Verify the deployed origin matches what we assembled"])
+    assert "timeout_s=360" in step["run"]
+    step["run"] = step["run"].replace("timeout_s=360", "timeout_s=6")
+    r = run("v", env, {"steps.deployment.outputs.page_url": "https://acme.github.io/widget/",
+                       "runner.temp": rt}, from_steps={"v": step})
+    return r
+
+SWITCHER = '[{"version": "main", "url": "https://acme.github.io/widget/main/"}]'
+THIS = "run=42\nattempt=1\nutc=2026-08-25T10:00:00Z\n"
+PREV = "run=41\nattempt=1\nutc=2026-08-24T10:00:00Z\n"
+
+with tempfile.TemporaryDirectory() as tmp:
+    r = verify(tmp, origin={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("passes on the first attempt when the origin is serving this deploy",
+          r.returncode == 0 and "attempt 1)" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # THE case the switcher.json comparison is blind to: an ordinary docs edit on the
+    # default branch leaves the version set — and so switcher.json — byte-identical,
+    # while the origin still serves the previous deploy.
+    r = verify(tmp, origin={"switcher.json": SWITCHER, "deploy-id.txt": PREV},
+               assembled={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("fails when only the deploy stamp is stale",
+          r.returncode != 0 and "deploy-id.txt still does not match" in log(r), log(r))
+    check("and still dumps the origin headers", "etag" in log(r).lower(), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A current stamp but a stale switcher.json is a partially-served deploy.
+    r = verify(tmp, origin={"switcher.json": "[]", "deploy-id.txt": THIS},
+               assembled={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("fails when the stamp is current but switcher.json is not",
+          r.returncode != 0 and "switcher.json still does not match" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Nothing assembled to compare against: fail loudly rather than pass vacuously.
+    r = verify(tmp, origin={}, assembled={})
+    check("fails when there is nothing to verify against",
+          r.returncode != 0 and "nothing to verify against" in log(r), log(r))
 
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'all harness checks passed'}")
 sys.exit(1 if fails else 0)

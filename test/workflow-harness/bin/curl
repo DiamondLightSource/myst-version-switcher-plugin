@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Mock curl for the origin-verify harness. Serves $MOCK_ORIGIN/<path>, so a test can
+# make the live site disagree with the assembled one (a wedged origin) by writing
+# different bytes there. -I answers with headers only, as the failure dump expects.
+set -uo pipefail
+head=false; url=""
+for a in "$@"; do
+  case "$a" in
+    -sI|-I) head=true ;;
+    -*) ;;
+    *) url="$a" ;;
+  esac
+done
+echo "curl $*" >> "$MOCK_CALLS"
+# Only the last segment matters: the site root is $MOCK_ORIGIN whatever sub-path the
+# Pages URL carries.
+name="${url##*/}"; name="${name%%\?*}"
+file="$MOCK_ORIGIN/$name"
+if $head; then
+  if [ -f "$file" ]; then printf 'HTTP/2 200\r\netag: "%s"\r\n' "$(cksum <"$file" | cut -d' ' -f1)"
+  else printf 'HTTP/2 404\r\n'; fi
+  exit 0
+fi
+[ -f "$file" ] || exit 22          # curl -f: HTTP error → non-zero, no body
+cat "$file"

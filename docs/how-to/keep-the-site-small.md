@@ -28,7 +28,14 @@ actually be uploaded):
 
 ```
 assembled site: 734M on disk across 31 version dir(s)
+  ...of which stable/ is a second copy of 4.2.1 (12M)
 ```
+
+The second line is not a rounding detail: `stable/` is a symlink in the assembled tree,
+but `actions/upload-pages-artifact` tars with `--dereference`, so the newest release is
+uploaded **twice**. Budget for it — the largest release always counts double — and note
+that the deploy that first publishes a release is the one that grows the site by 2× that
+release, not 1×.
 
 Or measure the released half directly:
 
@@ -91,6 +98,8 @@ releases. `max-releases: 30` keeps it near 100 MB.
 - **The default branch** — always published; it is the one required version.
 - **The migration seed release** (`pages-default-seed`) — it stands in for the default
   branch rather than being a version of its own.
+- **The `stable/` alias** — a full copy of the newest non-prerelease release, as above.
+  Lowering `max-releases` never removes it; only having no release at all does.
 
 ## Related
 
