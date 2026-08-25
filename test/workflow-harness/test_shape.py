@@ -125,6 +125,24 @@ for name in sorted(os.listdir(WF)):
                   "\n         ".join(l.strip() for l in body.splitlines() if "${{" in l))
 check("all run: bodies are expression-free", True)
 
+# Two defaults that are wrong in the unsafe direction if left unset: the token is
+# whatever the repo/org default is (potentially write-all), and a hung step burns the
+# 6-hour job default. `timeout-minutes` is only settable on a job that has `steps` —
+# a job that is just `uses:` a reusable workflow inherits the callee's.
+print("\n-- every workflow: permissions + timeouts --")
+for name in sorted(os.listdir(WF)):
+    if not name.endswith((".yml", ".yaml")):
+        continue
+    wf = load(name)
+    jobs = wf.get("jobs") or {}
+    check(f"{name} declares permissions",
+          "permissions" in wf or all("permissions" in j for j in jobs.values()),
+          f"jobs without permissions: {[n for n, j in jobs.items() if 'permissions' not in j]}")
+    for job_name, job in jobs.items():
+        if not job.get("steps"):
+            continue
+        check(f"{name}:{job_name} is time-bounded", "timeout-minutes" in job)
+
 print("\n-- entry: ci.yml --")
 check("builds without publishing", "publish" not in ci["jobs"], list(ci["jobs"]))
 check("uploads the docs artifact the engine gathers", "docs" in ci["jobs"], list(ci["jobs"]))

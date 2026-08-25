@@ -1,9 +1,16 @@
 on:
   workflow_call:
 
+# Declared here, not inherited: a reusable workflow's token is whatever the caller
+# grants, and lint needs nothing but the checkout (plus the releases API, which is
+# public read).
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

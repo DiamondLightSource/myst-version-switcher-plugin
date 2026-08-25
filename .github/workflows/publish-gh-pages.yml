@@ -57,6 +57,10 @@ jobs:
   # not being from a fork, so there is nothing left to branch on here.
   deploy:
     runs-on: ubuntu-latest
+    # The whole deploy: a cold release-zip cache, the assemble, the upload, and up to
+    # ~6 min of origin verification at the end. 45 leaves room for a slow Pages backend
+    # while still failing the same day.
+    timeout-minutes: 45
     permissions:
       contents: read     # checkout + read release assets
       actions: read      # gather cross-run docs artifacts

@@ -37,6 +37,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Generous: build-command is the consumer's, and a docs build with a Python env to
+    # solve can legitimately take a while. It only has to beat the 6-hour default, so a
+    # hung build fails within the hour instead of holding a runner all day.
+    timeout-minutes: 30
     steps:
       # fetch-depth: 0 brings the full history *and tags* — a build-command may
       # derive a version from `git describe` (this repo's docs do, to pin the
