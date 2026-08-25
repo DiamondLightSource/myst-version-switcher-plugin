@@ -18,8 +18,10 @@ whatever triggered it. Narrowing the trigger trades that away, so narrow it deli
 
 Publishing is no longer on any PR's critical path — it runs after CI, on its own run — so
 "it slows my PRs down" is not a reason to narrow it any more. Deploys do still serialise
-on the `pages` concurrency group, but each one supersedes the last (`cancel-in-progress:
-true`), which is safe precisely because every deploy reconstructs everything.
+on the `pages` concurrency group, and a burst of pushes costs at most one extra deploy:
+a group holds one pending run, so a third arrival replaces the queued second rather than
+adding to it. A deploy already in flight is never cancelled — see
+[architecture](../explanations/architecture.md).
 
 If a deploy takes minutes, the site itself is probably too big rather than the trigger too
 broad — see [keep-the-site-small](keep-the-site-small.md).

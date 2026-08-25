@@ -22,9 +22,16 @@ name: Release
 on:
   workflow_call:
 
+# The one workflow here that needs a write token. Declared so the job cannot silently
+# hold more than it uses; the CALLER must grant `contents: write` as well, since a
+# reusable workflow can only ever narrow what it is given.
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       # Every artifact produced earlier in the run, merged into dist/ (docs.zip, and
       # for this repo version-switcher.mjs).
@@ -41,11 +48,23 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Flag PEP 440-style prerelease tags — a/b/rc following a digit, e.g.
-          # 1.0a1 / 2.0rc1 (mirrors assemble.mjs's isPrerelease). Anchoring on the
-          # digit keeps tags that merely contain those letters out.
+          # Flag a prerelease tag — a marker following a digit (with an optional
+          # separator), so 1.0a1 / 2.0rc1 / 1.1.0-beta.1 / 2.0.0-rc.1 are prereleases
+          # while release-1.0 and 1.0-candidate are not.
+          #
+          # `markers` is assemble.mjs's MARKERS list VERBATIM, and the two are held
+          # together by a drift test (test/workflow-harness/test_release_prerelease.py)
+          # that runs a fixture list through both implementations — a comment alone had
+          # already let them diverge (this test was case-sensitive; the regex is not).
+          # There is no shared implementation to call: this workflow runs in the
+          # consumer's repo and deliberately checks nothing out.
+          markers='alpha|beta|preview|pre|rc|dev|a|b|c'
           prerelease=""
-          case "$TAG" in *[0-9]a*|*[0-9]b*|*[0-9]rc*) prerelease="--prerelease" ;; esac
+          # grep -E has no lookahead, so the trailing [^a-z] is spelled as a consumed
+          # character (or end-of-string); -i covers both cases, which `case` globs did not.
+          if printf '%s' "$TAG" | grep -Eqi "[0-9][._-]?($markers)([^a-z]|\$)"; then
+            prerelease="--prerelease"
+          fi
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             # The Release already exists (e.g. published from the UI on a mutable repo).

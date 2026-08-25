@@ -60,6 +60,9 @@ def setup(tmp, releases, artifacts, prs, *, approved=(), dlfail=(), artfail=(), 
         "RUNNER_TEMP": rt, "GITHUB_WORKSPACE": ws,
         "GITHUB_OUTPUT": os.path.join(tmp, "out.txt"),
         "GITHUB_SERVER_URL": "https://github.com",
+        # Default runner env vars. The deploy stamp reads these rather than a ${{ }}
+        # expression, so the harness has to supply them like the runner does.
+        "GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1",
         "REPO": "acme/widget", "DEFAULT": "main",
         # Job-level env in the real workflow: the branch that was actually BUILT, which
         # under workflow_run is NOT github.ref. Tests override it to exercise the others.

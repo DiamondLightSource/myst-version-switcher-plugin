@@ -52,6 +52,7 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 |---|---|---|---|
 | `build-command` | **yes** | — | Command that builds the HTML site. Run with `BASE_URL` and `VERSION_NAME` set. Fold any project setup (`npm ci`, `cp CONFIG`, apt deps) into it. |
 | `html-dir` | no | `docs/_build/html` | Directory the build writes the site to. Its contents are staged into `docs.zip`'s `html/` root, so any name works. |
+| `base-path` | no | `""` (→ `/<repo>`) | URL path the site is served at, without the version segment. Set to `/` for a custom domain or an `ORG.github.io` repo — see [custom domains](../how-to/use-a-custom-domain.md). |
 
 ## `publish-gh-pages.yml` — assemble + deploy (privileged)
 
@@ -68,7 +69,29 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 Both caps exist because the site deploys as **one** Pages artifact against a hard
 **1 GB** limit, which a long-lived project will eventually hit. Set them as **literals**
 in `publish.yml`'s `with:` block so they apply on every path. See
-[keep-the-site-small](../how-to/keep-the-site-small.md).
+[keep-the-site-small](../how-to/keep-the-site-small.md). A cap that is not a
+non-negative integer fails the deploy rather than being read as `0`/unlimited.
+
+:::{note} `.mvs/` is reserved
+The job checks your repo out at the workspace root and this project's `assemble/` into
+`.mvs/` beside it, so a repo of your own with a `.mvs/` directory would collide. Nothing
+else in the workspace is touched, and the checkout is discarded with the runner.
+:::
+
+### What approving a fork preview grants
+
+The `pr` input publishes fork-authored HTML and JavaScript to your Pages site, and a
+project Pages site shares an **origin** with every other Pages site in the org:
+`https://ORG.github.io`. Same origin means the same `localStorage`, the same
+service-worker scope and any cookies scoped to that host — so an approved preview is not
+sandboxed from the rest of the organisation's documentation.
+
+The mechanism is deliberately tight: the approval is a commit status **pinned to the head
+SHA**, so a later push drops the preview until a maintainer re-approves, which closes the
+approve-then-push hole. What it cannot do is judge the content for you. Treat approving as
+a **code review of the built output** — look at what the PR adds to the docs, not only at
+whether CI is green. If you only need to check that the docs build, CI already told you
+that without publishing anything.
 
 ## What it reports back
 
@@ -97,7 +120,10 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 Branch and PR artifacts are found via the **artifacts API by name** (`docs` — the
 artifact name is the contract), not by workflow filename, so the consumer's entry
 workflow can be called anything. The URLs baked into `switcher.json` use the site's
-live Pages URL from the **Pages API**, so a custom domain (CNAME) works.
+live Pages URL from the **Pages API**, so a custom domain (CNAME) is reflected there
+without configuration — but the *pages* those URLs point at are built at whatever
+`docs.yml`'s `base-path` says, so a custom domain needs that input set too. See
+[use-a-custom-domain](../how-to/use-a-custom-domain.md).
 
 Release assets are immutable, so the gather caches them (`actions/cache`, keyed on the
 exact set of asset ids it intends to publish) and downloads only what it has not seen —
@@ -112,8 +138,13 @@ saves are gated on the default branch having been the thing that was built.
 
 A version no longer gathered (a merged/closed PR, a deleted release) is correctly
 dropped, because `deploy-pages` replaces the *entire* site. Sources are gathered in
-priority order (releases lowest, then branch CI, then the current build highest), so a
-fresher source always wins when names collide.
+priority order, so a fresher source always wins when names collide. There are two rungs,
+not three: a release's `docs.zip` (or the migration seed) first, then the branch/PR CI
+artifact over the top. The build that triggered the deploy is not a rung of its own —
+under `workflow_run` the engine runs *after* that build completed, so its `docs`
+artifact is simply the newest one the artifacts API lists. The default branch has a
+third fallback below both: the Actions cache copy, used only when its CI artifact has
+expired.
 
 ## The `docs.zip` / version-name contracts
 
@@ -131,11 +162,14 @@ without passing anything between them:
   is skipped with a warning rather than guessed at.
 - **The version name is the site sub-dir *and* the `BASE_URL`.** It is `pr-<n>` for
   PRs, else the ref name (the default branch, or a tag without `/`). `docs.yml` sets
-  `BASE_URL=/REPO/<version-name>`; nothing passes that name onward, because the gather
-  re-derives the identical string from the same facts (a release's tag, a PR's number,
-  the repo's `default_branch`) and unpacks the zip at `site/<version-name>`. Same name
-  on both sides, so assets never 404. There is **no sanitisation**: version names are
-  clean by construction (the `tags: ['*']` trigger never builds `/`-tags).
+  `BASE_URL=<base-path>/<version-name>`; nothing passes that name onward, because the
+  gather re-derives the identical string from the same facts (a release's tag, a PR's
+  number, the repo's `default_branch`) and unpacks the zip at `site/<version-name>`.
+  Same name on both sides, so assets never 404. The name is **validated**, not assumed
+  clean: it must be non-empty and match `[A-Za-z0-9._-]`, or the build fails with the
+  reason. In this repo it is clean by construction (the `tags: ['*']` trigger never
+  builds `/`-tags), but `docs.yml` is reusable and a consumer can trigger it on any ref
+  they like — git allows `$( )`, backticks and quotes in a ref name.
 
 ## Internals: `assemble.mjs`
 
@@ -148,10 +182,22 @@ workflow does the IO:
 - **`select-artifacts`** — which CI artifact becomes the default branch, and which open
   PRs get a preview, with fork approval resolved by the caller beforehand.
 - **`generate`** — version ordering, prerelease detection, `switcher.json` and the root
-  redirect, the `stable/` alias source, and the required-branch guard.
+  redirect, the `stable/` alias source, and the required-branch guard. (The deploy stamp
+  the verify step polls, `deploy-id.txt`, is written by the workflow alongside it — it is
+  runner state, not a decision.)
 
-Both `select-*` commands rank with the same comparator, so the release cap and the PR cap
-cannot drift apart on how they break a timestamp tie. The `gh`/`unzip`/`mv` IO
+Every version the site serves appears in `switcher.json`, **PR previews included** — a
+`pr-<n>` entry in the dropdown is deliberate, so a reviewer can jump to a preview from
+any page. They are ordered after the default branch and the tags, and disappear when the
+PR closes.
+
+Tags are ordered by `compareTags`, not by `git tag --sort=-v:refname`: git's version sort
+ranks `1.1.0-beta.1` *above* `1.1.0`, and the prerelease rule and the ordering rule are
+better off sharing one marker list than being kept in step by hand.
+
+All the "which of these is newest?" questions — the release cap, the PR cap, the
+default-branch artifact, the newest artifact per head SHA — go through one comparator, so
+they cannot break a timestamp tie differently from each other. The `gh`/`unzip`/`mv` IO
 plumbing lives as inline bash steps in `publish-gh-pages.yml`'s `deploy` job — named
 and separated so step timing and failures are visible in the GH Actions UI, and covered
 by a harness that loads those steps out of the YAML and runs them against a mock `gh`.

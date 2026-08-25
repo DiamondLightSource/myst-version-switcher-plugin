@@ -1,9 +1,14 @@
 on:
   workflow_call:
 
+# Declared here, not inherited — see _lint.yml. The tests are pure Node + Python.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Unit tests (widget logic + make-switcher parity)

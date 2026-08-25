@@ -21,7 +21,8 @@
  *         (the default branch's, plus each eligible open PR's), ready for
  *         `xargs -0 -n 3`; a decision for every candidate goes to stderr.
  *
- *   node assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]
+ *   node assemble.mjs generate --site-dir <dir> --base-url <url>
+ *                              [--default-branch <name>] [--required <csv>]
  *       → write switcher.json + index.html into <dir>; print the stable-alias
  *         source dir (the newest deployed release) on stdout, or nothing. Also
  *         exit-1s if a --required branch is absent from the site.
@@ -80,6 +81,26 @@ export function cacheKey(rows = []) {
 	return `${RELZIPS_CACHE_PREFIX}${digest}`;
 }
 
+/**
+ * A site-size cap (`max-releases` / `max-prs`) as a non-negative integer; 0 means
+ * unlimited. Throws on anything else.
+ *
+ * This used to be `Number(x) || 0`, which points the wrong way: `Number("3O")` is NaN
+ * and `|| 0` turns NaN into 0 — so a typo in a consumer's publish.yml silently
+ * DISABLED the cap that exists to stop a 1 GB deploy failure. A cap you cannot read is
+ * not a cap of 0.
+ */
+export function parseCap(value, name = "cap") {
+	if (value === undefined || value === null || value === "") return 0;
+	const text = String(value).trim();
+	if (!/^\d+$/.test(text)) {
+		throw new Error(
+			`${name} must be a non-negative integer (0 = unlimited), got ${JSON.stringify(value)}`,
+		);
+	}
+	return Number(text);
+}
+
 /** Run a git command and return its non-empty stdout lines. */
 function gitLines(args) {
 	const out = execFileSync("git", args, { encoding: "utf8" });
@@ -100,27 +121,36 @@ export function discoverVersions(siteDir) {
 }
 
 /**
- * Tags newest-first (semver-aware), matching `git tag -l --sort=-v:refname`.
+ * Tags newest-first, ordered by `compareTags` (NOT `git tag --sort=-v:refname`).
  * Tags containing `/` are dropped: the build trigger (`tags: ['*']`) never builds
  * them, so they have no matching `BASE_URL` build and would only create nested
  * site dirs. Every other tag is used verbatim as its `site/<tag>` dir name.
+ *
+ * git's version sort is not usable here: without a `versionsort.suffix` entry per
+ * marker it ranks `1.1.0-beta.1` ABOVE `1.1.0`, and that list would have to be kept
+ * in step with `isPrerelease` by hand. Sorting here keeps "what order" and "what
+ * counts as a prerelease" in one module, sharing one marker list.
  */
 export function getSortedTags() {
-	return gitLines(["tag", "-l", "--sort=-v:refname"]).filter(
-		(tag) => !tag.includes("/"),
-	);
+	return orderTags(gitLines(["tag", "-l"]).filter((tag) => !tag.includes("/")));
 }
 
 /**
- * Order the gathered versions: `master`, `main`, then tags newest-first, then any
- * leftover directories (e.g. PR previews) alphabetically. `tags` must already be
- * newest-first; `builds` are the directory names under `site/`.
+ * Order the gathered versions: the default branch, then `master`/`main` if they are
+ * present and distinct from it (a repo mid-rename may carry both), then tags
+ * newest-first, then any leftover directories (e.g. PR previews) alphabetically.
+ * `tags` must already be newest-first; `builds` are the directory names under `site/`.
+ *
+ * `defaultBranch` is optional so callers that have no opinion keep the historical
+ * `master`/`main` behaviour: a consumer whose default branch is `develop` would
+ * otherwise land it in the leftover bucket, sorted among the `pr-<n>` previews.
  */
-export function orderVersions(builds, tags) {
+export function orderVersions(builds, tags, defaultBranch) {
 	const remaining = new Set(builds);
 
 	const versions = [];
-	for (const version of ["master", "main", ...tags]) {
+	for (const version of [defaultBranch, "master", "main", ...tags]) {
+		if (!version) continue;
 		if (remaining.has(version)) {
 			versions.push(version);
 			remaining.delete(version);
@@ -139,8 +169,10 @@ export function orderVersions(builds, tags) {
 /**
  * Comparator: newest first, undated last. Timestamp ties break on `keyOf` ascending
  * — arbitrary, but a total order, which is what matters: an unstable ranking would
- * change the published set (and so the cache key) on identical inputs. Shared by the
- * release cap and the PR cap so the two cannot drift apart.
+ * change the published set (and so the cache key) on identical inputs. The ONLY
+ * "which of these is newest?" rule in this file: the release cap, the PR cap, the
+ * default-branch artifact and the per-SHA index all reach it through `byDateDesc` or
+ * `newest`, so none of them can break a tie differently from the others.
  */
 function byDateDesc(keyOf) {
 	return (a, b) => {
@@ -181,7 +213,7 @@ export function selectReleases(
 	releases = [],
 	{ defaultBranch, seedTag = SEED_TAG, maxReleases = 0 } = {},
 ) {
-	const cap = Number(maxReleases) > 0 ? Number(maxReleases) : 0;
+	const cap = parseCap(maxReleases, "max-releases");
 
 	const rows = releases.map((release) => {
 		const tag = release?.tag_name ?? "";
@@ -260,7 +292,7 @@ export function selectArtifacts(
 	artifacts = [],
 	{ defaultBranch, repoId, prs = [], maxPrs = 0 } = {},
 ) {
-	const cap = Number(maxPrs) > 0 ? Number(maxPrs) : 0;
+	const cap = parseCap(maxPrs, "max-prs");
 	const live = artifacts.filter((a) => a && !a.expired);
 
 	const meta = (artifact) => ({
@@ -278,19 +310,20 @@ export function selectArtifacts(
 					.map((a) => ({ date: a?.created_at ?? null, key: String(a?.id), a }))
 					.sort(byDateDesc((x) => x.key))[0].a;
 
-	// Newest artifact per head SHA, for the PR lookups.
-	const bySha = new Map();
+	// Newest artifact per head SHA, for the PR lookups — through `newest`, so BOTH
+	// lookups break a timestamp tie the same way. This loop used to keep whichever
+	// artifact the API happened to return last, i.e. page order, which is not a rule
+	// at all: two artifacts created in the same second (a matrix, a re-run) could
+	// swap the preview between deploys.
+	const groups = new Map();
 	for (const artifact of live) {
 		const sha = artifact?.workflow_run?.head_sha;
 		if (!sha) continue;
-		const best = bySha.get(sha);
-		if (
-			!best ||
-			Date.parse(artifact.created_at) >= Date.parse(best.created_at)
-		) {
-			bySha.set(sha, artifact);
-		}
+		const list = groups.get(sha);
+		if (list) list.push(artifact);
+		else groups.set(sha, [artifact]);
 	}
+	const bySha = new Map([...groups].map(([sha, list]) => [sha, newest(list)]));
 
 	const rows = [];
 
@@ -346,26 +379,96 @@ export function selectArtifacts(
 }
 
 /**
- * Is `tag` a prerelease? Mirrors `release.yml`'s test (a PEP 440-style `a`,
- * `b`, or `rc` marker *following a digit*, e.g. `1.0a1`/`2.0rc1`) so "stable"
- * means the same thing repo-wide. Anchoring on the digit keeps tags that merely
- * contain those letters (`release-1.0`, `beta-program`) out of the prerelease set.
+ * The prerelease markers, longest-first so `preview` is not shadowed by `pre`.
+ * ONE list, used three ways: to test a tag (`isPrerelease`), to rank a prerelease
+ * below the release it qualifies (`compareTags`), and — as the identical literal —
+ * by release.yml's `--prerelease` test, which `test_release_prerelease.py` holds to
+ * this file. Covers PEP 440 (`1.0a1`, `2.0rc1`, `1.0.dev0`) and the hyphenated
+ * semver spellings (`1.1.0-beta.1`, `2.0.0-rc.1`).
+ */
+const MARKERS = "alpha|beta|preview|pre|rc|dev|a|b|c";
+
+/**
+ * A marker anywhere in the tag, immediately after a digit (with an optional `.`,
+ * `-` or `_` between). The digit anchor keeps tags that merely contain those
+ * letters (`release-1.0`, `beta-program`) out of the prerelease set; the trailing
+ * lookahead keeps a longer word (`1.0-candidate`, `1.0-canary`) out of it too.
+ */
+const PRERELEASE_RE = new RegExp(`\\d[._-]?(${MARKERS})(?![a-z])`, "i");
+
+/** The same marker, but anchored at the START of a version's trailing segment. */
+const PRERELEASE_SUFFIX_RE = new RegExp(`^[._-]?(${MARKERS})(?![a-z])`, "i");
+
+/**
+ * Is `tag` a prerelease? Mirrors `release.yml`'s `--prerelease` test so "stable"
+ * means the same thing repo-wide — the two are held together by a drift test
+ * (`test/workflow-harness/test_release_prerelease.py`) rather than by comment alone.
  */
 export function isPrerelease(tag) {
-	return /\d(a|b|rc)/i.test(tag);
+	return PRERELEASE_RE.test(tag);
+}
+
+/** A tag split into runs of digits and non-digits, for segment-wise comparison. */
+function tagTokens(tag) {
+	// A leading `v` is a spelling of the same version (`v1.2.3` ≡ `1.2.3`), so drop
+	// it — but only before a digit, or `version-2` would become `ersion-2`.
+	return (
+		String(tag)
+			.replace(/^v(?=\d)/i, "")
+			.match(/\d+|\D+/g) ?? []
+	);
+}
+
+/**
+ * Compare two tags, NEWEST FIRST (so it sorts descending), with one invariant that
+ * `git tag --sort=-v:refname` does not give us: **every prerelease of X sorts after
+ * X**. Digit runs compare numerically (so `1.10` > `1.9`), other runs as strings.
+ *
+ * When one tag is the other plus a trailing segment, that segment decides: a
+ * prerelease marker (`1.1.0` vs `1.1.0-beta.1`) demotes the longer tag, anything
+ * else (`1.1` vs `1.1.1`) promotes it. Ties fall back to the raw string, so the
+ * order is total — an unstable ranking would change the published set on identical
+ * inputs.
+ */
+export function compareTags(a, b) {
+	const ta = tagTokens(a);
+	const tb = tagTokens(b);
+	for (let i = 0; i < Math.min(ta.length, tb.length); i += 1) {
+		if (ta[i] === tb[i]) continue;
+		const na = /^\d+$/.test(ta[i]);
+		const nb = /^\d+$/.test(tb[i]);
+		if (na && nb) return Number(tb[i]) - Number(ta[i]);
+		return ta[i] < tb[i] ? 1 : -1;
+	}
+	if (ta.length !== tb.length) {
+		const longer = ta.length > tb.length ? ta : tb;
+		const rest = longer.slice(Math.min(ta.length, tb.length)).join("");
+		const demoted = PRERELEASE_SUFFIX_RE.test(rest);
+		// `sign` is +1 when `a` is the longer tag: demoted ⇒ a sorts later.
+		const sign = ta.length > tb.length ? 1 : -1;
+		return demoted ? sign : -sign;
+	}
+	return String(a).localeCompare(String(b));
+}
+
+/** Tags newest-first by `compareTags`. Pure; `getSortedTags` is the IO wrapper. */
+export function orderTags(tags = []) {
+	return [...tags].sort(compareTags);
 }
 
 /**
  * The preferred (stable) version: the newest non-prerelease tag that is actually
- * deployed, else `main`, else `master`, else the first version. `tags` must be
- * newest-first; `versions` is the deployed set (output of `orderVersions`).
+ * deployed, else the default branch, else `main`, else `master`, else the first
+ * version. `tags` must be newest-first; `versions` is the deployed set (output of
+ * `orderVersions`). `defaultBranch` is optional — see `orderVersions`.
  */
-export function preferredVersion(versions, tags) {
+export function preferredVersion(versions, tags, defaultBranch) {
 	for (const tag of tags) {
 		if (!isPrerelease(tag) && versions.includes(tag)) return tag;
 	}
-	if (versions.includes("main")) return "main";
-	if (versions.includes("master")) return "master";
+	for (const branch of [defaultBranch, "main", "master"]) {
+		if (branch && versions.includes(branch)) return branch;
+	}
 	return versions[0] ?? null;
 }
 
@@ -374,7 +477,7 @@ export function preferredVersion(versions, tags) {
  *
  * When `preferred` is a genuine deployed non-prerelease *tag*, the site publishes
  * a `stable/` alias pointing at it and the root redirects to the constant
- * `stable/` URL. Before the first release (preferred is `main`/`master`/a
+ * `stable/` URL. Before the first release (preferred is the default branch or a
  * leftover, or a prerelease-only fallback) there is no `stable/` and the root
  * redirects straight to that fallback version.
  *
@@ -382,8 +485,8 @@ export function preferredVersion(versions, tags) {
  *   `stableSrc` is the version dir to alias as `stable/` (or null); `redirectTarget`
  *   is the dir the root `index.html` should redirect to.
  */
-export function stablePlan(versions, tags) {
-	const preferred = preferredVersion(versions, tags);
+export function stablePlan(versions, tags, defaultBranch) {
+	const preferred = preferredVersion(versions, tags, defaultBranch);
 	if (preferred && tags.includes(preferred) && !isPrerelease(preferred)) {
 		return { preferred, stableSrc: preferred, redirectTarget: STABLE_ALIAS };
 	}
@@ -428,16 +531,34 @@ export function renderSwitcher(baseUrl, versions, preferred) {
 	return JSON.stringify(switcherStruct(baseUrl, versions, preferred), null, 2);
 }
 
-/** Root redirect to `target` (relative, so it is host- and repo-agnostic). */
+/** Escape a value for an HTML attribute or text node. */
+function escapeHtml(value) {
+	return String(value)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+/**
+ * Root redirect to `target` (relative, so it is host- and repo-agnostic).
+ *
+ * `target` is a version name, which docs.yml validates down to `[A-Za-z0-9._-]` — so
+ * the escaping is belt-and-braces. It stays because this renders HTML from a value
+ * that ultimately derives from a ref name, and the two rules live in different files:
+ * loosening the workflow's character set should not be able to inject markup here.
+ */
 export function renderRedirect(target) {
+	const safe = escapeHtml(target);
 	return `<!DOCTYPE html>
 <html>
 
 <head>
-    <title>Redirecting to ${target}</title>
+    <title>Redirecting to ${safe}</title>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=./${target}/index.html">
-    <link rel="canonical" href="${target}/index.html">
+    <meta http-equiv="refresh" content="0; url=./${safe}/index.html">
+    <link rel="canonical" href="${safe}/index.html">
 </head>
 
 </html>
@@ -493,7 +614,7 @@ function cmdSelectReleases(rest) {
 	}
 	const raw = readFileSync(0, "utf8").trim();
 	const releases = raw ? JSON.parse(raw) : [];
-	const cap = Number(values["max-releases"] ?? 0) || 0;
+	const cap = parseCap(values["max-releases"], "--max-releases");
 
 	const rows = selectReleases(releases, {
 		defaultBranch,
@@ -575,7 +696,7 @@ function cmdSelectArtifacts(rest) {
 			return { num, sha: sha ?? "", approved: approved === "true" };
 		});
 
-	const cap = Number(values["max-prs"] ?? 0) || 0;
+	const cap = parseCap(values["max-prs"], "--max-prs");
 	const rows = selectArtifacts(artifacts, {
 		defaultBranch,
 		repoId,
@@ -610,7 +731,7 @@ function cmdSelectArtifacts(rest) {
 }
 
 /**
- * `generate --site-dir --base-url [--required <csv>]` — write switcher.json +
+ * `generate --site-dir --base-url [--default-branch <name>] [--required <csv>]` — write switcher.json +
  * index.html and emit the stable-alias source. Runs after all gathering, so it
  * also hard-fails (exit 1) if a `--required` branch is absent from the site.
  */
@@ -620,6 +741,7 @@ function cmdGenerate(rest) {
 		options: {
 			"site-dir": { type: "string" },
 			"base-url": { type: "string" },
+			"default-branch": { type: "string" },
 			required: { type: "string" },
 		},
 	});
@@ -627,7 +749,7 @@ function cmdGenerate(rest) {
 	const baseUrl = values["base-url"];
 	if (!siteDir || !baseUrl) {
 		throw new Error(
-			"usage: assemble.mjs generate --site-dir <dir> --base-url <url> [--required <csv>]",
+			"usage: assemble.mjs generate --site-dir <dir> --base-url <url> [--default-branch <name>] [--required <csv>]",
 		);
 	}
 
@@ -646,10 +768,17 @@ function cmdGenerate(rest) {
 
 	// Tags are used verbatim as site dirs (getSortedTags drops `/`-tags), so
 	// ordering + preferred + stable compare directly against the discovered dirs.
+	// The default branch is not assumed to be main/master: it heads the switcher and
+	// is the preferred version until a release is deployed.
+	const defaultBranch = values["default-branch"];
 	const tags = getSortedTags();
-	const versions = orderVersions(builds, tags);
-	const preferred = preferredVersion(versions, tags);
-	const { stableSrc, redirectTarget } = stablePlan(versions, tags);
+	const versions = orderVersions(builds, tags, defaultBranch);
+	const preferred = preferredVersion(versions, tags, defaultBranch);
+	const { stableSrc, redirectTarget } = stablePlan(
+		versions,
+		tags,
+		defaultBranch,
+	);
 
 	// Diagnostics go to stderr so stdout carries only the stable-alias source.
 	console.error(`Sorted versions: ${JSON.stringify(versions)}`);

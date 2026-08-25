@@ -54,6 +54,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("newest artifact per SHA wins",
           "artifacts/9001/zip" in calls and "artifacts/9000/zip" not in calls, calls)
     check("fork-owned same-named branch excluded", "artifacts/9002/zip" not in calls)
+    # By ASSET ID, not by tag: the cache is id-addressed, so fetching `-p docs.zip` from
+    # a tag could cache freshly re-cut bytes under the old id.
+    check("release zips are fetched by asset id",
+          "releases/assets/301" in calls and "release download" not in calls, calls)
 
 print("\n-- the cache key comes from the selection, via GITHUB_OUTPUT --")
 # The restore step reads BOTH of these: `key` for an exact hit, `restore-keys` for the
@@ -149,12 +153,31 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a failed release download does not block the others", "3.0.zip" in got and "1.0.zip" in got)
     check("the failed release is absent", "2.0.zip" not in got, got)
     check("failed download is warned", "::warning::release 2.0" in r2.stdout, r2.stdout[-400:])
+    # `gh api > file` writes the error body before exiting non-zero, so "nothing left
+    # behind" needs the zip-magic check as well as the exit status.
     check("failed release is NOT left in the cache", "201.zip" not in os.listdir(f"{rt}/relcache"))
     check("artifact download failure warned", "artifact 9100 download failed" in log(r3), log(r3)[-500:])
     check("artifact without docs.zip warned distinctly", "has no docs.zip inside" in log(r3), log(r3)[-500:])
     check("that warning names both causes, not just the historical one",
           "re-run that build" in log(r3) and "also named docs" in log(r3), log(r3)[-600:])
     check("main falls back to the seed release when its artifact is bad", "main.zip" in got, got)
+
+print("\n-- a malformed cap fails the deploy rather than silently unlimiting it --")
+with tempfile.TemporaryDirectory() as tmp:
+    env, rt, data = setup(tmp, RELEASES, ARTIFACTS, PRS)
+    r = run("Select releases to publish", env,
+            {"github.token": "t", "inputs.max-releases": "3O", "runner.temp": rt})
+    check("select-releases exits non-zero on a mistyped cap", r.returncode != 0, log(r))
+    check("and says what it wanted", "non-negative integer" in log(r), log(r))
+
+print("\n-- more open PRs than the gather even looks at --")
+with tempfile.TemporaryDirectory() as tmp:
+    many = [(n, f"sha{n}", False) for n in range(1, 201)]
+    env, rt, data = setup(tmp, [], [], many)
+    r = run("Gather branch CI artifacts", env,
+            {"github.token": "t", "inputs.max-prs": "0", "runner.temp": rt})
+    check("a truncated PR listing is warned about",
+          "::warning::more than 200 open PRs" in log(r), log(r)[-400:])
 
 print("\n-- empty repo: no releases, no artifacts, no PRs --")
 with tempfile.TemporaryDirectory() as tmp:
@@ -248,16 +271,31 @@ print("\n-- the version-name contract: both sides derive the same string --")
 # keeping a build's assets from 404ing is that the two rules agree. Pin them together.
 DOCS = steps_of("docs.yml", "build")
 
-def docs_yml_version_name(tmp, event, *, ref_name="", pr_number=""):
-    """Run docs.yml's own 'Compute version name' step and read its output."""
-    out = os.path.join(tmp, "ver.txt")
-    open(out, "w").close()
-    env = dict(os.environ, GITHUB_OUTPUT=out)
+def docs_yml_version(tmp, event, *, ref_name="", pr_number="", base_path="", repo="widget"):
+    """Run docs.yml's own compute step; return (version-name, BASE_URL, result)."""
+    # A fresh pair per call (the step appends), named by a counter rather than by the
+    # ref — one of the refs under test contains a '/'.
+    docs_yml_version.n = getattr(docs_yml_version, "n", 0) + 1
+    out = os.path.join(tmp, f"ver-{docs_yml_version.n}.txt")
+    genv = os.path.join(tmp, f"env-{docs_yml_version.n}.txt")
+    open(out, "w").close(); open(genv, "w").close()
+    env = dict(os.environ, GITHUB_OUTPUT=out, GITHUB_ENV=genv)
     exprs = {"github.event_name": event, "github.ref_name": ref_name,
-             "github.event.pull_request.number": pr_number}
-    r = run("Compute version name", env, exprs, from_steps=DOCS)
+             "github.event.pull_request.number": pr_number,
+             "inputs.base-path": base_path, "github.event.repository.name": repo}
+    r = run("Compute version name and BASE_URL", env, exprs, from_steps=DOCS)
+    def value(path, key):
+        for line in open(path):
+            if line.startswith(f"{key}="):
+                return line.strip().split("=", 1)[1]
+        return None
+    return value(out, "version-name"), value(genv, "BASE_URL"), r
+
+
+def docs_yml_version_name(tmp, event, **kw):
+    name, _, r = docs_yml_version(tmp, event, **kw)
     assert r.returncode == 0, r.stderr
-    return open(out).read().strip().split("=", 1)[1]
+    return name
 
 with tempfile.TemporaryDirectory() as tmp:
     # A tag: docs.yml uses the ref name; the gather uses the release's tag.
@@ -304,7 +342,25 @@ with tempfile.TemporaryDirectory() as tmp:
     check("only well-formed zips become version dirs", got == ["1.0", "main"], got)
     check("an unreadable zip warns", "could not unzip" in r.stdout, r.stdout)
     check("a two-root zip warns", "exactly one top-level directory" in r.stdout, r.stdout)
-    check("the assembled size is reported", "assembled site:" in r.stdout, r.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # BASE_URL is the other half of the same contract: the version name has to be
+    # appended to wherever the SITE is served, which is not always /<repo>.
+    _, base, r = docs_yml_version(tmp, "push", ref_name="main")
+    check("BASE_URL defaults to /<repo>/<version>", base == "/widget/main", f"{base!r} {log(r)}")
+    _, base, _ = docs_yml_version(tmp, "push", ref_name="main", base_path="/")
+    check("base-path '/' roots the build at the host root (custom domain)",
+          base == "/main", repr(base))
+    _, base, _ = docs_yml_version(tmp, "push", ref_name="main", base_path="docs/")
+    check("base-path slashes are normalised", base == "/docs/main", repr(base))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # The name becomes a URL path segment and a site dir. docs.yml is reusable, so a
+    # consumer can point it at any ref, and git allows $( ) and quotes in a ref name.
+    for bad in ("feature/x", "v1-$(id)", "", "."):
+        _, _, r = docs_yml_version(tmp, "push", ref_name=bad)
+        check(f"an unusable version name is rejected ({bad!r})",
+              r.returncode != 0 and "not usable as a URL path segment" in log(r), log(r))
 
 print("\n-- linking the published docs back to the triggering commit --")
 def link(tmp, *, dirs=(), built_branch="main", **exprs):
@@ -358,6 +414,78 @@ with tempfile.TemporaryDirectory() as tmp:
                     **{"inputs.pr": "42", "steps.approve.outputs.sha": "f0rk5haa"})
     check("a dispatched fork preview is linked at the approved SHA",
           "statuses/f0rk5haa" in calls and "widget/pr-42/" in calls, calls)
+
+print("\n-- generate: the deploy stamp and the size report --")
+with tempfile.TemporaryDirectory() as tmp:
+    # Runs the real step, so assemble.mjs's `git tag` reads THIS repo — no tag of ours is
+    # a deployed dir here, so there is no stable/ alias and the site is just the branch.
+    env, rt, data = setup(tmp, [], [], [])
+    os.makedirs(f"{rt}/site/main", exist_ok=True)
+    env["PAGES_URL"] = "https://acme.github.io/widget"
+    r = run("Generate switcher.json and stable alias", env, {"runner.temp": rt})
+    check("generate exits 0", r.returncode == 0, log(r))
+    check("writes switcher.json", os.path.exists(f"{rt}/site/switcher.json"))
+    stamp = f"{rt}/site/deploy-id.txt"
+    check("stamps the deploy with something unique to this run",
+          os.path.exists(stamp) and "run=" in open(stamp).read(),
+          open(stamp).read() if os.path.exists(stamp) else "missing")
+    # The size is reported HERE, not in the extract step: it has to be measured after
+    # the stable/ symlink exists, and with -L, or it under-reports by a whole release.
+    check("reports the assembled size after the alias", "assembled site:" in log(r), log(r))
+
+print("\n-- the origin verify catches a wedge the switcher.json alone cannot --")
+# The step polls for ~6 min before giving up, so shorten the deadline. This is the same
+# kind of substitution run.py already does for ${{ }}: one asserted literal, in a body
+# still loaded from the YAML.
+def verify(tmp, *, origin, assembled=None):
+    """Run the verify step against a mock origin. `origin` is what the site SERVES;
+    `assembled` (default: the same) is what this deploy built."""
+    env, rt, data = setup(tmp, [], [], [])
+    assembled = origin if assembled is None else assembled
+    for name, text in assembled.items():
+        open(f"{rt}/site/{name}", "w").write(text)
+    env["MOCK_ORIGIN"] = os.path.join(tmp, "origin")
+    os.makedirs(env["MOCK_ORIGIN"], exist_ok=True)
+    for name, text in origin.items():
+        open(f"{env['MOCK_ORIGIN']}/{name}", "w").write(text)
+    step = dict(steps_of("publish-gh-pages.yml", "deploy")["Verify the deployed origin matches what we assembled"])
+    assert "timeout_s=360" in step["run"]
+    step["run"] = step["run"].replace("timeout_s=360", "timeout_s=6")
+    r = run("v", env, {"steps.deployment.outputs.page_url": "https://acme.github.io/widget/",
+                       "runner.temp": rt}, from_steps={"v": step})
+    return r
+
+SWITCHER = '[{"version": "main", "url": "https://acme.github.io/widget/main/"}]'
+THIS = "run=42\nattempt=1\nutc=2026-08-25T10:00:00Z\n"
+PREV = "run=41\nattempt=1\nutc=2026-08-24T10:00:00Z\n"
+
+with tempfile.TemporaryDirectory() as tmp:
+    r = verify(tmp, origin={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("passes on the first attempt when the origin is serving this deploy",
+          r.returncode == 0 and "attempt 1)" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # THE case the switcher.json comparison is blind to: an ordinary docs edit on the
+    # default branch leaves the version set — and so switcher.json — byte-identical,
+    # while the origin still serves the previous deploy.
+    r = verify(tmp, origin={"switcher.json": SWITCHER, "deploy-id.txt": PREV},
+               assembled={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("fails when only the deploy stamp is stale",
+          r.returncode != 0 and "deploy-id.txt still does not match" in log(r), log(r))
+    check("and still dumps the origin headers", "etag" in log(r).lower(), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # A current stamp but a stale switcher.json is a partially-served deploy.
+    r = verify(tmp, origin={"switcher.json": "[]", "deploy-id.txt": THIS},
+               assembled={"switcher.json": SWITCHER, "deploy-id.txt": THIS})
+    check("fails when the stamp is current but switcher.json is not",
+          r.returncode != 0 and "switcher.json still does not match" in log(r), log(r))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Nothing assembled to compare against: fail loudly rather than pass vacuously.
+    r = verify(tmp, origin={}, assembled={})
+    check("fails when there is nothing to verify against",
+          r.returncode != 0 and "nothing to verify against" in log(r), log(r))
 
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'all harness checks passed'}")
 sys.exit(1 if fails else 0)

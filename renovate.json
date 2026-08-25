@@ -23,5 +23,20 @@
         "minor"
       ]
     }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Bump the actionlint pinned in _lint.yml. Renovate cannot compute the tarball's sha256, so ACTIONLINT_SHA256 has to be updated by hand in the same PR \u2014 until it is, the lint job fails the checksum and goes red.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/_lint\\.yml$/"
+      ],
+      "matchStrings": [
+        "ACTIONLINT_VERSION: (?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "rhysd/actionlint",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
   ]
 }

@@ -1,9 +1,16 @@
 on:
   workflow_call:
 
+# Declared here, not inherited: a reusable workflow's token is whatever the caller
+# grants, and lint needs nothing but the checkout (plus the releases API, which is
+# public read).
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -20,14 +27,24 @@ jobs:
       # Two errors are suppressed: actionlint's `job` context schema is stale and does not
       # know `job.workflow_repository` / `job.workflow_sha`, both of which are real and
       # documented, and which publish-gh-pages.yml depends on to version-match assemble.mjs.
+      #
+      # PINNED, and checked. This is the only binary the repo executes that it did not
+      # build, and resolving `releases/latest` at run time meant every lint run took
+      # whatever bytes that tag pointed at — while `astral-sh/setup-uv` two files over
+      # is pinned to a full version with a comment explaining why. Renovate bumps
+      # ACTIONLINT_VERSION (see renovate.json); it cannot compute the new digest, so
+      # ACTIONLINT_SHA256 must be updated in the SAME PR. Until it is, the checksum
+      # fails and the job goes red — which is the point: it fails closed, not open.
       - name: Lint workflow files
         env:
           GH_TOKEN: ${{ github.token }}
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
           set -euo pipefail
-          ver=$(gh api repos/rhysd/actionlint/releases/latest --jq .tag_name | tr -d v)
-          gh release download "v$ver" --repo rhysd/actionlint \
-            -p "actionlint_${ver}_linux_amd64.tar.gz" -O "$RUNNER_TEMP/al.tgz"
+          gh release download "v$ACTIONLINT_VERSION" --repo rhysd/actionlint \
+            -p "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -O "$RUNNER_TEMP/al.tgz"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/al.tgz" | sha256sum -c -
           tar xzf "$RUNNER_TEMP/al.tgz" --no-same-owner -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color \
             -ignore 'property "workflow_(repository|sha)" is not defined'

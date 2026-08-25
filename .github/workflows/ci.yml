@@ -9,6 +9,13 @@ name: CI
 # PR's critical path and a Pages failure never shows as a red check against an author who
 # cannot act on it. This workflow therefore needs no elevated permissions, and its `name:`
 # below is load-bearing — publish.yml matches on it.
+# The token this workflow's own jobs get, and the ceiling for the reusable workflows it
+# calls: nothing here builds or tests with anything but read access. Declared at the top
+# rather than left to the repo/org default, which may be write-all. The `release` job
+# overrides it upward for the one job that needs to create a Release.
+permissions:
+  contents: read
+
 on:
   pull_request:
   push:

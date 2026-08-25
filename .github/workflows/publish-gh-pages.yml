@@ -57,6 +57,10 @@ jobs:
   # not being from a fork, so there is nothing left to branch on here.
   deploy:
     runs-on: ubuntu-latest
+    # The whole deploy: a cold release-zip cache, the assemble, the upload, and up to
+    # ~6 min of origin verification at the end. 45 leaves room for a slow Pages backend
+    # while still failing the same day.
+    timeout-minutes: 45
     permissions:
       contents: read     # checkout + read release assets
       actions: read      # gather cross-run docs artifacts
@@ -66,12 +70,22 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    # Cancelling a superseded deploy is safe: every deploy reconstructs the whole site
+    # QUEUE superseded deploys; do not cancel them. The old `cancel-in-progress: true`
+    # was argued from artifact correctness — every deploy reconstructs the whole site
     # from durable sources, so the next one gathers everything the cancelled one would
-    # have.
+    # have — and that argument still holds. It is just not the question. Cancelling
+    # kills the job mid-`deploy-pages`, in the window between the artifact being
+    # uploaded and the Pages backend finishing with it, which is a backend state we do
+    # not control and cannot inspect; GitHub's own Pages starter workflow uses `false`
+    # for exactly this reason, and this workflow already carries a step for detecting a
+    # wedged origin, so the failure it guards against is not hypothetical here.
+    #
+    # The cost is bounded: a concurrency group holds at most ONE pending run, and a
+    # newer arrival cancels the older PENDING one (before it starts, harmlessly). So a
+    # burst of pushes costs one extra full-site deploy, not a pile-up.
     concurrency:
       group: pages
-      cancel-in-progress: true
+      cancel-in-progress: false
     env:
       REPO: ${{ github.repository }}
       # The branch that was actually BUILT — see the header: github.ref is the default
@@ -81,16 +95,24 @@ jobs:
       DEFAULT: ${{ github.event.repository.default_branch }}
       SEED_TAG: pages-default-seed
     steps:
-      # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to
-      # order that repo's deployed versions, so it needs their tags (fetch-depth: 0).
+      # The CONSUMER's repo, at the root cwd: assemble.mjs runs `git tag` here to order
+      # that repo's deployed versions. It needs the TAGS, not the history — and this
+      # runs on every deploy of every consumer, some with years of commits, so ask for
+      # exactly that rather than `fetch-depth: 0`. (docs.yml deliberately still clones
+      # in full: a build-command may run `git describe`.)
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: true
 
       # THIS reusable workflow's repo + commit (the `job` context resolves to the
       # reusable file, not the caller), so assemble.mjs matches the ref the consumer
       # pinned publish-gh-pages.yml@<ref> to — automatically, no version bump.
       # Sparse: only assemble/ is needed.
+      #
+      # `.mvs` is a RESERVED path in the consumer's workspace (documented as such in
+      # docs/reference/workflows.md): the checkout lands inside their tree, so a repo
+      # that has its own `.mvs/` would collide.
       - name: Fetch assemble.mjs
         uses: actions/checkout@v7
         with:
@@ -222,15 +244,25 @@ jobs:
               if [ -s "$relcache/$assetid.zip" ]; then
                 hits=$((hits + 1))
                 decision="$decision (cache hit)"
-              elif gh release download "$tag" --repo "$REPO" -p docs.zip \
-                     -O "$relcache/$assetid.zip" 2>"$RUNNER_TEMP/relcache-download.err"; then
+              # Fetch by ASSET ID, not `gh release download <tag> -p docs.zip`, so the
+              # bytes match the id they are cached under. The cache is id-addressed
+              # precisely because an id names immutable bytes — but a re-cut release
+              # between the listing above and this download would have handed the NEW
+              # docs.zip to the OLD id, cached for every later deploy to trust.
+              elif gh api "repos/$REPO/releases/assets/$assetid" \
+                     -H 'Accept: application/octet-stream' \
+                     > "$relcache/$assetid.zip" 2>"$RUNNER_TEMP/relcache-download.err" \
+                   && [ -s "$relcache/$assetid.zip" ] \
+                   && [ "$(head -c 2 "$relcache/$assetid.zip")" = PK ]; then
                 downloads=$((downloads + 1))
                 decision="$decision (downloaded)"
               else
-                # Leave no truncated zip behind for the next run's cache to trust.
+                # Leave nothing behind for the next run's cache to trust: a redirect to
+                # a file means a FAILED request still wrote an error body, so the exit
+                # status alone is not enough — hence the zip magic check above.
                 rm -f "$relcache/$assetid.zip"
                 decision="$decision (DOWNLOAD FAILED — skipped)"
-                echo "::warning::release $tag: docs.zip download failed — skipping. $(head -1 "$RUNNER_TEMP/relcache-download.err" 2>/dev/null)" >> "$warnings"
+                echo "::warning::release $tag: docs.zip (asset $assetid) download failed — skipping. $(head -1 "$RUNNER_TEMP/relcache-download.err" 2>/dev/null)" >> "$warnings"
               fi
               if [ -s "$relcache/$assetid.zip" ]; then
                 cp "$relcache/$assetid.zip" "$RUNNER_TEMP/gather/$dest.zip"
@@ -288,6 +320,7 @@ jobs:
           # Fork approval is an API call per cross-repo PR, so settle it here and pass
           # the answer in — assemble.mjs stays free of network IO.
           prs="$RUNNER_TEMP/prs.tsv"; : > "$prs"
+          pr_limit=200
           while IFS=$'\t' read -r num sha cross; do
             [ -n "$num" ] || continue
             approved=true
@@ -296,9 +329,17 @@ jobs:
                 -q 'any(.[]; .context=="preview-approved" and .state=="success")')
             fi
             printf '%s\t%s\t%s\n' "$num" "$sha" "$approved" >> "$prs"
-          done < <(gh pr list --repo "$REPO" --state open --limit 200 \
+          done < <(gh pr list --repo "$REPO" --state open --limit "$pr_limit" \
             --json number,headRefOid,isCrossRepository \
             -q '.[] | [.number, .headRefOid, .isCrossRepository] | @tsv')
+          # A truncated listing is otherwise indistinguishable from a repo that happens
+          # to have exactly $pr_limit open PRs: the missing ones simply get no preview,
+          # with nothing in the log to explain it.
+          if [ "$(wc -l < "$prs")" -ge "$pr_limit" ]; then
+            echo "::warning::more than $pr_limit open PRs — only the first $pr_limit were \
+          considered for previews, so some open PRs will have none. max-prs caps how many \
+          are published; this caps how many are even looked at."
+          fi
 
 
           # The API serves an artifact as a zip-of-the-artifact, with docs.zip inside.
@@ -430,27 +471,48 @@ jobs:
             fi
             rm -rf "$tmp"
           done
-          # Report the assembled size. Pages rejects an artifact over 1 GB and
-          # deploy-pages warns when the upload exceeds it; `max-releases` / `max-prs` are
-          # the levers (see docs/how-to/keep-the-site-small.md). This is the tree on
-          # disk, so it reads high — the cap applies to the compressed upload, and
-          # HTML/JS packs around 3x.
-          echo "assembled site: $(du -sh "$RUNNER_TEMP/site" | cut -f1) on disk across \
-          $(find "$RUNNER_TEMP/site" -mindepth 1 -maxdepth 1 -type d | wc -l) version dir(s)"
 
       # `generate` orders versions, writes switcher.json + index.html, and prints the
       # stable-alias source dir (the newest release), or "" when no release is deployed yet.
       # Hard-fails if the default branch is absent (Ensure step guarantees the zip, but
-      # the extract could still fail if the zip was malformed).
+      # the extract could still fail if the zip was malformed). The last thing to touch
+      # the tree, so it also stamps the deploy and reports the final size.
       - name: Generate switcher.json and stable alias
         run: |
           set -euo pipefail
           stable_src=$(node "$GITHUB_WORKSPACE/.mvs/assemble/assemble.mjs" generate \
-            --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" --required "$DEFAULT")
+            --site-dir "$RUNNER_TEMP/site" --base-url "$PAGES_URL" \
+            --default-branch "$DEFAULT" --required "$DEFAULT")
           # An `&& ln … || true` one-liner here would also swallow a FAILED symlink, not
           # just the empty-stable_src case — and a missing stable/ alias is silent damage.
           if [ -n "$stable_src" ]; then
             ln -s "$stable_src" "$RUNNER_TEMP/site/stable"
+          fi
+
+          # The deploy stamp the verify step below polls for. It has to change on EVERY
+          # deploy, which switcher.json does not: that file lists the version set, so an
+          # ordinary docs edit on the default branch reproduces it byte-for-byte and a
+          # stale origin would compare equal. run + attempt + the clock are unique per
+          # deploy by construction. GITHUB_RUN_* are default runner env vars, so this
+          # needs no expression.
+          #
+          # Safe at the site root: assemble.mjs's discoverVersions returns DIRECTORIES
+          # only, so a file here is never mistaken for a version.
+          printf 'run=%s\nattempt=%s\nutc=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "$RUNNER_TEMP/site/deploy-id.txt"
+
+          # The size that actually gets uploaded: -L follows stable/, which
+          # upload-pages-artifact materialises as a full COPY of the newest release
+          # (it tars with --dereference). Reported after the alias exists, because a
+          # number that omits the largest single version is worse than no number on a
+          # metric whose whole job is to warn before the 1 GB cap. The cap applies to
+          # the compressed upload and HTML/JS packs around 3x, so this reads high.
+          echo "assembled site: $(du -shL "$RUNNER_TEMP/site" | cut -f1) on disk across \
+          $(find "$RUNNER_TEMP/site" -mindepth 1 -maxdepth 1 -type d | wc -l) version dir(s)"
+          if [ -n "$stable_src" ]; then
+            echo "  ...of which stable/ is a second copy of $stable_src \
+          ($(du -shL "$RUNNER_TEMP/site/stable" | cut -f1)) — see docs/how-to/keep-the-site-small.md"
           fi
 
       - name: Upload Pages artifact
@@ -469,11 +531,19 @@ jobs:
       # deploy-pages reports success once the deployment RECORD flips active, even if the
       # Pages backend fails to update the SERVED origin — a wedged site can serve a stale
       # artifact indefinitely while every deploy reports OK. This turns that into a red
-      # check instead of silently serving old docs: confirm the live switcher.json
-      # byte-matches the one just assembled, polling up to ~6 min because a re-serve can
-      # take minutes to reach the origin. The loop exits the instant it matches, so a
-      # fast deploy isn't slowed. On failure, dump the origin headers (a frozen
-      # etag/last-modified is the wedge signature).
+      # check instead of silently serving old docs, polling up to ~6 min because a
+      # re-serve can take minutes to reach the origin. The loop exits the instant both
+      # files match, so a fast deploy isn't slowed. On failure, dump the origin headers
+      # (a frozen etag/last-modified is the wedge signature).
+      #
+      # TWO files, and deploy-id.txt is the one that does the work. switcher.json only
+      # changes when the VERSION SET changes, so on the commonest deploy of all — a docs
+      # edit on the default branch — it is byte-identical to what is already served and
+      # compares equal on attempt 1 whether or not the origin moved. That is precisely
+      # the case where a wedge goes unnoticed. The stamp is unique per deploy, so it can
+      # only match if these bytes are the ones being served. switcher.json stays as the
+      # secondary check: it is the file the widget actually reads, so a mismatch there
+      # means a partially-served deploy even when the stamp is current.
       - name: Verify the deployed origin matches what we assembled
         id: verify
         env:
@@ -483,27 +553,38 @@ jobs:
           set -euo pipefail
           [ -n "$PAGE_URL" ] || { echo "::error::deploy-pages did not report a page_url"; exit 1; }
           local_json="$SITE_DIR/switcher.json"
-          [ -f "$local_json" ] || { echo "::error::no switcher.json at $local_json"; exit 1; }
+          local_id="$SITE_DIR/deploy-id.txt"
+          for f in "$local_json" "$local_id"; do
+            [ -f "$f" ] || { echo "::error::nothing to verify against: no $f"; exit 1; }
+          done
           # Command substitution strips trailing newlines from both sides, so the
-          # comparison is robust to a curl/file trailing-newline difference.
-          want=$(cat "$local_json")
-          url="${PAGE_URL%/}/switcher.json"
+          # comparisons are robust to a curl/file trailing-newline difference.
+          want_json=$(cat "$local_json")
+          want_id=$(cat "$local_id")
+          base="${PAGE_URL%/}"
           timeout_s=360
           deadline=$(( $(date +%s) + timeout_s ))
           attempt=0
           while :; do
             attempt=$((attempt + 1))
-            got=$(curl -fsS "$url?cb=$(date +%s%N)" || true)   # cache-bust → hit the origin
-            if [ -n "$got" ] && [ "$got" = "$want" ]; then
-              echo "origin matches the assembled switcher.json (attempt $attempt)"
+            # cache-bust → hit the origin, not a CDN copy
+            cb=$(date +%s%N)
+            got_id=$(curl -fsS "$base/deploy-id.txt?cb=$cb" || true)
+            got_json=$(curl -fsS "$base/switcher.json?cb=$cb" || true)
+            if [ "$got_id" = "$want_id" ] && [ "$got_json" = "$want_json" ]; then
+              echo "origin is serving this deploy (attempt $attempt)"
               exit 0
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::live switcher.json still does not match the assembled one after ${timeout_s}s — Pages origin likely stale/wedged"
+              stale="deploy-id.txt"
+              [ "$got_id" = "$want_id" ] && stale="switcher.json"
+              echo "::error::live $stale still does not match the assembled one after ${timeout_s}s — Pages origin likely stale/wedged"
               echo "--- origin headers (frozen etag/last-modified ⇒ wedged) ---"
-              curl -sI "$url?cb=$(date +%s%N)" | grep -iE '^(HTTP/|etag|last-modified|age)' | tr -d '\r'
-              echo "--- assembled ($local_json) ---"; printf '%s\n' "$want"
-              echo "--- live ($url) ---"; printf '%s\n' "$got"
+              curl -sI "$base/deploy-id.txt?cb=$(date +%s%N)" | grep -iE '^(HTTP/|etag|last-modified|age)' | tr -d '\r'
+              echo "--- assembled deploy-id ---"; printf '%s\n' "$want_id"
+              echo "--- live deploy-id ---";      printf '%s\n' "$got_id"
+              echo "--- assembled switcher.json ---"; printf '%s\n' "$want_json"
+              echo "--- live switcher.json ---";      printf '%s\n' "$got_json"
               exit 1
             fi
             sleep 5

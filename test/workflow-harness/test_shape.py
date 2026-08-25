@@ -71,8 +71,13 @@ if link:
           "state=success" in link["run"] and "state=failure" not in link["run"]
           and "state=error" not in link["run"])
 
-check("deploy cancels superseded runs",
-      engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is True,
+# Never cancel a deploy in flight: the kill lands somewhere inside deploy-pages, and
+# the state on the far side of it is the Pages backend's, not ours.
+check("deploy queues superseded runs rather than cancelling them",
+      engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is False,
+      engine["jobs"]["deploy"]["concurrency"])
+check("deploys are serialised on one group",
+      engine["jobs"]["deploy"]["concurrency"].get("group") == "pages",
       engine["jobs"]["deploy"]["concurrency"])
 check("deploy holds no write token beyond what it deploys with",
       engine["jobs"]["deploy"]["permissions"]["actions"] == "read"
@@ -100,6 +105,48 @@ with_block = caller["jobs"]["publish"]["with"]
 for cap in ("max-releases", "max-prs"):
     val = str(with_block.get(cap, ""))
     check(f"{cap} is set as a literal", val.isdigit(), repr(val))
+
+# ── Cross-cutting: every workflow file, every job ──────────────────────────────
+#
+# A context value interpolated into a `run:` body is substituted as SCRIPT TEXT before
+# bash sees it, so a ref name containing $( ) or backticks executes. These are REUSABLE
+# workflows: a consumer can trigger docs.yml on `push: branches: ['**']`, which hands
+# the string to anyone who can push a branch. The rule is therefore absolute rather than
+# case-by-case — every context value comes through `env:` — and this is what keeps it
+# absolute. There is deliberately no allow-list; add one only with a comment saying why
+# the value cannot be attacker-controlled.
+print("\n-- every workflow: no ${{ }} inside a run: body --")
+for name in sorted(os.listdir(WF)):
+    if not name.endswith((".yml", ".yaml")):
+        continue
+    wf = load(name)
+    for job_name, job in (wf.get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            body = step.get("run")
+            if not body or "${{" not in body:
+                continue
+            label = step.get("name", body.splitlines()[0][:40])
+            check(f"{name}:{job_name}:{label!r} takes context through env:", False,
+                  "\n         ".join(l.strip() for l in body.splitlines() if "${{" in l))
+check("all run: bodies are expression-free", True)
+
+# Two defaults that are wrong in the unsafe direction if left unset: the token is
+# whatever the repo/org default is (potentially write-all), and a hung step burns the
+# 6-hour job default. `timeout-minutes` is only settable on a job that has `steps` —
+# a job that is just `uses:` a reusable workflow inherits the callee's.
+print("\n-- every workflow: permissions + timeouts --")
+for name in sorted(os.listdir(WF)):
+    if not name.endswith((".yml", ".yaml")):
+        continue
+    wf = load(name)
+    jobs = wf.get("jobs") or {}
+    check(f"{name} declares permissions",
+          "permissions" in wf or all("permissions" in j for j in jobs.values()),
+          f"jobs without permissions: {[n for n, j in jobs.items() if 'permissions' not in j]}")
+    for job_name, job in jobs.items():
+        if not job.get("steps"):
+            continue
+        check(f"{name}:{job_name} is time-bounded", "timeout-minutes" in job)
 
 print("\n-- entry: ci.yml --")
 check("builds without publishing", "publish" not in ci["jobs"], list(ci["jobs"]))

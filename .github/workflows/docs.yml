@@ -12,6 +12,16 @@ on:
         required: false
         default: docs/_build/html
         type: string
+      base-path:
+        description: >-
+          URL path the SITE is served at, without the version segment. Empty (the
+          default) means /<repo>, which is where a project Pages site lives
+          (https://ORG.github.io/REPO/). Set it to "/" for a custom domain (CNAME) or an
+          ORG.github.io repo — both serve from the root, where a /<repo> prefix would
+          404 every root-absolute asset.
+        required: false
+        default: ""
+        type: string
 
 # REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
 # the docs at the versioned BASE_URL and uploads this build's `docs` artifact
@@ -37,6 +47,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Generous: build-command is the consumer's, and a docs build with a Python env to
+    # solve can legitimately take a while. It only has to beat the 6-hour default, so a
+    # hung build fails within the hour instead of holding a runner all day.
+    timeout-minutes: 30
     steps:
       # fetch-depth: 0 brings the full history *and tags* — a build-command may
       # derive a version from `git describe` (this repo's docs do, to pin the
@@ -62,26 +76,64 @@ jobs:
 
       # Version name = the site sub-dir this build is served at, and the BASE_URL it
       # must be built with: pr-<n> for PRs, otherwise the ref name (the default branch,
-      # or a tag without `/`). No sanitisation — every version name is URL/path-safe.
+      # or a tag without `/`).
       #
       # This is the OTHER half of the contract, and it is not passed anywhere: the
       # gather independently re-derives the same name for each source it stages (a
       # release's tag, a PR's number, the repo's default_branch) and unpacks the zip at
       # site/<that name>. Both sides compute the same string from the same facts, so
       # this rule and assemble.mjs's dest rule must change together.
-      - name: Compute version name
+      #
+      # The name is VALIDATED, not assumed clean. In THIS repo it is clean by
+      # construction (`tags: ['*']` never builds a `/`-tag), but this is a reusable
+      # workflow: a consumer triggering it on `push: branches: ['**']` would let anyone
+      # who can push a branch choose the string — and git accepts `$( )`, backticks and
+      # quotes in a ref name. Hence both halves here: the ref comes through `env:` so
+      # the shell never parses it as script text, and the character set is then checked
+      # so it stays a safe URL path segment and site dir.
+      - name: Compute version name and BASE_URL
         id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_PATH: ${{ inputs.base-path }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            name="pr-${{ github.event.pull_request.number }}"
+          if [ "$EVENT" = pull_request ]; then
+            name="pr-$PR_NUMBER"
           else
-            name="${{ github.ref_name }}"
+            name="$REF_NAME"
+          fi
+          case "$name" in
+            "" | "." | "..") ok=false ;;
+            *[!A-Za-z0-9._-]*) ok=false ;;
+            *) ok=true ;;
+          esac
+          if [ "$ok" != true ]; then
+            echo "::error::version name '$name' is not usable as a URL path segment \
+          — it must be non-empty and contain only A-Z a-z 0-9 . _ - (a '/' in a branch \
+          or tag name is the usual cause). Build this ref under a name that is, or \
+          exclude it from the workflow's triggers."
+            exit 1
           fi
           echo "version-name=$name" >> "$GITHUB_OUTPUT"
 
-      # BASE_URL must match the versioned sub-path the build is served at, or its
-      # root-absolute assets 404 — see the version-name contract above.
+          # BASE_URL must match the versioned sub-path the site is served at, or the
+          # build's root-absolute assets 404. The site half of it is base-path, which
+          # defaults to /<repo> — right for a project Pages site, wrong for a custom
+          # domain or an ORG.github.io repo, which serve at the root. Normalise to
+          # exactly one leading slash and no trailing one, so "/", "/repo" and "repo/"
+          # all compose the same way.
+          base="${BASE_PATH:-/$REPO_NAME}"
+          base="/${base#/}"
+          base="${base%/}"
+          echo "BASE_URL=$base/$name" >> "$GITHUB_ENV"
+          echo "version name: $name    BASE_URL: $base/$name"
+
+      # BASE_URL arrives via GITHUB_ENV from the step above (it needs base-path's
+      # normalisation, which an `env:` expression cannot do).
       # VERSION_NAME is the bare version token, exported for builds
       # that need it directly — e.g. a Sphinx conf.py setting pydata-sphinx-theme's
       # switcher `version_match` — without parsing it back out of BASE_URL.
@@ -89,7 +141,6 @@ jobs:
       # and is run with `eval` so compound commands work.
       - name: Build docs
         env:
-          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version-name }}
           VERSION_NAME: ${{ steps.ver.outputs.version-name }}
           BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
