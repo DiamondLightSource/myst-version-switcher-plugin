@@ -15,6 +15,7 @@ import {
 	discoverVersions,
 	isPrerelease,
 	missingRequired,
+	orderTags,
 	orderVersions,
 	preferredVersion,
 	RELZIPS_CACHE_PREFIX,
@@ -74,6 +75,22 @@ assert.deepEqual(orderVersions(["pr-10", "pr-2", "main"], []), [
 ]);
 ok("orderVersions sorts pr-<n> previews numerically, not lexically");
 
+// a `develop` default branch heads the list instead of landing in the leftover
+// bucket among the pr-<n> previews.
+assert.deepEqual(orderVersions(["pr-3", "2.1", "develop"], tags, "develop"), [
+	"develop",
+	"2.1",
+	"pr-3",
+]);
+ok("orderVersions puts a named default branch first");
+
+// main/master still come after it when a repo mid-rename carries both.
+assert.deepEqual(orderVersions(["main", "develop"], [], "develop"), [
+	"develop",
+	"main",
+]);
+ok("orderVersions keeps main after the named default branch");
+
 // --- discoverVersions: directory names under the site root ---
 const site = mkdtempSync(join(tmpdir(), "assemble-site-"));
 for (const d of ["main", "2.1", "2.0"]) mkdirSync(join(site, d));
@@ -100,6 +117,64 @@ assert.equal(isPrerelease("beta-program"), false);
 assert.equal(isPrerelease("stable-2.0"), false);
 ok("isPrerelease ignores a/b/rc letters not following a digit");
 
+// the hyphenated/dotted semver spellings, and the long marker words. These used to
+// read as STABLE, which made `stable/` alias a beta.
+assert.ok(isPrerelease("1.1.0-beta.1"));
+assert.ok(isPrerelease("1.0.0-rc1"));
+assert.ok(isPrerelease("v1.2.3-alpha"));
+assert.ok(isPrerelease("2.0.0-pre.1"));
+assert.ok(isPrerelease("1.0.dev0"));
+assert.ok(isPrerelease("1.3.2-a9"));
+ok("isPrerelease flags hyphenated semver + long-form markers");
+
+// a longer word that merely STARTS with a marker is not one (the trailing lookahead).
+assert.equal(isPrerelease("1.0-candidate"), false);
+assert.equal(isPrerelease("2.0-canary"), false);
+assert.equal(isPrerelease("1.0-preflight"), false);
+ok("isPrerelease ignores longer words starting with a marker");
+
+// --- compareTags/orderTags: newest first, prereleases below their own release ---
+// THE invariant: for any tag X, every prerelease of X sorts after X. git's
+// -v:refname does the opposite for the hyphenated forms.
+assert.deepEqual(
+	orderTags([
+		"1.0.0",
+		"1.1.0-beta.1",
+		"1.1.0",
+		"1.0.0-rc1",
+		"2.0.0a1",
+		"2.0.0",
+	]),
+	["2.0.0", "2.0.0a1", "1.1.0", "1.1.0-beta.1", "1.0.0", "1.0.0-rc1"],
+);
+ok("orderTags ranks each prerelease below the release it qualifies");
+
+// digit runs compare numerically, so 1.10 is newer than 1.9 (not lexically before).
+assert.deepEqual(orderTags(["1.9.0", "1.10.0", "1.9.1"]), [
+	"1.10.0",
+	"1.9.1",
+	"1.9.0",
+]);
+ok("orderTags compares numeric segments numerically");
+
+// a trailing segment that is NOT a prerelease marker means a newer version.
+assert.deepEqual(orderTags(["1.1", "1.1.1"]), ["1.1.1", "1.1"]);
+ok("orderTags treats a non-marker trailing segment as newer");
+
+// a `v` prefix is a spelling of the same version, so it does not reorder anything.
+assert.deepEqual(orderTags(["v1.0.0", "v1.2.0", "v1.1.0"]), [
+	"v1.2.0",
+	"v1.1.0",
+	"v1.0.0",
+]);
+ok("orderTags ignores a leading v when comparing");
+
+// total order: reordering the input cannot change the result (an unstable ranking
+// would change the published set, and so the cache key, on identical inputs).
+const shuffled = ["1.1.0-beta.1", "2.0.0", "1.0.0", "2.0.0a1", "1.1.0"];
+assert.deepEqual(orderTags(shuffled), orderTags([...shuffled].reverse()));
+ok("orderTags is a total order (input order cannot change it)");
+
 // --- preferredVersion: newest deployed stable tag, else main ---
 assert.equal(preferredVersion(["main", "2.1", "2.0"], tags), "2.1");
 ok("preferredVersion picks the newest deployed stable tag");
@@ -115,6 +190,19 @@ ok("preferredVersion falls back to main when no stable tag is deployed");
 
 assert.equal(preferredVersion(["main", "2.0"], ["2.1", "2.0"]), "2.0");
 ok("preferredVersion ignores tags with no deployed build");
+
+// the bug this pair guards: with the beta ranked above 1.1.0 by git's sort AND read
+// as stable, preferredVersion returned the beta.
+const semverTags = orderTags(["1.1.0", "1.1.0-beta.1"]);
+assert.equal(
+	preferredVersion(["main", "1.1.0", "1.1.0-beta.1"], semverTags),
+	"1.1.0",
+);
+ok("preferredVersion prefers a release over its own hyphenated prerelease");
+
+// a consumer whose default branch is neither main nor master.
+assert.equal(preferredVersion(["develop", "pr-3"], [], "develop"), "develop");
+ok("preferredVersion falls back to the named default branch");
 
 // --- stablePlan: redirect target + stable-alias source ---
 // a deployed non-prerelease release → stable/ alias + root → stable/.
@@ -140,6 +228,14 @@ assert.deepEqual(stablePlan(["3.0rc1"], ["3.0rc1"]), {
 	redirectTarget: "3.0rc1",
 });
 ok("stablePlan never aliases a prerelease as stable");
+
+// ...including the hyphenated spelling, which used to slip through as a real release.
+assert.deepEqual(stablePlan(["main", "1.1.0-beta.1"], ["1.1.0-beta.1"]), {
+	preferred: "main",
+	stableSrc: null,
+	redirectTarget: "main",
+});
+ok("stablePlan never aliases a hyphenated prerelease as stable");
 
 // --- missingRequired: required branches absent from the discovered site dirs ---
 // versions are the discovered site dirs; the default branch and every gathered
