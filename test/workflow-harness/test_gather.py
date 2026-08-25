@@ -271,16 +271,31 @@ print("\n-- the version-name contract: both sides derive the same string --")
 # keeping a build's assets from 404ing is that the two rules agree. Pin them together.
 DOCS = steps_of("docs.yml", "build")
 
-def docs_yml_version_name(tmp, event, *, ref_name="", pr_number=""):
-    """Run docs.yml's own 'Compute version name' step and read its output."""
-    out = os.path.join(tmp, "ver.txt")
-    open(out, "w").close()
-    env = dict(os.environ, GITHUB_OUTPUT=out)
+def docs_yml_version(tmp, event, *, ref_name="", pr_number="", base_path="", repo="widget"):
+    """Run docs.yml's own compute step; return (version-name, BASE_URL, result)."""
+    # A fresh pair per call (the step appends), named by a counter rather than by the
+    # ref — one of the refs under test contains a '/'.
+    docs_yml_version.n = getattr(docs_yml_version, "n", 0) + 1
+    out = os.path.join(tmp, f"ver-{docs_yml_version.n}.txt")
+    genv = os.path.join(tmp, f"env-{docs_yml_version.n}.txt")
+    open(out, "w").close(); open(genv, "w").close()
+    env = dict(os.environ, GITHUB_OUTPUT=out, GITHUB_ENV=genv)
     exprs = {"github.event_name": event, "github.ref_name": ref_name,
-             "github.event.pull_request.number": pr_number}
-    r = run("Compute version name", env, exprs, from_steps=DOCS)
+             "github.event.pull_request.number": pr_number,
+             "inputs.base-path": base_path, "github.event.repository.name": repo}
+    r = run("Compute version name and BASE_URL", env, exprs, from_steps=DOCS)
+    def value(path, key):
+        for line in open(path):
+            if line.startswith(f"{key}="):
+                return line.strip().split("=", 1)[1]
+        return None
+    return value(out, "version-name"), value(genv, "BASE_URL"), r
+
+
+def docs_yml_version_name(tmp, event, **kw):
+    name, _, r = docs_yml_version(tmp, event, **kw)
     assert r.returncode == 0, r.stderr
-    return open(out).read().strip().split("=", 1)[1]
+    return name
 
 with tempfile.TemporaryDirectory() as tmp:
     # A tag: docs.yml uses the ref name; the gather uses the release's tag.
@@ -327,6 +342,25 @@ with tempfile.TemporaryDirectory() as tmp:
     check("only well-formed zips become version dirs", got == ["1.0", "main"], got)
     check("an unreadable zip warns", "could not unzip" in r.stdout, r.stdout)
     check("a two-root zip warns", "exactly one top-level directory" in r.stdout, r.stdout)
+
+with tempfile.TemporaryDirectory() as tmp:
+    # BASE_URL is the other half of the same contract: the version name has to be
+    # appended to wherever the SITE is served, which is not always /<repo>.
+    _, base, r = docs_yml_version(tmp, "push", ref_name="main")
+    check("BASE_URL defaults to /<repo>/<version>", base == "/widget/main", f"{base!r} {log(r)}")
+    _, base, _ = docs_yml_version(tmp, "push", ref_name="main", base_path="/")
+    check("base-path '/' roots the build at the host root (custom domain)",
+          base == "/main", repr(base))
+    _, base, _ = docs_yml_version(tmp, "push", ref_name="main", base_path="docs/")
+    check("base-path slashes are normalised", base == "/docs/main", repr(base))
+
+with tempfile.TemporaryDirectory() as tmp:
+    # The name becomes a URL path segment and a site dir. docs.yml is reusable, so a
+    # consumer can point it at any ref, and git allows $( ) and quotes in a ref name.
+    for bad in ("feature/x", "v1-$(id)", "", "."):
+        _, _, r = docs_yml_version(tmp, "push", ref_name=bad)
+        check(f"an unusable version name is rejected ({bad!r})",
+              r.returncode != 0 and "not usable as a URL path segment" in log(r), log(r))
 
 print("\n-- linking the published docs back to the triggering commit --")
 def link(tmp, *, dirs=(), built_branch="main", **exprs):
