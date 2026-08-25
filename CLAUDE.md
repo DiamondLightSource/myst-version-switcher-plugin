@@ -81,8 +81,9 @@ set).
 There is NO size guard in the workflow. `actions/deploy-pages` already compares the
 uploaded artifact against 1 GB and warns (`ONE_GIGABYTE` in `src/internal/deployment.js`,
 reading the artifact's stored/compressed size), so packing the tree to re-measure it was
-duplicated work with a worse number. The engine just reports `du -sh` of the assembled
-tree; the recovery — lower the caps, re-run, nothing is deleted — lives in
+duplicated work with a worse number. The engine just reports `du -shL` of the assembled
+tree — with -L, and AFTER the `stable/` symlink exists, because upload-pages-artifact
+dereferences it and the newest release is therefore uploaded twice; the recovery — lower the caps, re-run, nothing is deleted — lives in
 docs/how-to/keep-the-site-small.md and in the tutorial's copy-paste `publish.yml`.
 
 Selection is `assemble.mjs`'s `selectReleases` (pure, unit-tested), ranked by
@@ -181,6 +182,12 @@ the repo's `default_branch`). Nothing is threaded between them — `docs.yml` ha
 `version-name` output any more (it existed only for the deleted injection step). The two
 rules must change together.
 
+The name is now VALIDATED (`[A-Za-z0-9._-]`, non-empty) rather than assumed clean: it is
+clean by construction HERE, but docs.yml is reusable and a consumer can trigger it on any
+ref, and git allows `$( )` and backticks in a ref name. Related invariant, enforced by
+`test_shape.py` across every workflow: **no `${{ }}` inside any `run:` body** — context
+values come through `env:` only.
+
 ### The PR gets a link, never a red check
 A successful deploy posts a `docs-preview` commit status on
 `workflow_run.head_sha` (or, for a dispatched fork preview, the SHA the Approve step
@@ -205,6 +212,11 @@ they live in `if:` expressions the gather harness can't reach.
 **The fork guard is not optional:** `workflow_run` runs with a WRITE token even when a
 fork's PR triggered it (pwn-request). Fork builds reach the site only via a maintainer
 dispatching `publish.yml` with `pr`, which pins approval to that head SHA.
+
+### PR previews are IN the public switcher — deliberately
+`switcherStruct` maps every discovered dir, `pr-<n>` included, so open PR numbers show in
+the dropdown of the live site. That is intended (a reviewer can jump to a preview from any
+page), not an oversight — don't "fix" it without asking.
 
 ### Self-referencing assemble.mjs (no separate action)
 `publish.yml` sparse-checks-out **this** repo's `assemble/` at `job.workflow_repository`
@@ -231,14 +243,24 @@ Without this, assets and links break under the versioned GitHub Pages sub-path. 
 version name is computed in `docs.yml` and re-derived identically by the gather as the
 `site/<version-name>` dir — see "The version name is computed twice, never passed".
 
+The `/<repo>` half is `docs.yml`'s **`base-path`** input (default: `/<repo>`). A custom
+domain or an `ORG.github.io` repo serves at the ROOT, so those pass `base-path: "/"` —
+otherwise switcher.json (which takes its URLs from the Pages API, and so follows the
+CNAME automatically) would be right while every page it links to 404s its assets.
+
 ### `assemble` degrades gracefully on first deploy
 With no releases and no other branches, `assemble` produces a single-entry
 `switcher.json` for the current build and an `index.html` redirecting to it,
 rather than failing. The "preferred" version (the redirect target, flagged
 `preferred: true` in switcher.json, rendered with a ★) is the newest deployed
-non-prerelease tag, falling back to `main`/`master`. Prerelease detection mirrors
-`release.yml` (an `a`/`b`/`rc` marker following a digit, PEP 440 style — so
-`1.0a1`/`2.0rc1` are prereleases but `release-1.0` is not).
+non-prerelease tag, falling back to the default branch (threaded in as
+`generate --default-branch`, so it need not be `main`/`master`). Prerelease detection
+mirrors `release.yml` — one marker list (`MARKERS`) covering PEP 440 and hyphenated
+semver, following a digit with an optional separator, so `1.0a1`/`2.0rc1`/`1.1.0-beta.1`
+are prereleases while `release-1.0` and `1.0-candidate` are not. The two implementations
+are held together by `test/workflow-harness/test_release_prerelease.py`, not by comment.
+Tag ORDER is `compareTags`, not `git tag --sort=-v:refname`, which ranks a hyphenated
+prerelease above its own release.
 
 ### `stable/` alias
 When a non-prerelease release is deployed, the site serves a `stable/` symlink
@@ -268,8 +290,11 @@ Two top-level workflows: `ci.yml` builds, `publish.yml` listens for it finishing
   ONLY. **One** job, `deploy`: sparse-checks out `assemble.mjs` at `job.workflow_sha` so
   it matches the pinned ref (see "Self-referencing assemble.mjs"), runs inline
   gather + extract, then `assemble.mjs generate`, `upload-pages-artifact`,
-  `deploy-pages` and the origin verify — carrying the `github-pages` environment, perms,
-  and `concurrency: {group: pages, cancel-in-progress: true}`. No event branching: the
+  `deploy-pages` and the origin verify (which polls `site/deploy-id.txt`, a per-deploy
+  stamp — `switcher.json` alone can't detect a wedge, since it is byte-identical whenever
+  the version set is unchanged) — carrying the `github-pages` environment, perms,
+  and `concurrency: {group: pages, cancel-in-progress: false}` — a superseded deploy is
+  QUEUED, never killed mid-`deploy-pages`. No event branching: the
   caller already established success + non-fork. Inputs are `pr`, `max-releases` and
   `max-prs`.
 
@@ -277,8 +302,8 @@ Sub-workflows of `ci.yml`:
 - `_lint.yml` — biome
 - `_test.yml` — `npm test`
 - `docs.yml` — **reusable build, parameterised for cross-repo reuse.** Compute the
-  version name (`pr-<n>` / default-branch / tag) → run `build-command` (required
-  input) with `BASE_URL` + `VERSION_NAME` set (the latter for builds that need the
+  version name (`pr-<n>` / default-branch / tag) and `BASE_URL` (from `base-path`) →
+  run `build-command` (required input) with `BASE_URL` + `VERSION_NAME` set (the latter for builds that need the
   bare token, e.g. a Sphinx conf.py setting pydata's switcher `version_match`) →
   pack `docs.zip` (single root dir `html/`, staged so any `html-dir` works) → upload the `docs`
   artifact. No deploy; `contents: read` only. Installs uv unconditionally and relies on

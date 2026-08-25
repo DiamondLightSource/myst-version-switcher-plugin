@@ -4,7 +4,15 @@ name: Publish
 # nothing but call the engine (publish-gh-pages.yml) when CI finishes. This repo's copy is
 # IDENTICAL to a consumer's but for the `uses:` path — theirs pins
 # DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>,
-# this one uses the local file so the working tree is what gets tested.
+# this one uses the local file, so what deploys is main's tree rather than a pinned
+# release tag.
+#
+# Note what that does NOT mean. Under `workflow_run` GitHub always runs the DEFAULT
+# BRANCH's copy of this file, and `uses: ./…` resolves against that same commit — so a
+# PR that changes publish-gh-pages.yml or assemble.mjs is never exercised by a real
+# deploy before it merges. Engine changes are covered by test/workflow-harness/, which
+# loads the steps out of the YAML and runs them; there is no way to make workflow_run
+# run a PR's version of a workflow.
 #
 # Publishing lives here rather than as a job in ci.yml because it is O(the whole site) and
 # independent of the change, so nesting it put a large constant on every PR's critical

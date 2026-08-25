@@ -182,10 +182,22 @@ workflow does the IO:
 - **`select-artifacts`** — which CI artifact becomes the default branch, and which open
   PRs get a preview, with fork approval resolved by the caller beforehand.
 - **`generate`** — version ordering, prerelease detection, `switcher.json` and the root
-  redirect, the `stable/` alias source, and the required-branch guard.
+  redirect, the `stable/` alias source, and the required-branch guard. (The deploy stamp
+  the verify step polls, `deploy-id.txt`, is written by the workflow alongside it — it is
+  runner state, not a decision.)
 
-Both `select-*` commands rank with the same comparator, so the release cap and the PR cap
-cannot drift apart on how they break a timestamp tie. The `gh`/`unzip`/`mv` IO
+Every version the site serves appears in `switcher.json`, **PR previews included** — a
+`pr-<n>` entry in the dropdown is deliberate, so a reviewer can jump to a preview from
+any page. They are ordered after the default branch and the tags, and disappear when the
+PR closes.
+
+Tags are ordered by `compareTags`, not by `git tag --sort=-v:refname`: git's version sort
+ranks `1.1.0-beta.1` *above* `1.1.0`, and the prerelease rule and the ordering rule are
+better off sharing one marker list than being kept in step by hand.
+
+All the "which of these is newest?" questions — the release cap, the PR cap, the
+default-branch artifact, the newest artifact per head SHA — go through one comparator, so
+they cannot break a timestamp tie differently from each other. The `gh`/`unzip`/`mv` IO
 plumbing lives as inline bash steps in `publish-gh-pages.yml`'s `deploy` job — named
 and separated so step timing and failures are visible in the GH Actions UI, and covered
 by a harness that loads those steps out of the YAML and runs them against a mock `gh`.
