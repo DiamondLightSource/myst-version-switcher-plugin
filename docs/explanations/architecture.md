@@ -299,13 +299,20 @@ The `stable` segment name is a fixed convention, hardcoded in the widget.
 - **PR build not yet green / SHA moved:** an open PR whose current head SHA has no
   successful CI run is skipped; its preview appears once the build passes.
 - **Merged/closed PR:** drops from the gather (open-PRs only) on the next deploy.
-- **Prereleases:** excluded from `preferred`/redirect (an `a`/`b`/`rc` marker
-  following a digit, PEP 440 style — parity with the release workflow; a tag that
-  merely contains those letters, like `release-1.0`, is not a prerelease), but still
-  listed in the switcher if gathered.
-- **Concurrency:** `concurrency: { group: pages, cancel-in-progress: true }`. Cancelling
-  a superseded deploy is safe *because* every deploy reconstructs the whole site — the
-  one that replaces it gathers everything the cancelled one would have.
+- **Prereleases:** excluded from `preferred`/redirect (a marker following a digit, with
+  an optional separator — `1.0a1`, `2.0rc1`, `1.1.0-beta.1`, `2.0.0-rc.1` — parity with
+  the release workflow, held by a drift test; a tag that merely contains those letters,
+  like `release-1.0` or `1.0-candidate`, is not a prerelease), but still listed in the
+  switcher if gathered. They also sort *below* the release they qualify, which is why
+  the tag order is computed in `assemble.mjs` rather than by `git tag --sort=-v:refname`.
+- **Concurrency:** `concurrency: { group: pages, cancel-in-progress: false }`. Deploys
+  serialise, and a superseded one is *queued*, not killed. Cancelling would be safe for
+  our artifact — every deploy reconstructs the whole site, so the next gathers whatever
+  a cancelled one would have — but the kill lands inside `deploy-pages`, between the
+  upload and the Pages backend finishing with it, and that state is not ours to reason
+  about. GitHub's Pages starter workflow uses `false` for the same reason. The cost is
+  bounded: a group holds one pending run, and a newer arrival replaces the pending one
+  before it starts, so a burst costs one extra deploy rather than a queue of them.
 
 ## The release-layer cache
 

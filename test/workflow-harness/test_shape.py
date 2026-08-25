@@ -71,8 +71,13 @@ if link:
           "state=success" in link["run"] and "state=failure" not in link["run"]
           and "state=error" not in link["run"])
 
-check("deploy cancels superseded runs",
-      engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is True,
+# Never cancel a deploy in flight: the kill lands somewhere inside deploy-pages, and
+# the state on the far side of it is the Pages backend's, not ours.
+check("deploy queues superseded runs rather than cancelling them",
+      engine["jobs"]["deploy"]["concurrency"].get("cancel-in-progress") is False,
+      engine["jobs"]["deploy"]["concurrency"])
+check("deploys are serialised on one group",
+      engine["jobs"]["deploy"]["concurrency"].get("group") == "pages",
       engine["jobs"]["deploy"]["concurrency"])
 check("deploy holds no write token beyond what it deploys with",
       engine["jobs"]["deploy"]["permissions"]["actions"] == "read"

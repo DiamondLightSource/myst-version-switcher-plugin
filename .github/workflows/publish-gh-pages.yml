@@ -70,12 +70,22 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    # Cancelling a superseded deploy is safe: every deploy reconstructs the whole site
+    # QUEUE superseded deploys; do not cancel them. The old `cancel-in-progress: true`
+    # was argued from artifact correctness — every deploy reconstructs the whole site
     # from durable sources, so the next one gathers everything the cancelled one would
-    # have.
+    # have — and that argument still holds. It is just not the question. Cancelling
+    # kills the job mid-`deploy-pages`, in the window between the artifact being
+    # uploaded and the Pages backend finishing with it, which is a backend state we do
+    # not control and cannot inspect; GitHub's own Pages starter workflow uses `false`
+    # for exactly this reason, and this workflow already carries a step for detecting a
+    # wedged origin, so the failure it guards against is not hypothetical here.
+    #
+    # The cost is bounded: a concurrency group holds at most ONE pending run, and a
+    # newer arrival cancels the older PENDING one (before it starts, harmlessly). So a
+    # burst of pushes costs one extra full-site deploy, not a pile-up.
     concurrency:
       group: pages
-      cancel-in-progress: true
+      cancel-in-progress: false
     env:
       REPO: ${{ github.repository }}
       # The branch that was actually BUILT — see the header: github.ref is the default
