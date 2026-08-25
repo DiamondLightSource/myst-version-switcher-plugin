@@ -52,6 +52,7 @@ preinstalled Node, so `build-command` can be `make` / `npx` / `tox` / `npm` driv
 |---|---|---|---|
 | `build-command` | **yes** | — | Command that builds the HTML site. Run with `BASE_URL` and `VERSION_NAME` set. Fold any project setup (`npm ci`, `cp CONFIG`, apt deps) into it. |
 | `html-dir` | no | `docs/_build/html` | Directory the build writes the site to. Its contents are staged into `docs.zip`'s `html/` root, so any name works. |
+| `base-path` | no | `""` (→ `/<repo>`) | URL path the site is served at, without the version segment. Set to `/` for a custom domain or an `ORG.github.io` repo — see [custom domains](../how-to/use-a-custom-domain.md). |
 
 ## `publish-gh-pages.yml` — assemble + deploy (privileged)
 
@@ -97,7 +98,10 @@ Every deploy rebuilds the complete tree from authoritative inputs:
 Branch and PR artifacts are found via the **artifacts API by name** (`docs` — the
 artifact name is the contract), not by workflow filename, so the consumer's entry
 workflow can be called anything. The URLs baked into `switcher.json` use the site's
-live Pages URL from the **Pages API**, so a custom domain (CNAME) works.
+live Pages URL from the **Pages API**, so a custom domain (CNAME) is reflected there
+without configuration — but the *pages* those URLs point at are built at whatever
+`docs.yml`'s `base-path` says, so a custom domain needs that input set too. See
+[use-a-custom-domain](../how-to/use-a-custom-domain.md).
 
 Release assets are immutable, so the gather caches them (`actions/cache`, keyed on the
 exact set of asset ids it intends to publish) and downloads only what it has not seen —
@@ -112,8 +116,13 @@ saves are gated on the default branch having been the thing that was built.
 
 A version no longer gathered (a merged/closed PR, a deleted release) is correctly
 dropped, because `deploy-pages` replaces the *entire* site. Sources are gathered in
-priority order (releases lowest, then branch CI, then the current build highest), so a
-fresher source always wins when names collide.
+priority order, so a fresher source always wins when names collide. There are two rungs,
+not three: a release's `docs.zip` (or the migration seed) first, then the branch/PR CI
+artifact over the top. The build that triggered the deploy is not a rung of its own —
+under `workflow_run` the engine runs *after* that build completed, so its `docs`
+artifact is simply the newest one the artifacts API lists. The default branch has a
+third fallback below both: the Actions cache copy, used only when its CI artifact has
+expired.
 
 ## The `docs.zip` / version-name contracts
 
@@ -131,11 +140,14 @@ without passing anything between them:
   is skipped with a warning rather than guessed at.
 - **The version name is the site sub-dir *and* the `BASE_URL`.** It is `pr-<n>` for
   PRs, else the ref name (the default branch, or a tag without `/`). `docs.yml` sets
-  `BASE_URL=/REPO/<version-name>`; nothing passes that name onward, because the gather
-  re-derives the identical string from the same facts (a release's tag, a PR's number,
-  the repo's `default_branch`) and unpacks the zip at `site/<version-name>`. Same name
-  on both sides, so assets never 404. There is **no sanitisation**: version names are
-  clean by construction (the `tags: ['*']` trigger never builds `/`-tags).
+  `BASE_URL=<base-path>/<version-name>`; nothing passes that name onward, because the
+  gather re-derives the identical string from the same facts (a release's tag, a PR's
+  number, the repo's `default_branch`) and unpacks the zip at `site/<version-name>`.
+  Same name on both sides, so assets never 404. The name is **validated**, not assumed
+  clean: it must be non-empty and match `[A-Za-z0-9._-]`, or the build fails with the
+  reason. In this repo it is clean by construction (the `tags: ['*']` trigger never
+  builds `/`-tags), but `docs.yml` is reusable and a consumer can trigger it on any ref
+  they like — git allows `$( )`, backticks and quotes in a ref name.
 
 ## Internals: `assemble.mjs`
 

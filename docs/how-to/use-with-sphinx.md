@@ -17,7 +17,8 @@ by following this page by hand.
 ## 1. Configure the theme's switcher in `conf.py`
 
 `docs.yml` exports two env vars to your build: `BASE_URL` (the sub-path this build is
-served at, `/REPO/<version-name>`) and `VERSION_NAME` (the bare version token —
+served at — `/REPO/<version-name>`, or `<base-path>/<version-name>` if you
+[set one](use-a-custom-domain.md)) and `VERSION_NAME` (the bare version token —
 `pr-<n>`, the default branch, or the tag). Wire them into the theme:
 
 ```python

@@ -12,6 +12,16 @@ on:
         required: false
         default: docs/_build/html
         type: string
+      base-path:
+        description: >-
+          URL path the SITE is served at, without the version segment. Empty (the
+          default) means /<repo>, which is where a project Pages site lives
+          (https://ORG.github.io/REPO/). Set it to "/" for a custom domain (CNAME) or an
+          ORG.github.io repo — both serve from the root, where a /<repo> prefix would
+          404 every root-absolute asset.
+        required: false
+        default: ""
+        type: string
 
 # REUSABLE docs build — the UNPRIVILEGED half, shared across MyST projects. Builds
 # the docs at the versioned BASE_URL and uploads this build's `docs` artifact
@@ -81,12 +91,14 @@ jobs:
       # quotes in a ref name. Hence both halves here: the ref comes through `env:` so
       # the shell never parses it as script text, and the character set is then checked
       # so it stays a safe URL path segment and site dir.
-      - name: Compute version name
+      - name: Compute version name and BASE_URL
         id: ver
         env:
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REF_NAME: ${{ github.ref_name }}
+          BASE_PATH: ${{ inputs.base-path }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = pull_request ]; then
@@ -108,8 +120,20 @@ jobs:
           fi
           echo "version-name=$name" >> "$GITHUB_OUTPUT"
 
-      # BASE_URL must match the versioned sub-path the build is served at, or its
-      # root-absolute assets 404 — see the version-name contract above.
+          # BASE_URL must match the versioned sub-path the site is served at, or the
+          # build's root-absolute assets 404. The site half of it is base-path, which
+          # defaults to /<repo> — right for a project Pages site, wrong for a custom
+          # domain or an ORG.github.io repo, which serve at the root. Normalise to
+          # exactly one leading slash and no trailing one, so "/", "/repo" and "repo/"
+          # all compose the same way.
+          base="${BASE_PATH:-/$REPO_NAME}"
+          base="/${base#/}"
+          base="${base%/}"
+          echo "BASE_URL=$base/$name" >> "$GITHUB_ENV"
+          echo "version name: $name    BASE_URL: $base/$name"
+
+      # BASE_URL arrives via GITHUB_ENV from the step above (it needs base-path's
+      # normalisation, which an `env:` expression cannot do).
       # VERSION_NAME is the bare version token, exported for builds
       # that need it directly — e.g. a Sphinx conf.py setting pydata-sphinx-theme's
       # switcher `version_match` — without parsing it back out of BASE_URL.
@@ -117,7 +141,6 @@ jobs:
       # and is run with `eval` so compound commands work.
       - name: Build docs
         env:
-          BASE_URL: /${{ github.event.repository.name }}/${{ steps.ver.outputs.version-name }}
           VERSION_NAME: ${{ steps.ver.outputs.version-name }}
           BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
