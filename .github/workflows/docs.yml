@@ -103,6 +103,15 @@ jobs:
           set -euo pipefail
           if [ "$EVENT" = pull_request ]; then
             name="pr-$PR_NUMBER"
+          elif [ "$EVENT" = merge_group ]; then
+            # merge_group's ref_name is GitHub's internal
+            # gh-readonly-queue/<base-branch>/pr-<n>-<sha> — it contains '/' (and, via
+            # the base branch, whatever else a branch name allows) so it fails the check
+            # below outright. This build is never gathered: the site-side gather only
+            # reads the default branch's HEAD artifact, open PRs' artifacts and release
+            # zips, never a merge queue's temporary branch, so the name just needs to be
+            # a valid path segment, not a parse of GitHub's ref.
+            name="merge-queue"
           else
             name="$REF_NAME"
           fi
