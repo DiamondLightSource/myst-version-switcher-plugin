@@ -69,7 +69,7 @@ The three guards in the shipped `if:` are not style:
   queue entry triggers a full site reassemble-and-redeploy that changes nothing, on top
   of the deploy the subsequent push to the base branch already causes.
 
-Both fail *open* if removed — the site keeps deploying and nothing looks wrong — so
+All three fail *open* if removed — the site keeps deploying and nothing looks wrong — so
 `test/workflow-harness/test_shape.py` asserts them in this repo. Consider the same if you
 edit your copy.
 

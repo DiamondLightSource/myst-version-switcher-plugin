@@ -201,7 +201,7 @@ one dispatched from another ref, whose entry only that ref could ever read. They
 
 Because that lives in an `if:` expression rather than a shell script, the gather harness
 cannot reach it; `test/workflow-harness/test_shape.py` asserts it structurally, along with
-the caller's two guards — all of which fail *open*, and so would never announce themselves.
+the caller's three guards — all of which fail *open*, and so would never announce themselves.
 
 ### Fork PRs still cannot deploy themselves
 
