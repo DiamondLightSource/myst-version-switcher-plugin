@@ -97,6 +97,8 @@ guard = str(caller["jobs"]["publish"]["if"])
 check("requires the triggering run to have succeeded",
       "conclusion == 'success'" in guard, guard)
 check("excludes forks", "head_repository.full_name == github.repository" in guard, guard)
+check("excludes merge_group runs (never gathered, so a no-op redeploy)",
+      "workflow_run.event != 'merge_group'" in guard, guard)
 check("still allows a manual dispatch", "workflow_dispatch" in guard, guard)
 
 # Site-size policy has to hold on EVERY path into the engine, and this workflow is its

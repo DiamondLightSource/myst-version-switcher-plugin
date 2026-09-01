@@ -173,7 +173,14 @@ jobs:
           ( cd "$staging" && zip -rq "$RUNNER_TEMP/docs.zip" html )
 
       # compression-level 0: docs.zip is already compressed.
+      #
+      # Skipped on merge_group: that build's version name is the fixed literal
+      # "merge-queue" (see the step above), and the site-side gather never looks for
+      # it — only the default branch's HEAD artifact, open PRs' artifacts and release
+      # zips are gathered. Uploading it anyway would be pure storage churn against the
+      # repo's Actions quota, once per queue entry.
       - name: Upload docs artifact
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@v7
         with:
           name: docs

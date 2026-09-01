@@ -124,14 +124,19 @@ on:
 
 jobs:
   publish:
-    # Both guards matter. `conclusion` because workflow_run fires on failed runs too, and
-    # a failed run has no usable docs artifact. `head_repository` because workflow_run
-    # gets a WRITE token even when a fork's PR triggered it — without this, untrusted
-    # code reaches your live site. Both fail OPEN if removed.
+    # All three guards matter. `conclusion` because workflow_run fires on failed runs
+    # too, and a failed run has no usable docs artifact. `head_repository` because
+    # workflow_run gets a WRITE token even when a fork's PR triggered it — without this,
+    # untrusted code reaches your live site. `event != 'merge_group'` because a
+    # merge-queue build is never gathered (it has no artifact to gather), so without
+    # this term every queue entry triggers a full, no-op site redeploy on top of the one
+    # the subsequent push to the base branch already causes. All three fail OPEN if
+    # removed.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event != 'merge_group')
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@__LATEST_TAG__
     with:
       pr: ${{ inputs.pr }}

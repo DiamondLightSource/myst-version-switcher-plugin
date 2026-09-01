@@ -38,6 +38,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event != 'merge_group' &&
        github.event.workflow_run.event != 'pull_request')
 ```
 
@@ -54,7 +55,7 @@ release's deploy was the only chance that release ever had to reach the site.
 
 ## What you must not remove
 
-The two guards in the shipped `if:` are not style:
+The three guards in the shipped `if:` are not style:
 
 - **`conclusion == 'success'`** — `workflow_run` fires on failed runs too, and a failed
   run has no usable `docs` artifact.
@@ -63,6 +64,10 @@ The two guards in the shipped `if:` are not style:
   untrusted code a privileged path to your live site. Fork builds reach the site only
   when a maintainer dispatches `publish.yml` with a `pr` number, which records approval
   against that exact head SHA.
+- **`event != 'merge_group'`** — a merge-queue build's `docs` artifact is never uploaded
+  and never gathered (see `docs.yml`'s version-name step), so without this term every
+  queue entry triggers a full site reassemble-and-redeploy that changes nothing, on top
+  of the deploy the subsequent push to the base branch already causes.
 
 Both fail *open* if removed — the site keeps deploying and nothing looks wrong — so
 `test/workflow-harness/test_shape.py` asserts them in this repo. Consider the same if you
