@@ -362,6 +362,17 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"an unusable version name is rejected ({bad!r})",
               r.returncode != 0 and "not usable as a URL path segment" in log(r), log(r))
 
+with tempfile.TemporaryDirectory() as tmp:
+    # merge_group's ref_name is GitHub's own gh-readonly-queue/<base>/pr-<n>-<sha> —
+    # it contains '/' and would otherwise fail the same check as "feature/x" above.
+    # This build is never gathered (the gather never reads a merge queue's temporary
+    # branch), so a fixed, valid name is enough — no need to parse GitHub's ref.
+    built = docs_yml_version_name(
+        tmp, "merge_group",
+        ref_name="gh-readonly-queue/main/pr-1645-579cb18403ab661103b5e1093396e45b2e91939f")
+    check(f"a merge_group build gets a fixed, valid name ({built!r})",
+          built == "merge-queue", built)
+
 print("\n-- linking the published docs back to the triggering commit --")
 def link(tmp, *, dirs=(), built_branch="main", **exprs):
     env, rt, data = setup(tmp, [], [], [])

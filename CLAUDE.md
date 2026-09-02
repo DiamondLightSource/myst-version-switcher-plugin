@@ -205,9 +205,9 @@ Both cache-save steps ask this question — gated on `github.ref` they would fir
 deploy, including one dispatched from a non-default ref, whose entry only that ref can
 read.
 
-`test/workflow-harness/test_shape.py` asserts this, plus the caller's two guards
-(`conclusion == 'success'`, `head_repository == this repo`). All three **fail OPEN**, and
-they live in `if:` expressions the gather harness can't reach.
+`test/workflow-harness/test_shape.py` asserts this, plus the caller's three guards
+(`conclusion == 'success'`, `head_repository == this repo`, `event != 'merge_group'`).
+All four **fail OPEN**, and they live in `if:` expressions the gather harness can't reach.
 
 **The fork guard is not optional:** `workflow_run` runs with a WRITE token even when a
 fork's PR triggered it (pwn-request). Fork builds reach the site only via a maintainer
@@ -281,9 +281,10 @@ Two top-level workflows: `ci.yml` builds, `publish.yml` listens for it finishing
   publishing.
 - `publish.yml` — **the file each consumer carries**, and the one place `<tag>` is
   pinned. `workflow_run` (CI completing) + `workflow_dispatch` (fork-PR preview via `pr`,
-  manual re-deploy) → `publish-gh-pages.yml`. Its job `if:` carries the two guards that
-  fail open (`conclusion == 'success'`, `head_repository == this repo`) and the
-  `max-releases`/`max-prs` literals. This repo's copy is identical to a consumer's but
+  manual re-deploy) → `publish-gh-pages.yml`. Its job `if:` carries the three guards that
+  fail open (`conclusion == 'success'`, `head_repository == this repo`,
+  `event != 'merge_group'`) and the `max-releases`/`max-prs` literals. This repo's copy
+  is identical to a consumer's but
   for the `uses:` path (local vs pinned) — same `30`/`20` caps, so the file people copy
   is the file that is actually exercised.
 - `publish-gh-pages.yml` — **assemble + deploy ENGINE, privileged.** `workflow_call`
@@ -419,16 +420,17 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event != 'merge_group')
     uses: DiamondLightSource/myst-version-switcher-plugin/.github/workflows/publish-gh-pages.yml@<tag>
     with: { pr: "${{ inputs.pr }}", max-releases: "30", max-prs: "20" }
     permissions: { pages: write, id-token: write, contents: read, actions: read, statuses: write }
 ```
 
 `ci.yml` has **no** publish job. Copy `publish.yml` verbatim from the
-[tutorial](docs/tutorials/adding-to-a-fresh-repo.md) rather than hand-rolling it — both
-`if:` guards fail OPEN, and `workflows: [CI]` matches the entry workflow by NAME, so
-renaming it silently stops publishing.
+[tutorial](docs/tutorials/adding-to-a-fresh-repo.md) rather than hand-rolling it — all
+three `if:` guards fail OPEN, and `workflows: [CI]` matches the entry workflow by NAME,
+so renaming it silently stops publishing.
 
 ## Upstreaming
 

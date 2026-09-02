@@ -201,7 +201,7 @@ one dispatched from another ref, whose entry only that ref could ever read. They
 
 Because that lives in an `if:` expression rather than a shell script, the gather harness
 cannot reach it; `test/workflow-harness/test_shape.py` asserts it structurally, along with
-the caller's two guards — all of which fail *open*, and so would never announce themselves.
+the caller's three guards — all of which fail *open*, and so would never announce themselves.
 
 ### Fork PRs still cannot deploy themselves
 
@@ -211,6 +211,16 @@ therefore requires `head_repository.full_name == github.repository`, so a fork's
 never reaches the engine automatically. A maintainer publishes a preview by dispatching
 `publish.yml` with the PR number, which records approval against that exact head SHA; a
 later push to the PR drops the preview until re-approved.
+
+### merge_group runs are excluded too
+
+A merge-queue CI run gets a valid but fixed version name (`merge-queue`, see `docs.yml`)
+so the build itself does not hard-fail — but that build's artifact is deliberately never
+uploaded, and the gather never looks for it. Without a third guard term,
+`github.event.workflow_run.event != 'merge_group'`, the caller's other two guards both
+still pass for such a run, so `publish.yml` would fire the engine anyway: a full
+reassemble-and-deploy that changes nothing, once per queue entry, on top of the deploy the
+subsequent push to the base branch already triggers.
 
 ## The inline-bash / JS split inside `assemble`
 

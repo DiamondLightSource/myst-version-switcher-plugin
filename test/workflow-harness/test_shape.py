@@ -97,6 +97,8 @@ guard = str(caller["jobs"]["publish"]["if"])
 check("requires the triggering run to have succeeded",
       "conclusion == 'success'" in guard, guard)
 check("excludes forks", "head_repository.full_name == github.repository" in guard, guard)
+check("excludes merge_group runs (never gathered, so a no-op redeploy)",
+      "workflow_run.event != 'merge_group'" in guard, guard)
 check("still allows a manual dispatch", "workflow_dispatch" in guard, guard)
 
 # Site-size policy has to hold on EVERY path into the engine, and this workflow is its
@@ -151,6 +153,19 @@ for name in sorted(os.listdir(WF)):
 print("\n-- entry: ci.yml --")
 check("builds without publishing", "publish" not in ci["jobs"], list(ci["jobs"]))
 check("uploads the docs artifact the engine gathers", "docs" in ci["jobs"], list(ci["jobs"]))
+
+print("\n-- reusable: docs.yml --")
+docs_wf = load("docs.yml")
+docs_steps = docs_wf["jobs"]["build"]["steps"]
+upload = next((s for s in docs_steps if s.get("name") == "Upload docs artifact"), None)
+check("has an 'Upload docs artifact' step", upload is not None, [s.get("name") for s in docs_steps])
+if upload:
+    # merge_group's version name is a fixed literal shared by every PR in the batch, so
+    # publishing it would overwrite an unrelated version's site — see the code comment
+    # above this step for why the build still runs but the upload is skipped.
+    check("skips uploading on merge_group",
+          "github.event_name != 'merge_group'" in str(upload.get("if", "")),
+          upload.get("if"))
 
 print("\n" + ("FAILURES: " + ", ".join(fails) if fails else "all shape checks passed"))
 sys.exit(1 if fails else 0)

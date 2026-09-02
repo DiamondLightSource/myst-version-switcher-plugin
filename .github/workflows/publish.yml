@@ -37,7 +37,7 @@ on:
 
 jobs:
   publish:
-    # Two guards, both load-bearing:
+    # Three guards, all load-bearing:
     #
     #   conclusion == 'success' — a failed CI run has no usable docs artifact, and
     #   workflow_run fires on failures too.
@@ -49,12 +49,19 @@ jobs:
     #   dispatches this workflow with `pr`, which records an approval against that exact
     #   head SHA — so a later push to the PR drops the preview until re-approved.
     #
-    # A manual dispatch has no `workflow_run` payload, so both terms are empty and the
-    # first clause carries it. Removing either guard fails OPEN.
+    #   event != 'merge_group' — a merge-queue CI run's docs.yml build is never uploaded
+    #   (its version name is the fixed "merge-queue" literal, and the gather never looks
+    #   for it), so gathering here would only reassemble and redeploy a site that changes
+    #   nothing — once per queue entry, on top of the deploy the subsequent push to the
+    #   base branch already triggers.
+    #
+    # A manual dispatch has no `workflow_run` payload, so all three terms are empty and the
+    # first clause carries it. Removing any of the three guards fails OPEN.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event != 'merge_group')
     uses: ./.github/workflows/publish-gh-pages.yml
     with:
       # Set (dispatch only) → approve and preview that fork PR's head SHA.

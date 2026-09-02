@@ -103,6 +103,15 @@ jobs:
           set -euo pipefail
           if [ "$EVENT" = pull_request ]; then
             name="pr-$PR_NUMBER"
+          elif [ "$EVENT" = merge_group ]; then
+            # merge_group's ref_name is GitHub's internal
+            # gh-readonly-queue/<base-branch>/pr-<n>-<sha> — it contains '/' (and, via
+            # the base branch, whatever else a branch name allows) so it fails the check
+            # below outright. This build is never gathered: the site-side gather only
+            # reads the default branch's HEAD artifact, open PRs' artifacts and release
+            # zips, never a merge queue's temporary branch, so the name just needs to be
+            # a valid path segment, not a parse of GitHub's ref.
+            name="merge-queue"
           else
             name="$REF_NAME"
           fi
@@ -164,7 +173,14 @@ jobs:
           ( cd "$staging" && zip -rq "$RUNNER_TEMP/docs.zip" html )
 
       # compression-level 0: docs.zip is already compressed.
+      #
+      # Skipped on merge_group: that build's version name is the fixed literal
+      # "merge-queue" (see the step above), and the site-side gather never looks for
+      # it — only the default branch's HEAD artifact, open PRs' artifacts and release
+      # zips are gathered. Uploading it anyway would be pure storage churn against the
+      # repo's Actions quota, once per queue entry.
       - name: Upload docs artifact
+        if: github.event_name != 'merge_group'
         uses: actions/upload-artifact@v7
         with:
           name: docs
